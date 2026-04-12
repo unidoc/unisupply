@@ -1,0 +1,9 @@
+.DS_Store
+.idea
+
+# Claude files and local settings
+.claude/plans
+.claude/projects
+.claude/settings.local.*
+
+bin/

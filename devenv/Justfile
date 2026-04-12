@@ -1,0 +1,113 @@
+# =============================================================================
+# Tower Dev Environment
+# =============================================================================
+# just build       → Byggja gáminn
+# just up          → Ræsa í bakgrunni
+# just attach      → Tengjast skelinni
+# just run-webdev  → Flask dev server
+# just flask       → Flask dev server (via bash alias)
+# just claude      → Ræsa Claude Code
+# just down        → Stöðva
+# =============================================================================
+
+set dotenv-load
+
+container := "unisupply-dev"
+
+# ── Lifecycle ────────────────────────────────────────────────────────────────
+
+# Byggja Docker image
+build:
+    docker compose build
+
+# Byggja án cache (full rebuild)
+rebuild:
+    docker compose build --no-cache
+
+# Ræsa gáminn í bakgrunni
+up:
+    PUID=$(id -u) PGID=$(id -g) docker compose up -d
+
+# Byggja og ræsa
+boot: build up
+    @echo "✓ unisupply-dev running — just attach to connect"
+
+# Stöðva gáminn
+down:
+    docker compose down
+
+# Stöðva og eyða volumes (clean slate)
+nuke:
+    docker compose down -v
+    @echo "✓ Volumes removed — next boot will rebuild venv and caches"
+
+# Ræsa aftur
+restart:
+    docker compose restart
+
+# ── Tengjast ─────────────────────────────────────────────────────────────────
+
+# Tengjast skelinni í gámnum (primary workflow)
+attach:
+    docker compose exec -u tower unisupply bash
+
+attach-root:
+    docker compose exec unisupply bash
+
+
+# ── Keyra skipanir beint ─────────────────────────────────────────────────────
+
+# Flask dev server (streamed output)
+flask:
+    docker compose exec unisupply bash -lc "rundev"
+
+# Ræsa Claude Code
+claude:
+    docker compose exec -u tower unisupply bash -lc "claude"
+
+# Halda áfram með síðasta Claude session
+claude-continue:
+    docker compose exec -u tower unisupply bash -lc "claude --continue"
+
+# Velja Claude session til að halda áfram með
+claude-resume:
+    docker compose exec -u tower unisupply bash -lc "claude --resume"
+
+# Keyra handahófskennda skipun í gámnum
+run +CMD:
+    docker compose exec unisupply bash -lc "{{ CMD }}"
+
+# ── Git (inni í gámnum) ─────────────────────────────────────────────────────
+
+# Git status
+gs:
+    docker compose exec unisupply bash -lc "git status"
+
+# Git log
+gl:
+    docker compose exec unisupply bash -lc "git log --oneline -20"
+
+# ── Go / UniDoc ──────────────────────────────────────────────────────────────
+
+# Go build
+go-build:
+    docker compose exec unisupply bash -lc "cd /home/tower/workspace/unisupply-web && go build ./..."
+
+# Go test
+go-test:
+    docker compose exec unisupply bash -lc "cd /home/tower/workspace/unisupply-web && go test ./..."
+
+# ── Upplýsingar ─────────────────────────────────────────────────────────────
+
+# Sýna stöðu gámsins
+status:
+    @docker compose ps
+
+# Logs
+logs:
+    docker compose logs -f unisupply
+
+# Sýna allar just skipanir
+help:
+    @just --list
+

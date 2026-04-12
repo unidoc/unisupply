@@ -1,0 +1,33 @@
+# =============================================================================
+# UniSupply Dev Runtime
+# =============================================================================
+# Editor á hostinum, runtime í gámnum.
+# Sjá Justfile fyrir skipanir.
+# =============================================================================
+
+services:
+  unisupply:
+    build:
+      context: .
+      args:
+        CRONTAB_URL_DEPS: ${CRONTAB_URL_DEPS:-https://go.dev/dl}
+        GO_DL: ${GO_DL:-go1.25.3.linux-amd64.tar.gz}
+    container_name: unisupply-dev
+    hostname: unisupply-dev
+    stdin_open: true
+    tty: true
+    volumes:
+      # Project source (edit on host, run in container)
+      - ${HOME}/Projects/unisupply:/home/tower/workspace/unisupply
+      - ${HOME}/Projects/unitrust:/home/tower/workspace/unitrust
+      - ${HOME}/.claude:/home/tower/.claude
+      - ${HOME}/.claude.json:/home/tower/.claude.json
+
+      # SSH keys for git (read-only)
+      - ${HOME}/.ssh:/home/tower/.ssh:ro
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  go-cache:
