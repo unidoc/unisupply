@@ -58,7 +58,6 @@ func main() {
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
 
-
 	flag.Parse()
 
 	if showHelp {
