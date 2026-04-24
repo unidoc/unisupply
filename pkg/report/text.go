@@ -29,12 +29,12 @@ const (
 
 // TextOptions configures text output.
 type TextOptions struct {
-	NoColor    bool
-	Verbose    bool
-	MinRisk    int
-	Writer     io.Writer
-	CIReport   *scanner.CIReport
-	Takeovers  []*scanner.MaintainerInfo
+	NoColor     bool
+	Verbose     bool
+	MinRisk     int
+	Writer      io.Writer
+	CIReport    *scanner.CIReport
+	Takeovers   []*scanner.MaintainerInfo
 	StdlibVulns []scanner.Vulnerability
 }
 
