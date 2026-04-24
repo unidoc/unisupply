@@ -10,8 +10,8 @@ import (
 // AIGenRisk holds AI-generated code supply chain attack indicators.
 type AIGenRisk struct {
 	Module     string   `json:"module"`
-	RiskLevel  string   `json:"risk_level"`  // "none", "low", "medium", "high"
-	Score      int      `json:"score"`       // 0-100
+	RiskLevel  string   `json:"risk_level"` // "none", "low", "medium", "high"
+	Score      int      `json:"score"`      // 0-100
 	Indicators []string `json:"indicators"`
 }
 

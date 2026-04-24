@@ -8,11 +8,11 @@ import (
 
 // TyposquatResult holds typosquatting analysis for a module.
 type TyposquatResult struct {
-	Module        string  `json:"module"`
-	SimilarTo     string  `json:"similar_to"`
-	Distance      int     `json:"distance"`
-	Confidence    float64 `json:"confidence"` // 0.0-1.0, higher = more suspicious
-	Indicators    []string `json:"indicators"`
+	Module     string   `json:"module"`
+	SimilarTo  string   `json:"similar_to"`
+	Distance   int      `json:"distance"`
+	Confidence float64  `json:"confidence"` // 0.0-1.0, higher = more suspicious
+	Indicators []string `json:"indicators"`
 }
 
 // wellKnownModules is a list of popular Go modules that typosquatters target.

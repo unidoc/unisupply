@@ -14,11 +14,11 @@ import (
 
 // MaintenanceInfo holds maintenance health data for a module.
 type MaintenanceInfo struct {
-	LastRelease       time.Time `json:"last_release"`
-	MonthsSinceRelease int      `json:"months_since_release"`
-	Archived          bool      `json:"archived"`
-	Deprecated        bool      `json:"deprecated"`
-	LatestVersion     string    `json:"latest_version"`
+	LastRelease        time.Time `json:"last_release"`
+	MonthsSinceRelease int       `json:"months_since_release"`
+	Archived           bool      `json:"archived"`
+	Deprecated         bool      `json:"deprecated"`
+	LatestVersion      string    `json:"latest_version"`
 }
 
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
