@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/unidoc/unisupply/pkg/scorer"
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
 // TestWriteCycloneDX_ValidJSON tests that WriteCycloneDX produces valid JSON.

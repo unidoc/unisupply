@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
-	"github.com/unidoc/unisupply/internal/testutil"
 )
 
 // TestWriteText_ContainsSummary tests that output contains overall risk score and level.

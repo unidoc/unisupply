@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
-	"github.com/unidoc/unisupply/internal/testutil"
 )
 
 // TestWriteJSON_ValidOutput tests that WriteJSON produces valid JSON with expected top-level keys.
