@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -157,6 +158,10 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 			DependsOn: children,
 		})
 	}
+
+	sort.Slice(bom.Components, func(i, j int) bool {
+		return bom.Components[i].Name < bom.Components[j].Name
+	})
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")

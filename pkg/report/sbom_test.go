@@ -128,28 +128,32 @@ func TestWriteCycloneDX_Components(t *testing.T) {
 		t.Fatalf("Components length = %d, want 2", len(bom.Components))
 	}
 
-	// Check first component
-	comp1 := bom.Components[0]
-	if comp1.Name != "github.com/pkg1" {
-		t.Errorf("Components[0].Name = %q, want %q", comp1.Name, "github.com/pkg1")
-	}
-	if comp1.Version != "v1.0.0" {
-		t.Errorf("Components[0].Version = %q, want %q", comp1.Version, "v1.0.0")
-	}
-	if comp1.Scope != "required" {
-		t.Errorf("Components[0].Scope = %q, want %q", comp1.Scope, "required")
+	// Build a lookup map so the test is independent of component order.
+	byName := make(map[string]cdxComponent, len(bom.Components))
+	for _, c := range bom.Components {
+		byName[c.Name] = c
 	}
 
-	// Check second component
-	comp2 := bom.Components[1]
-	if comp2.Name != "github.com/pkg2" {
-		t.Errorf("Components[1].Name = %q, want %q", comp2.Name, "github.com/pkg2")
+	comp1, ok := byName["github.com/pkg1"]
+	if !ok {
+		t.Fatal("component github.com/pkg1 not found")
+	}
+	if comp1.Version != "v1.0.0" {
+		t.Errorf("pkg1 Version = %q, want %q", comp1.Version, "v1.0.0")
+	}
+	if comp1.Scope != "required" {
+		t.Errorf("pkg1 Scope = %q, want %q", comp1.Scope, "required")
+	}
+
+	comp2, ok := byName["github.com/pkg2"]
+	if !ok {
+		t.Fatal("component github.com/pkg2 not found")
 	}
 	if comp2.Version != "v2.0.0" {
-		t.Errorf("Components[1].Version = %q, want %q", comp2.Version, "v2.0.0")
+		t.Errorf("pkg2 Version = %q, want %q", comp2.Version, "v2.0.0")
 	}
 	if comp2.Scope != "optional" {
-		t.Errorf("Components[1].Scope = %q, want %q", comp2.Scope, "optional")
+		t.Errorf("pkg2 Scope = %q, want %q", comp2.Scope, "optional")
 	}
 }
 
