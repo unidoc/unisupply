@@ -67,8 +67,13 @@ func TestEncodeModulePath(t *testing.T) {
 }
 
 // TestMonthsSince verifies calculation of months since a given time.
+// A fixed reference date (15th of the month) is used for both "now" and the
+// base for all offsets so that AddDate never rolls into the wrong month due to
+// end-of-month day differences.
 func TestMonthsSince(t *testing.T) {
-	now := time.Now()
+	// Day 15 is safe: subtracting any number of months from the 15th always
+	// lands on the 15th of the target month, regardless of month length.
+	ref := time.Date(2024, time.June, 15, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name     string
@@ -78,47 +83,46 @@ func TestMonthsSince(t *testing.T) {
 		// Zero time (not set)
 		{name: "zero_time", time: time.Time{}, expected: 0},
 
-		// Exactly today (0 months)
-		{name: "today", time: now, expected: 0},
+		// Exactly the reference instant (0 months)
+		{name: "today", time: ref, expected: 0},
 
 		// Yesterday (< 1 month, so 0)
-		{name: "yesterday", time: now.AddDate(0, 0, -1), expected: 0},
+		{name: "yesterday", time: ref.AddDate(0, 0, -1), expected: 0},
 
 		// 1 month ago
-		{name: "one_month_ago", time: now.AddDate(0, -1, 0), expected: 1},
+		{name: "one_month_ago", time: ref.AddDate(0, -1, 0), expected: 1},
 
 		// 6 months ago
-		{name: "six_months_ago", time: now.AddDate(0, -6, 0), expected: 6},
+		{name: "six_months_ago", time: ref.AddDate(0, -6, 0), expected: 6},
 
 		// 12 months ago (1 year)
-		{name: "twelve_months_ago", time: now.AddDate(0, -12, 0), expected: 12},
+		{name: "twelve_months_ago", time: ref.AddDate(0, -12, 0), expected: 12},
 
 		// 18 months ago (1 year 6 months)
-		{name: "eighteen_months_ago", time: now.AddDate(0, -18, 0), expected: 18},
+		{name: "eighteen_months_ago", time: ref.AddDate(0, -18, 0), expected: 18},
 
 		// 24 months ago (2 years)
-		{name: "twenty_four_months_ago", time: now.AddDate(-2, 0, 0), expected: 24},
+		{name: "twenty_four_months_ago", time: ref.AddDate(-2, 0, 0), expected: 24},
 
 		// Multiple years
-		{name: "three_years_ago", time: now.AddDate(-3, 0, 0), expected: 36},
+		{name: "three_years_ago", time: ref.AddDate(-3, 0, 0), expected: 36},
 
 		// Future time (should return 0, clamped)
-		{name: "future_one_month", time: now.AddDate(0, 1, 0), expected: 0},
-		{name: "future_one_year", time: now.AddDate(1, 0, 0), expected: 0},
+		{name: "future_one_month", time: ref.AddDate(0, 1, 0), expected: 0},
+		{name: "future_one_year", time: ref.AddDate(1, 0, 0), expected: 0},
 
-		// Edge case: nearly next month (may cross month boundary depending on current date)
-		{name: "twenty_nine_days_ago", time: now.AddDate(0, 0, -15), expected: 0},
+		// Within the same month (< 1 month) — use 5 days so it stays in June
+		{name: "five_days_ago", time: ref.AddDate(0, 0, -5), expected: 0},
 
-		// Edge case: into next month boundary
-		// (depends on exact day, but this tests the logic)
-		{name: "month_boundary_test", time: now.AddDate(0, -1, -5), expected: 1},
+		// One month and a few days ago (still counts as 1 month)
+		{name: "month_boundary_test", time: ref.AddDate(0, -1, -5), expected: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := monthsSince(tt.time)
+			got := monthsSince(ref, tt.time)
 			if got != tt.expected {
-				t.Errorf("monthsSince(%v) = %d, want %d (now=%v)", tt.time, got, tt.expected, now)
+				t.Errorf("monthsSince(%v) = %d, want %d (ref=%v)", tt.time, got, tt.expected, ref)
 			}
 		})
 	}

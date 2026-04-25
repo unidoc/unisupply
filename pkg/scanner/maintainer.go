@@ -300,7 +300,7 @@ func classifyActivity(lastCommit time.Time) string {
 	if lastCommit.IsZero() {
 		return "unknown"
 	}
-	months := monthsSince(lastCommit)
+	months := monthsSince(time.Now(), lastCommit)
 	switch {
 	case months < 3:
 		return "active"

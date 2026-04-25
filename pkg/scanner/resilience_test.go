@@ -42,6 +42,10 @@ func makeResGraph(deps ...resDepSpec) *resolver.Graph {
 }
 
 func TestClassifyCadence(t *testing.T) {
+	// Fixed reference date (day=15) so that AddDate month arithmetic never
+	// rolls forward into the next month due to end-of-month day differences.
+	ref := time.Date(2024, time.June, 15, 0, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name        string
 		info        *ResilienceInfo
@@ -68,7 +72,7 @@ func TestClassifyCadence(t *testing.T) {
 			name: "stale_30_months",
 			info: &ResilienceInfo{
 				TotalReleases:   10,
-				LastReleaseDate: time.Now().AddDate(0, -30, 0),
+				LastReleaseDate: ref.AddDate(0, -30, 0),
 			},
 			expected:    "stale",
 			description: "project with last release 30+ months ago classified as stale",
@@ -78,7 +82,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   5,
 				AvgDaysBetween:  20.0,
-				LastReleaseDate: time.Now().AddDate(0, 0, -5),
+				LastReleaseDate: ref.AddDate(0, 0, -5),
 			},
 			expected:    "frequent",
 			description: "project with average 20 days between releases classified as frequent",
@@ -88,7 +92,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   10,
 				AvgDaysBetween:  60.0,
-				LastReleaseDate: time.Now().AddDate(0, 0, -10),
+				LastReleaseDate: ref.AddDate(0, 0, -10),
 			},
 			expected:    "regular",
 			description: "project with average 60 days between releases classified as regular",
@@ -98,7 +102,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   8,
 				AvgDaysBetween:  120.0,
-				LastReleaseDate: time.Now().AddDate(0, -3, 0),
+				LastReleaseDate: ref.AddDate(0, -3, 0),
 			},
 			expected:    "slow",
 			description: "project with average 120 days between releases classified as slow",
@@ -108,7 +112,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   5,
 				AvgDaysBetween:  200.0,
-				LastReleaseDate: time.Now().AddDate(0, 0, -10),
+				LastReleaseDate: ref.AddDate(0, 0, -10),
 			},
 			expected:    "stale",
 			description: "project with average 200 days between releases classified as stale",
@@ -118,7 +122,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   10,
 				AvgDaysBetween:  29.9,
-				LastReleaseDate: time.Now().AddDate(0, 0, -5),
+				LastReleaseDate: ref.AddDate(0, 0, -5),
 			},
 			expected:    "frequent",
 			description: "project with 29.9 days average stays in frequent range",
@@ -128,7 +132,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   10,
 				AvgDaysBetween:  89.9,
-				LastReleaseDate: time.Now().AddDate(0, 0, -10),
+				LastReleaseDate: ref.AddDate(0, 0, -10),
 			},
 			expected:    "regular",
 			description: "project with 89.9 days average stays in regular range",
@@ -138,7 +142,7 @@ func TestClassifyCadence(t *testing.T) {
 			info: &ResilienceInfo{
 				TotalReleases:   10,
 				AvgDaysBetween:  179.9,
-				LastReleaseDate: time.Now().AddDate(0, -5, 0),
+				LastReleaseDate: ref.AddDate(0, -5, 0),
 			},
 			expected:    "slow",
 			description: "project with 179.9 days average stays in slow range",
@@ -147,7 +151,7 @@ func TestClassifyCadence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := classifyCadence(tt.info)
+			result := classifyCadence(ref, tt.info)
 			if result != tt.expected {
 				t.Errorf("classifyCadence(%s) = %q, want %q", tt.name, result, tt.expected)
 			}

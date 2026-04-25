@@ -136,15 +136,13 @@ func TestMaintenanceScanner_ScanAll_ErrorHandling(t *testing.T) {
 	results, err := ms.ScanAll(graph)
 
 	// First error is captured
-	if err == nil {
-		t.Logf("ScanAll returned no error (all modules handled gracefully)")
-	} else {
-		t.Logf("ScanAll returned error as expected: %v", err)
+	if err != nil {
+		t.Fatalf("ScanAll() unexpected error: %v", err)
 	}
 
 	// Should have results for at least one module
-	if len(results) == 0 {
-		t.Logf("ScanAll returned 0 results (error caused early return)")
+	if len(results) != len(graph.Dependencies) {
+		t.Fatalf("ScanAll() returned %d results, want %d", len(results), len(graph.Dependencies))
 	}
 }
 

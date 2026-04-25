@@ -52,7 +52,7 @@ func (s *AIGenScanner) analyzeModule(
 
 	// 1. Recently created module (< 6 months) with a name mimicking established packages.
 	if ri != nil && !ri.FirstReleaseDate.IsZero() {
-		ageMonths := monthsSince(ri.FirstReleaseDate)
+		ageMonths := monthsSince(time.Now(), ri.FirstReleaseDate)
 		ageDays := int(time.Since(ri.FirstReleaseDate).Hours() / 24)
 
 		if ageMonths < 6 {

@@ -10,7 +10,7 @@ import (
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
-	"github.com/unidoc/unisupply/pkg/testutil"
+	"github.com/unidoc/unisupply/internal/testutil"
 )
 
 // Helper function to create EvalInput with dependencies and overall score.

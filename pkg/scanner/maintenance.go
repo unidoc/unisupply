@@ -102,7 +102,7 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 	versionInfo, err := ms.fetchVersionInfo(modPath, version)
 	if err == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
-		info.MonthsSinceRelease = monthsSince(versionInfo.Time)
+		info.MonthsSinceRelease = monthsSince(time.Now(), versionInfo.Time)
 	}
 
 	// Check latest version to see if there's a newer release.
@@ -111,7 +111,7 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 		info.LatestVersion = latestVersion
 		if !latestTime.IsZero() {
 			info.LastRelease = latestTime
-			info.MonthsSinceRelease = monthsSince(latestTime)
+			info.MonthsSinceRelease = monthsSince(time.Now(), latestTime)
 		}
 	}
 
@@ -212,11 +212,10 @@ func encodeModulePath(path string) string {
 	return b.String()
 }
 
-func monthsSince(t time.Time) int {
+func monthsSince(now, t time.Time) int {
 	if t.IsZero() {
 		return 0
 	}
-	now := time.Now()
 	years := now.Year() - t.Year()
 	months := int(now.Month()) - int(t.Month())
 	total := years*12 + months

@@ -165,7 +165,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	}
 
 	// Classify cadence.
-	info.ReleaseCadence = classifyCadence(info)
+	info.ReleaseCadence = classifyCadence(time.Now(), info)
 
 	// Classify version scheme.
 	info.VersionScheme = classifyVersionScheme(versions)
@@ -255,12 +255,12 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 	}
 }
 
-func classifyCadence(info *ResilienceInfo) string {
+func classifyCadence(now time.Time, info *ResilienceInfo) string {
 	if info.TotalReleases <= 1 {
 		return "stale"
 	}
 
-	monthsSinceLast := monthsSince(info.LastReleaseDate)
+	monthsSinceLast := monthsSince(now, info.LastReleaseDate)
 
 	if monthsSinceLast > 24 {
 		return "stale"
