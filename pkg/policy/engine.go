@@ -55,10 +55,10 @@ type Policy struct {
 
 // Violation represents a single policy violation.
 type Violation struct {
-	Rule       string `json:"rule"`
-	Module     string `json:"module,omitempty"`
-	Detail     string `json:"detail"`
-	Severity   string `json:"severity"` // "error" or "warning"
+	Rule     string `json:"rule"`
+	Module   string `json:"module,omitempty"`
+	Detail   string `json:"detail"`
+	Severity string `json:"severity"` // "error" or "warning"
 }
 
 // Result holds the outcome of policy evaluation.

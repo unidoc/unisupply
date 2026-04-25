@@ -91,7 +91,7 @@ func ScanVulns(ctx context.Context, projectDir string) (map[string][]Vulnerabili
 
 func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error) {
 	// Collect OSVs and findings.
-	osvs := make(map[string]*gvcOSV)    // id -> osv
+	osvs := make(map[string]*gvcOSV) // id -> osv
 	var findings []gvcFinding
 
 	dec := json.NewDecoder(buf)

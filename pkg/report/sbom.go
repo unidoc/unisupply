@@ -31,8 +31,8 @@ type cdxBOM struct {
 }
 
 type cdxMetadata struct {
-	Timestamp string       `json:"timestamp"`
-	Tools     []cdxTool    `json:"tools"`
+	Timestamp string        `json:"timestamp"`
+	Tools     []cdxTool     `json:"tools"`
 	Component *cdxComponent `json:"component,omitempty"`
 }
 
@@ -164,13 +164,13 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 // ---- SPDX 2.3 ----
 
 type spdxDocument struct {
-	SPDXVersion       string            `json:"spdxVersion"`
-	DataLicense       string            `json:"dataLicense"`
-	SPDXID            string            `json:"SPDXID"`
-	Name              string            `json:"name"`
-	DocumentNamespace string            `json:"documentNamespace"`
-	CreationInfo      spdxCreationInfo  `json:"creationInfo"`
-	Packages          []spdxPackage     `json:"packages"`
+	SPDXVersion       string             `json:"spdxVersion"`
+	DataLicense       string             `json:"dataLicense"`
+	SPDXID            string             `json:"SPDXID"`
+	Name              string             `json:"name"`
+	DocumentNamespace string             `json:"documentNamespace"`
+	CreationInfo      spdxCreationInfo   `json:"creationInfo"`
+	Packages          []spdxPackage      `json:"packages"`
 	Relationships     []spdxRelationship `json:"relationships"`
 }
 
@@ -180,14 +180,14 @@ type spdxCreationInfo struct {
 }
 
 type spdxPackage struct {
-	SPDXID           string              `json:"SPDXID"`
-	Name             string              `json:"name"`
-	VersionInfo      string              `json:"versionInfo"`
-	DownloadLocation string              `json:"downloadLocation"`
-	FilesAnalyzed    bool                `json:"filesAnalyzed"`
-	Supplier         string              `json:"supplier,omitempty"`
-	ExternalRefs     []spdxExternalRef   `json:"externalRefs,omitempty"`
-	Annotations      []spdxAnnotation    `json:"annotations,omitempty"`
+	SPDXID           string            `json:"SPDXID"`
+	Name             string            `json:"name"`
+	VersionInfo      string            `json:"versionInfo"`
+	DownloadLocation string            `json:"downloadLocation"`
+	FilesAnalyzed    bool              `json:"filesAnalyzed"`
+	Supplier         string            `json:"supplier,omitempty"`
+	ExternalRefs     []spdxExternalRef `json:"externalRefs,omitempty"`
+	Annotations      []spdxAnnotation  `json:"annotations,omitempty"`
 }
 
 type spdxExternalRef struct {

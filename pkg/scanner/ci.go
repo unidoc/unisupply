@@ -33,22 +33,22 @@ type CIFinding struct {
 
 // WorkflowRisk holds the risk assessment for a single workflow file.
 type WorkflowRisk struct {
-	Name     string       `json:"name"`
-	FilePath string       `json:"file_path"`
-	Score    int          `json:"score"`
-	Level    CIRiskLevel  `json:"level"`
-	Findings []CIFinding  `json:"findings"`
+	Name     string      `json:"name"`
+	FilePath string      `json:"file_path"`
+	Score    int         `json:"score"`
+	Level    CIRiskLevel `json:"level"`
+	Findings []CIFinding `json:"findings"`
 }
 
 // CIReport holds the full CI/CD risk assessment.
 type CIReport struct {
-	Workflows        []*WorkflowRisk `json:"workflows,omitempty"`
-	BuildFindings    []CIFinding     `json:"build_findings,omitempty"`
-	OverallScore     int             `json:"overall_score"`
-	OverallLevel     CIRiskLevel     `json:"overall_level"`
-	UnpinnedActions  int             `json:"unpinned_actions"`
-	ThirdPartyActions int            `json:"third_party_actions"`
-	TotalFindings    int             `json:"total_findings"`
+	Workflows         []*WorkflowRisk `json:"workflows,omitempty"`
+	BuildFindings     []CIFinding     `json:"build_findings,omitempty"`
+	OverallScore      int             `json:"overall_score"`
+	OverallLevel      CIRiskLevel     `json:"overall_level"`
+	UnpinnedActions   int             `json:"unpinned_actions"`
+	ThirdPartyActions int             `json:"third_party_actions"`
+	TotalFindings     int             `json:"total_findings"`
 }
 
 // CIScanner scans CI/CD configuration for security risks.

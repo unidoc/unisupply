@@ -16,28 +16,28 @@ import (
 type MaintainerInfo struct {
 	Owner            string    `json:"owner"`
 	Repo             string    `json:"repo"`
-	OwnerName        string    `json:"owner_name"`        // display name of owner
-	OwnerLocation    string    `json:"owner_location"`    // country/city
-	OwnerCompany     string    `json:"owner_company"`     // company affiliation
-	OwnerBio         string    `json:"owner_bio"`         // bio/description
-	OwnerURL         string    `json:"owner_url"`         // website/blog
-	IsOrg            bool      `json:"is_org"`            // org vs personal
+	OwnerName        string    `json:"owner_name"`     // display name of owner
+	OwnerLocation    string    `json:"owner_location"` // country/city
+	OwnerCompany     string    `json:"owner_company"`  // company affiliation
+	OwnerBio         string    `json:"owner_bio"`      // bio/description
+	OwnerURL         string    `json:"owner_url"`      // website/blog
+	IsOrg            bool      `json:"is_org"`         // org vs personal
 	OwnerVerified    bool      `json:"owner_verified"`
-	BusinessModel    string    `json:"business_model"`    // "open_source", "company_backed", "foundation", "unknown"
-	License          string    `json:"license"`           // SPDX license identifier
-	Description      string    `json:"description"`       // repo description
+	BusinessModel    string    `json:"business_model"` // "open_source", "company_backed", "foundation", "unknown"
+	License          string    `json:"license"`        // SPDX license identifier
+	Description      string    `json:"description"`    // repo description
 	ContributorCount int       `json:"contributor_count"`
-	TopContributors  []string  `json:"top_contributors"`  // top 5 contributor logins
+	TopContributors  []string  `json:"top_contributors"` // top 5 contributor logins
 	BusFactor        int       `json:"bus_factor"`
 	IsArchived       bool      `json:"is_archived"`
 	IsFork           bool      `json:"is_fork"`
-	ActivityPattern  string    `json:"activity_pattern"`  // "active", "sporadic", "inactive"
+	ActivityPattern  string    `json:"activity_pattern"` // "active", "sporadic", "inactive"
 	LastCommitDate   time.Time `json:"last_commit_date"`
 	CreatedAt        time.Time `json:"created_at"`
 	Stars            int       `json:"stars"`
 	Forks            int       `json:"forks"`
 	OpenIssues       int       `json:"open_issues"`
-	SubDependencies  int       `json:"sub_dependencies"`  // how many deps this dep pulls in
+	SubDependencies  int       `json:"sub_dependencies"` // how many deps this dep pulls in
 	// Takeover analysis.
 	TakeoverCandidate bool   `json:"takeover_candidate"`
 	TakeoverReason    string `json:"takeover_reason,omitempty"`
@@ -300,7 +300,7 @@ func classifyActivity(lastCommit time.Time) string {
 	if lastCommit.IsZero() {
 		return "unknown"
 	}
-	months := monthsSince(lastCommit)
+	months := monthsSince(time.Now(), lastCommit)
 	switch {
 	case months < 3:
 		return "active"
