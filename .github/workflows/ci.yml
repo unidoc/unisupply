@@ -175,7 +175,7 @@ jobs:
               ``,
               `</details>`,
               ``,
-              `_Generated for commit \`${context.sha.substring(0, 7)}\`._`
+              `_Generated for commit \`${context.payload.pull_request.head.sha.substring(0, 7)}\`._`
             ].join('\n');
 
             const { owner, repo } = context.repo;
