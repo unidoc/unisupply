@@ -114,14 +114,16 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		if ps != nil {
 			for _, ds := range ps.Dependencies {
 				if ds.Module == dep.Module.Path {
-					comp.Properties = append(comp.Properties, cdxProperty{
-						Name:  "unisupply:risk_score",
-						Value: fmt.Sprintf("%d", ds.RiskScore),
-					})
-					comp.Properties = append(comp.Properties, cdxProperty{
-						Name:  "unisupply:risk_level",
-						Value: string(ds.RiskLevel),
-					})
+					comp.Properties = append(comp.Properties,
+						cdxProperty{
+							Name:  "unisupply:risk_score",
+							Value: fmt.Sprintf("%d", ds.RiskScore),
+						},
+						cdxProperty{
+							Name:  "unisupply:risk_level",
+							Value: string(ds.RiskLevel),
+						},
+					)
 					break
 				}
 			}

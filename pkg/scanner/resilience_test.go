@@ -681,6 +681,7 @@ func TestResilienceScanner_ProxyError(t *testing.T) {
 	// Should return empty info without panicking
 	if info == nil {
 		t.Error("expected non-nil info even with proxy error")
+		return
 	}
 
 	if info.TotalReleases != 0 {

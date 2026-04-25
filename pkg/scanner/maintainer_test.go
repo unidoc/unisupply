@@ -312,7 +312,7 @@ func newMockGitHub() *httptest.Server {
 			default:
 				json.NewEncoder(w).Encode(githubUser{
 					Login: login,
-					Name:  strings.Title(login),
+					Name:  strings.ToUpper(login[:1]) + login[1:],
 					Type:  "User",
 				})
 				return

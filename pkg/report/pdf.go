@@ -168,7 +168,7 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	// Key metrics table.
 	table := c.NewTable(2)
 	table.SetMargins(0, 0, 10, 20)
-	table.SetColumnWidths(0.4, 0.6)
+	_ = table.SetColumnWidths(0.4, 0.6)
 
 	addTableRow(c, table, "Project", graph.Root, regular, bold)
 	addTableRow(c, table, "Go Version", opts.GoVersion, regular, bold)
@@ -184,7 +184,7 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 
 	distTable := c.NewTable(3)
 	distTable.SetMargins(0, 0, 5, 15)
-	distTable.SetColumnWidths(0.4, 0.3, 0.3)
+	_ = distTable.SetColumnWidths(0.4, 0.3, 0.3)
 
 	addTableHeader(c, distTable, []string{"Risk Level", "Count", "Percentage"}, bold)
 	addTableRow3(c, distTable, "High/Critical (76-100)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
@@ -243,7 +243,7 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 	// Condensed table format.
 	table := c.NewTable(4)
 	table.SetMargins(0, 0, 10, 10)
-	table.SetColumnWidths(0.45, 0.2, 0.15, 0.2)
+	_ = table.SetColumnWidths(0.45, 0.2, 0.15, 0.2)
 
 	addTableHeader(c, table, []string{"Module", "Version", "Score", "Risk Factors"}, bold)
 
@@ -276,7 +276,7 @@ func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, b
 	// Summary table.
 	table := c.NewTable(3)
 	table.SetMargins(0, 0, 10, 10)
-	table.SetColumnWidths(0.55, 0.25, 0.2)
+	_ = table.SetColumnWidths(0.55, 0.25, 0.2)
 
 	addTableHeader(c, table, []string{"Module", "Version", "Score"}, bold)
 
@@ -323,7 +323,7 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 
 		table := c.NewTable(3)
 		table.SetMargins(0, 0, 5, 10)
-		table.SetColumnWidths(0.2, 0.5, 0.3)
+		_ = table.SetColumnWidths(0.2, 0.5, 0.3)
 		addTableHeader(c, table, []string{"Severity", "Description", "Remediation"}, bold)
 
 		for _, f := range wr.Findings {
@@ -347,7 +347,7 @@ func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInf
 
 	table := c.NewTable(4)
 	table.SetMargins(0, 0, 5, 10)
-	table.SetColumnWidths(0.35, 0.15, 0.2, 0.3)
+	_ = table.SetColumnWidths(0.35, 0.15, 0.2, 0.3)
 	addTableHeader(c, table, []string{"Repository", "Stars", "Activity", "Reason"}, bold)
 
 	for _, t := range takeovers {
@@ -438,7 +438,7 @@ func addTableHeader(cr *creator.Creator, table *creator.Table, headers []string,
 		ch.Style.Font = bold
 		ch.Style.FontSize = 9
 		ch.Style.Color = creator.ColorWhite
-		cell.SetContent(p)
+		_ = cell.SetContent(p)
 	}
 }
 
@@ -448,14 +448,14 @@ func addTableRow(cr *creator.Creator, table *creator.Table, label, value string,
 	lch := lp.Append(label)
 	lch.Style.Font = bold
 	lch.Style.FontSize = 10
-	labelCell.SetContent(lp)
+	_ = labelCell.SetContent(lp)
 
 	valueCell := table.NewCell()
 	vp := cr.NewStyledParagraph()
 	vch := vp.Append(value)
 	vch.Style.Font = regular
 	vch.Style.FontSize = 10
-	valueCell.SetContent(vp)
+	_ = valueCell.SetContent(vp)
 }
 
 func addTableRow3(cr *creator.Creator, table *creator.Table, c1, c2, c3 string, font *model.PdfFont) {
@@ -465,7 +465,7 @@ func addTableRow3(cr *creator.Creator, table *creator.Table, c1, c2, c3 string, 
 		ch := p.Append(val)
 		ch.Style.Font = font
 		ch.Style.FontSize = 9
-		cell.SetContent(p)
+		_ = cell.SetContent(p)
 	}
 }
 
@@ -476,7 +476,7 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 		ch := p.Append(val)
 		ch.Style.Font = font
 		ch.Style.FontSize = 9
-		cell.SetContent(p)
+		_ = cell.SetContent(p)
 	}
 }
 

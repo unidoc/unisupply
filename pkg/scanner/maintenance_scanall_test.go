@@ -70,6 +70,7 @@ func TestMaintenanceScanner_ScanAll(t *testing.T) {
 	for modPath, info := range results {
 		if info == nil {
 			t.Errorf("result for %q is nil", modPath)
+			continue
 		}
 		if info.LatestVersion == "" {
 			t.Errorf("LatestVersion for %q is empty", modPath)
