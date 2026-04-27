@@ -40,6 +40,14 @@ type TextOptions struct {
 
 // WriteText generates the human-readable terminal output.
 func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions) error {
+	if opts == nil {
+		return fmt.Errorf("nil TextOptions provided")
+	}
+
+	if opts.Writer == nil {
+		return fmt.Errorf("nil TextOptions.Writer provided")
+	}
+
 	w := opts.Writer
 	c := colorFunc(opts.NoColor)
 

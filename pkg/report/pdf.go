@@ -168,7 +168,11 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	// Key metrics table.
 	table := c.NewTable(2)
 	table.SetMargins(0, 0, 10, 20)
-	_ = table.SetColumnWidths(0.4, 0.6)
+	err := table.SetColumnWidths(0.4, 0.6)
+	if err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
 
 	addTableRow(c, table, "Project", graph.Root, regular, bold)
 	addTableRow(c, table, "Go Version", opts.GoVersion, regular, bold)
@@ -176,7 +180,6 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
 	addTableRow(c, table, "Overall Risk Score", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
-
 	_ = c.Draw(table)
 
 	// Risk distribution.
@@ -184,13 +187,15 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 
 	distTable := c.NewTable(3)
 	distTable.SetMargins(0, 0, 5, 15)
-	_ = distTable.SetColumnWidths(0.4, 0.3, 0.3)
+	if err = distTable.SetColumnWidths(0.4, 0.3, 0.3); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
 
 	addTableHeader(c, distTable, []string{"Risk Level", "Count", "Percentage"}, bold)
 	addTableRow3(c, distTable, "High/Critical (76-100)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
 	addTableRow3(c, distTable, "Medium (26-75)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
 	addTableRow3(c, distTable, "Low (0-25)", fmt.Sprintf("%d", ps.LowRiskCount), pctStr(ps.LowRiskCount, total), regular)
-
 	_ = c.Draw(distTable)
 
 	// Vulnerability summary.
@@ -243,7 +248,10 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 	// Condensed table format.
 	table := c.NewTable(4)
 	table.SetMargins(0, 0, 10, 10)
-	_ = table.SetColumnWidths(0.45, 0.2, 0.15, 0.2)
+	if err := table.SetColumnWidths(0.45, 0.2, 0.15, 0.2); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
 
 	addTableHeader(c, table, []string{"Module", "Version", "Score", "Risk Factors"}, bold)
 
@@ -276,7 +284,10 @@ func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, b
 	// Summary table.
 	table := c.NewTable(3)
 	table.SetMargins(0, 0, 10, 10)
-	_ = table.SetColumnWidths(0.55, 0.25, 0.2)
+	if err := table.SetColumnWidths(0.55, 0.25, 0.2); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
 
 	addTableHeader(c, table, []string{"Module", "Version", "Score"}, bold)
 
@@ -323,7 +334,10 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 
 		table := c.NewTable(3)
 		table.SetMargins(0, 0, 5, 10)
-		_ = table.SetColumnWidths(0.2, 0.5, 0.3)
+		if err := table.SetColumnWidths(0.2, 0.5, 0.3); err != nil {
+			fmt.Printf("Error setting column widths: %v\n", err)
+			return
+		}
 		addTableHeader(c, table, []string{"Severity", "Description", "Remediation"}, bold)
 
 		for _, f := range wr.Findings {
@@ -347,7 +361,10 @@ func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInf
 
 	table := c.NewTable(4)
 	table.SetMargins(0, 0, 5, 10)
-	_ = table.SetColumnWidths(0.35, 0.15, 0.2, 0.3)
+	if err := table.SetColumnWidths(0.35, 0.15, 0.2, 0.3); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
 	addTableHeader(c, table, []string{"Repository", "Stars", "Activity", "Reason"}, bold)
 
 	for _, t := range takeovers {
@@ -438,7 +455,9 @@ func addTableHeader(cr *creator.Creator, table *creator.Table, headers []string,
 		ch.Style.Font = bold
 		ch.Style.FontSize = 9
 		ch.Style.Color = creator.ColorWhite
-		_ = cell.SetContent(p)
+		if err := cell.SetContent(p); err != nil {
+			fmt.Printf("Error setting table header content: %v\n", err)
+		}
 	}
 }
 
@@ -448,14 +467,18 @@ func addTableRow(cr *creator.Creator, table *creator.Table, label, value string,
 	lch := lp.Append(label)
 	lch.Style.Font = bold
 	lch.Style.FontSize = 10
-	_ = labelCell.SetContent(lp)
+	if err := labelCell.SetContent(lp); err != nil {
+		fmt.Printf("Error setting table cell content: %v\n", err)
+	}
 
 	valueCell := table.NewCell()
 	vp := cr.NewStyledParagraph()
 	vch := vp.Append(value)
 	vch.Style.Font = regular
 	vch.Style.FontSize = 10
-	_ = valueCell.SetContent(vp)
+	if err := valueCell.SetContent(vp); err != nil {
+		fmt.Printf("Error setting table cell content: %v\n", err)
+	}
 }
 
 func addTableRow3(cr *creator.Creator, table *creator.Table, c1, c2, c3 string, font *model.PdfFont) {
@@ -465,7 +488,9 @@ func addTableRow3(cr *creator.Creator, table *creator.Table, c1, c2, c3 string, 
 		ch := p.Append(val)
 		ch.Style.Font = font
 		ch.Style.FontSize = 9
-		_ = cell.SetContent(p)
+		if err := cell.SetContent(p); err != nil {
+			fmt.Printf("Error setting table cell content: %v\n", err)
+		}
 	}
 }
 
@@ -476,7 +501,9 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 		ch := p.Append(val)
 		ch.Style.Font = font
 		ch.Style.FontSize = 9
-		_ = cell.SetContent(p)
+		if err := cell.SetContent(p); err != nil {
+			fmt.Printf("Error setting table cell content: %v\n", err)
+		}
 	}
 }
 
