@@ -4,13 +4,14 @@
 # Claude files and local settings
 .claude/plans
 .claude/projects
+.claude/commands
 .claude/settings.local.*
 
 bin/
 coverage.out
 
-# Generated reports
-*.pdf
+# UniSupply generated report
+unisupply-report.pdf
 
 # Build binary dropped at repo root (go build ./cmd/unisupply)
 /unisupply
