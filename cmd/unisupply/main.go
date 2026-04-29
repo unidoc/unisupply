@@ -103,6 +103,7 @@ func main() {
 	}
 
 	if err := run(&cfg); err != nil {
+		// Policy violation should exit with code 2 for CI/CD integration.
 		if errors.Is(err, errPolicyViolation) {
 			os.Exit(2)
 		}
