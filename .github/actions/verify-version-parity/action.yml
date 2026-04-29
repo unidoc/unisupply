@@ -1,0 +1,25 @@
+name: Verify Version Parity
+description: Check that both source-code version constants match the expected version.
+
+inputs:
+  version:
+    description: 'Expected version string (X.Y.Z, no v prefix)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check version constants
+      shell: bash
+      env:
+        EXPECTED: ${{ inputs.version }}
+      run: |
+        APP_VER=$(grep -E '^const appVersion = "[^"]+"' cmd/unisupply/main.go \
+                   | sed -E 's/.*"([^"]+)".*/\1/')
+        TXT_VER=$(grep -E '^const version = "[^"]+"' pkg/report/text.go \
+                   | sed -E 's/.*"([^"]+)".*/\1/')
+        echo "expected=$EXPECTED  main.go=$APP_VER  text.go=$TXT_VER"
+        fail=0
+        [ "$APP_VER" = "$EXPECTED" ] || { echo "::error::cmd/unisupply/main.go appVersion ($APP_VER) != $EXPECTED"; fail=1; }
+        [ "$TXT_VER" = "$EXPECTED" ] || { echo "::error::pkg/report/text.go version ($TXT_VER) != $EXPECTED"; fail=1; }
+        exit $fail

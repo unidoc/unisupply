@@ -1,0 +1,18 @@
+# unisupply release maintainers — public keys allowed to sign vX.Y.Z tags.
+#
+# Format: <principal> <key-type> <base64-key> [comment]
+#   principal : the signer's email, must match git user.email AND the GitHub
+#               account's registered Signing Key email.
+#   key-type  : ssh-ed25519 (preferred) or ssh-rsa
+#   base64-key: the public key body (from ~/.ssh/id_ed25519.pub, field 2)
+#
+# To add a maintainer: append a line with their email and public key,
+# then open a PR against master (will be gated by ci.yml like any other change).
+# To remove a maintainer: delete their line and open a PR.
+#
+# IMPORTANT: Uncomment and replace with real maintainer public keys before the
+# first release. The release workflow will fail at tag-signature verification
+# until at least one valid entry exists.
+# Example entries (replace email and key body, then uncomment):
+# maintainer1@unidoc.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI<replace-with-real-public-key> unisupply-release-key-1
+# maintainer2@unidoc.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI<replace-with-real-public-key> unisupply-release-key-2

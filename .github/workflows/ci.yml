@@ -2,10 +2,10 @@ name: CI
 
 on:
   pull_request:
-    branches: [development]
+    branches: [development, master]
     types: [opened, synchronize, reopened]
   push:
-    branches: [development]
+    branches: [development, master]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -108,6 +108,42 @@ jobs:
           path: bin/unisupply-${{ matrix.goos }}-${{ matrix.goarch }}*
           retention-days: 7
 
+  version-check:
+    name: Version Parity
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'pull_request' &&
+      github.base_ref == 'master' &&
+      startsWith(github.head_ref, 'rc-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from branch name
+        id: parse
+        run: |
+          BRANCH="${{ github.head_ref }}"
+          if [[ ! "$BRANCH" =~ ^rc-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Branch '$BRANCH' must match rc-vX.Y.Z (semver)."
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"     >> "$GITHUB_OUTPUT"
+
+      - name: Verify source-code version constants match branch
+        uses: ./.github/actions/verify-version-parity
+        with:
+          version: ${{ steps.parse.outputs.version }}
+
+      - name: Verify tag does not already exist
+        env:
+          TAG: ${{ steps.parse.outputs.tag }}
+        run: |
+          if git ls-remote --tags --exit-code origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists on origin. Bump rc branch version."
+            exit 1
+          fi
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -147,6 +183,19 @@ jobs:
           name: coverage-profile
           path: coverage.out
           retention-days: 7
+
+      - name: Enforce coverage floor (master PRs only)
+        if: github.base_ref == 'master'
+        env:
+          FLOOR: '50'
+          TOTAL: ${{ steps.cov.outputs.total }}
+        run: |
+          pct="${TOTAL%\%}"
+          awk -v p="$pct" -v f="$FLOOR" 'BEGIN { exit !(p+0 >= f+0) }' || {
+            echo "::error::Total coverage $TOTAL is below floor ${FLOOR}%."
+            exit 1
+          }
+          echo "Coverage $TOTAL >= ${FLOOR}% floor — OK."
 
       - name: Upsert PR comment
         uses: actions/github-script@v7
