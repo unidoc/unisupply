@@ -22,6 +22,7 @@ import (
 
 const appVersion = "0.4.0"
 
+// errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
 
 func main() {
