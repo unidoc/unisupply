@@ -3,6 +3,7 @@ package integration_test
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -11,10 +12,57 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-const stabilityRuns = 5
+const (
+	stabilityRuns = 5
+
+	// directOnly mirrors resolver.Resolve's second argument and keeps the
+	// integration suite offline by skipping `go mod graph` (which would touch
+	// the network for transitive resolution).
+	directOnly = true
+
+	// Workflow names match the `name:` field in the corresponding fixture
+	// files under testdata/workflows/. Centralized here so a fixture rename
+	// breaks compilation rather than producing a confusing nil-lookup failure.
+	pinnedWorkflowName = "CI"
+	unsafeWorkflowName = "Unsafe"
+)
 
 func testdataPath(parts ...string) string {
 	return filepath.Join(append([]string{"testdata"}, parts...)...)
+}
+
+// ciReportOnce caches the CI scan of testdata/workflows/ across all CI tests
+// in this package. Each individual test was previously re-parsing every
+// fixture file in the directory; with this helper the scan happens once.
+var (
+	ciReportOnce sync.Once
+	ciReport     *scanner.CIReport
+	ciReportErr  error
+)
+
+func loadCIReport(t *testing.T) *scanner.CIReport {
+	t.Helper()
+	ciReportOnce.Do(func() {
+		ciReport, ciReportErr = scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
+	})
+	if ciReportErr != nil {
+		t.Fatalf("ScanWorkflows failed: %v", ciReportErr)
+	}
+	if ciReport == nil {
+		t.Fatal("ScanWorkflows returned nil report")
+	}
+	return ciReport
+}
+
+func findWorkflow(t *testing.T, report *scanner.CIReport, name string) *scanner.WorkflowRisk {
+	t.Helper()
+	for _, wr := range report.Workflows {
+		if wr.Name == name {
+			return wr
+		}
+	}
+	t.Fatalf("%q workflow not found in report", name)
+	return nil
 }
 
 func emptyScoreInput(g *resolver.Graph) scorer.ScoreInput {
@@ -33,7 +81,7 @@ func emptyScoreInput(g *resolver.Graph) scorer.ScoreInput {
 func TestFullPipeline_Simple(t *testing.T) {
 	gomodPath := testdataPath("gomod", "simple.mod")
 
-	graph, _, err := resolver.Resolve(gomodPath, true)
+	graph, _, err := resolver.Resolve(gomodPath, directOnly)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -89,7 +137,7 @@ func TestFullPipeline_Empty(t *testing.T) {
 		t.Errorf("expected empty.mod to have no requirements, got %d", len(gomod.Requirements))
 	}
 
-	graph, _, err := resolver.Resolve(gomodPath, true)
+	graph, _, err := resolver.Resolve(gomodPath, directOnly)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -116,7 +164,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 
 	runOnce := func(t *testing.T) *scorer.ProjectScore {
 		t.Helper()
-		graph, _, err := resolver.Resolve(gomodPath, true)
+		graph, _, err := resolver.Resolve(gomodPath, directOnly)
 		if err != nil {
 			t.Fatalf("Resolve failed: %v", err)
 		}
@@ -158,24 +206,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 }
 
 func TestCIScanner_PinnedFixture(t *testing.T) {
-	report, err := scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
-	if err != nil {
-		t.Fatalf("ScanWorkflows failed: %v", err)
-	}
-	if report == nil {
-		t.Fatal("ScanWorkflows returned nil report")
-	}
-
-	var pinnedWF *scanner.WorkflowRisk
-	for _, wr := range report.Workflows {
-		if wr.Name == "CI" {
-			pinnedWF = wr
-			break
-		}
-	}
-	if pinnedWF == nil {
-		t.Fatalf("CI workflow not found in report")
-	}
+	pinnedWF := findWorkflow(t, loadCIReport(t), pinnedWorkflowName)
 
 	// The contract for pinned.yml is that it must not produce findings in the
 	// two categories the fixture is built to avoid. Total finding count is left
@@ -189,24 +220,8 @@ func TestCIScanner_PinnedFixture(t *testing.T) {
 }
 
 func TestCIScanner_UnsafeFixture(t *testing.T) {
-	report, err := scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
-	if err != nil {
-		t.Fatalf("ScanWorkflows failed: %v", err)
-	}
-	if report == nil {
-		t.Fatal("ScanWorkflows returned nil report")
-	}
+	unsafeWF := findWorkflow(t, loadCIReport(t), unsafeWorkflowName)
 
-	var unsafeWF *scanner.WorkflowRisk
-	for _, wr := range report.Workflows {
-		if wr.Name == "Unsafe" {
-			unsafeWF = wr
-			break
-		}
-	}
-	if unsafeWF == nil {
-		t.Fatalf("Unsafe workflow not found in report")
-	}
 	if len(unsafeWF.Findings) == 0 {
 		t.Fatalf("expected findings in unsafe workflow, got none")
 	}
@@ -233,18 +248,29 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 
 	typosquatScanner := scanner.NewTyposquatScanner()
 	aiGenScanner := scanner.NewAIGenScanner()
+
+	emptyVulns := map[string][]scanner.Vulnerability{}
+	emptyMaintenance := map[string]*scanner.MaintenanceInfo{}
 	emptyMaintainers := map[string]*scanner.MaintainerInfo{}
 	emptyResilience := map[string]*scanner.ResilienceInfo{}
+	emptyTrustIndex := map[string]*scanner.TrustIndexEntry{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		graph, _, err := resolver.Resolve(gomodPath, true)
+		graph, _, err := resolver.Resolve(gomodPath, directOnly)
 		if err != nil {
 			b.Fatalf("Resolve failed: %v", err)
 		}
-		input := emptyScoreInput(graph)
-		input.Typosquats = typosquatScanner.ScanAll(graph)
-		input.AIGenRisks = aiGenScanner.ScanAll(graph, emptyMaintainers, emptyResilience)
+		input := scorer.ScoreInput{
+			Graph:       graph,
+			Vulns:       emptyVulns,
+			Maintenance: emptyMaintenance,
+			Maintainers: emptyMaintainers,
+			Typosquats:  typosquatScanner.ScanAll(graph),
+			Resilience:  emptyResilience,
+			AIGenRisks:  aiGenScanner.ScanAll(graph, emptyMaintainers, emptyResilience),
+			TrustIndex:  emptyTrustIndex,
+		}
 		_ = scorer.ScoreAll(input)
 	}
 }
