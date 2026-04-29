@@ -3,7 +3,6 @@ package integration_test
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -12,220 +11,161 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-func testdataPath(t testing.TB, parts ...string) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatalf("could not determine test file path")
-	}
-	pathParts := append([]string{filepath.Dir(thisFile), "testdata"}, parts...)
-	return filepath.Join(pathParts...)
+const stabilityRuns = 5
+
+func testdataPath(parts ...string) string {
+	return filepath.Join(append([]string{"testdata"}, parts...)...)
 }
 
-// TestFullPipeline_Simple exercises the offline pipeline end-to-end:
-// parse -> resolve -> scan (typosquat, AI-gen) -> score.
+func emptyScoreInput(g *resolver.Graph) scorer.ScoreInput {
+	return scorer.ScoreInput{
+		Graph:       g,
+		Vulns:       map[string][]scanner.Vulnerability{},
+		Maintenance: map[string]*scanner.MaintenanceInfo{},
+		Maintainers: map[string]*scanner.MaintainerInfo{},
+		Typosquats:  map[string]*scanner.TyposquatResult{},
+		Resilience:  map[string]*scanner.ResilienceInfo{},
+		AIGenRisks:  map[string]*scanner.AIGenRisk{},
+		TrustIndex:  map[string]*scanner.TrustIndexEntry{},
+	}
+}
+
 func TestFullPipeline_Simple(t *testing.T) {
-	gomodPath := testdataPath(t, "gomod", "simple.mod")
+	gomodPath := testdataPath("gomod", "simple.mod")
 
-	// Resolve dependency graph (direct only to avoid network calls).
-	graph, warnings, err := resolver.Resolve(gomodPath, true)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-	if len(graph.Dependencies) == 0 {
-		t.Errorf("Expected at least 1 direct dependency, got %d", len(graph.Dependencies))
-	}
-	t.Logf("Resolved %d dependencies with %d warnings", len(graph.Dependencies), len(warnings))
-
-	// Run offline scanners: typosquat and AI-gen.
-	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquatResults := typosquatScanner.ScanAll(graph)
-	t.Logf("Typosquat scanner found %d suspicious modules", len(typosquatResults))
-
-	// For AI-gen scanner, we need empty maps for maintainers and resilience.
-	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenResults := aiGenScanner.ScanAll(graph, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
-	t.Logf("AI-gen scanner found %d risky modules", len(aiGenResults))
-
-	// Run scorer on the offline results.
-	scoreInput := scorer.ScoreInput{
-		Graph:       graph,
-		Vulns:       make(map[string][]scanner.Vulnerability),
-		Maintenance: make(map[string]*scanner.MaintenanceInfo),
-		Maintainers: make(map[string]*scanner.MaintainerInfo),
-		Typosquats:  typosquatResults,
-		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  aiGenResults,
-		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-	}
-
-	projectScore := scorer.ScoreAll(scoreInput)
-	if projectScore == nil {
-		t.Fatal("ScoreAll returned nil")
-	}
-
-	// Assertions.
-	if len(projectScore.Dependencies) == 0 {
-		t.Errorf("Expected scored dependencies, got none")
-	}
-
-	// Verify all risk scores are in valid range [0, 100].
-	for _, dep := range projectScore.Dependencies {
-		if dep.RiskScore < 0 || dep.RiskScore > 100 {
-			t.Errorf("Invalid risk score %d for %s (expected [0, 100])", dep.RiskScore, dep.Module)
-		}
-	}
-
-	// Verify overall score is in valid range.
-	if projectScore.OverallScore < 0 || projectScore.OverallScore > 100 {
-		t.Errorf("Invalid overall score %d (expected [0, 100])", projectScore.OverallScore)
-	}
-
-	t.Logf("Overall project score: %d (%s)", projectScore.OverallScore, projectScore.OverallLevel)
-}
-
-// TestFullPipeline_Empty parses an empty go.mod and ensures the pipeline
-// handles zero dependencies gracefully.
-func TestFullPipeline_Empty(t *testing.T) {
-	gomodPath := testdataPath(t, "gomod", "empty.mod")
-	gomod, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		t.Fatalf("ParseGoMod failed: %v", err)
-	}
-
-	if len(gomod.Requirements) != 0 {
-		t.Errorf("Expected empty.mod to have no requirements, got %d", len(gomod.Requirements))
-	}
-
-	// Resolve dependency graph.
 	graph, _, err := resolver.Resolve(gomodPath, true)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
+	if len(graph.Dependencies) == 0 {
+		t.Fatalf("expected at least 1 direct dependency, got 0")
+	}
 
+	typosquatResults := scanner.NewTyposquatScanner().ScanAll(graph)
+
+	// pflag and testify are themselves in the well-known module list — the
+	// scanner must not flag them as typosquats.
+	for _, mod := range []string{"github.com/spf13/pflag", "github.com/stretchr/testify"} {
+		if _, flagged := typosquatResults[mod]; flagged {
+			t.Errorf("%s should not be flagged as typosquat (it is the canonical well-known module)", mod)
+		}
+	}
+
+	aiGenResults := scanner.NewAIGenScanner().ScanAll(
+		graph,
+		map[string]*scanner.MaintainerInfo{},
+		map[string]*scanner.ResilienceInfo{},
+	)
+
+	input := emptyScoreInput(graph)
+	input.Typosquats = typosquatResults
+	input.AIGenRisks = aiGenResults
+
+	projectScore := scorer.ScoreAll(input)
+	if projectScore == nil {
+		t.Fatal("ScoreAll returned nil")
+	}
+	if len(projectScore.Dependencies) == 0 {
+		t.Errorf("expected scored dependencies, got none")
+	}
+	for _, dep := range projectScore.Dependencies {
+		if dep.RiskScore < 0 || dep.RiskScore > 100 {
+			t.Errorf("invalid risk score %d for %s (expected [0, 100])", dep.RiskScore, dep.Module)
+		}
+	}
+	if projectScore.OverallScore < 0 || projectScore.OverallScore > 100 {
+		t.Errorf("invalid overall score %d (expected [0, 100])", projectScore.OverallScore)
+	}
+}
+
+func TestFullPipeline_Empty(t *testing.T) {
+	gomodPath := testdataPath("gomod", "empty.mod")
+
+	gomod, err := parser.ParseGoMod(gomodPath)
+	if err != nil {
+		t.Fatalf("ParseGoMod failed: %v", err)
+	}
+	if len(gomod.Requirements) != 0 {
+		t.Errorf("expected empty.mod to have no requirements, got %d", len(gomod.Requirements))
+	}
+
+	graph, _, err := resolver.Resolve(gomodPath, true)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
 	if len(graph.Dependencies) != 0 {
-		t.Errorf("Expected empty graph, got %d dependencies", len(graph.Dependencies))
+		t.Errorf("expected empty graph, got %d dependencies", len(graph.Dependencies))
 	}
 
-	// Run scorer on empty graph.
-	scoreInput := scorer.ScoreInput{
-		Graph:       graph,
-		Vulns:       make(map[string][]scanner.Vulnerability),
-		Maintenance: make(map[string]*scanner.MaintenanceInfo),
-		Maintainers: make(map[string]*scanner.MaintainerInfo),
-		Typosquats:  make(map[string]*scanner.TyposquatResult),
-		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
-		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-	}
-
-	projectScore := scorer.ScoreAll(scoreInput)
+	projectScore := scorer.ScoreAll(emptyScoreInput(graph))
 	if projectScore == nil {
 		t.Fatal("ScoreAll returned nil on empty graph")
 	}
-
 	if len(projectScore.Dependencies) != 0 {
-		t.Errorf("Expected zero scored dependencies, got %d", len(projectScore.Dependencies))
+		t.Errorf("expected zero scored dependencies, got %d", len(projectScore.Dependencies))
 	}
-
 	if projectScore.OverallScore != 0 {
-		t.Errorf("Expected overall score 0 for empty graph, got %d", projectScore.OverallScore)
+		t.Errorf("expected overall score 0 for empty graph, got %d", projectScore.OverallScore)
 	}
-
-	t.Log("Empty pipeline completed successfully")
 }
 
-// TestFullPipeline_ScoreStability runs the offline pipeline twice against
-// simple.mod and verifies risk scores are deterministic.
+// TestFullPipeline_ScoreStability verifies the offline pipeline is deterministic
+// across repeated runs against the same input.
 func TestFullPipeline_ScoreStability(t *testing.T) {
-	gomodPath := testdataPath(t, "gomod", "simple.mod")
+	gomodPath := testdataPath("gomod", "simple.mod")
 
-	// Run 1.
-	graph1, _, err := resolver.Resolve(gomodPath, true)
-	if err != nil {
-		t.Fatalf("First resolve failed: %v", err)
-	}
-
-	typosquat1 := scanner.NewTyposquatScanner().ScanAll(graph1)
-	aiGen1 := scanner.NewAIGenScanner().ScanAll(graph1, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
-
-	input1 := scorer.ScoreInput{
-		Graph:       graph1,
-		Vulns:       make(map[string][]scanner.Vulnerability),
-		Maintenance: make(map[string]*scanner.MaintenanceInfo),
-		Maintainers: make(map[string]*scanner.MaintainerInfo),
-		Typosquats:  typosquat1,
-		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  aiGen1,
-		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-	}
-	scores1 := scorer.ScoreAll(input1)
-
-	// Run 2 (identical).
-	graph2, _, err := resolver.Resolve(gomodPath, true)
-	if err != nil {
-		t.Fatalf("Second resolve failed: %v", err)
-	}
-
-	typosquat2 := scanner.NewTyposquatScanner().ScanAll(graph2)
-	aiGen2 := scanner.NewAIGenScanner().ScanAll(graph2, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
-
-	input2 := scorer.ScoreInput{
-		Graph:       graph2,
-		Vulns:       make(map[string][]scanner.Vulnerability),
-		Maintenance: make(map[string]*scanner.MaintenanceInfo),
-		Maintainers: make(map[string]*scanner.MaintainerInfo),
-		Typosquats:  typosquat2,
-		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  aiGen2,
-		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-	}
-	scores2 := scorer.ScoreAll(input2)
-
-	// Verify determinism: overall scores must match.
-	if scores1.OverallScore != scores2.OverallScore {
-		t.Errorf("Overall scores differ: %d vs %d", scores1.OverallScore, scores2.OverallScore)
-	}
-
-	// Verify per-dependency scores match.
-	if len(scores1.Dependencies) != len(scores2.Dependencies) {
-		t.Errorf("Dependency counts differ: %d vs %d", len(scores1.Dependencies), len(scores2.Dependencies))
-	}
-
-	scoresByModule := make(map[string]int, len(scores2.Dependencies))
-	for _, d := range scores2.Dependencies {
-		scoresByModule[d.Module] = d.RiskScore
-	}
-
-	for _, dep1 := range scores1.Dependencies {
-		score2, ok := scoresByModule[dep1.Module]
-		if !ok {
-			t.Errorf("Module %s missing in second run", dep1.Module)
-			continue
+	runOnce := func(t *testing.T) *scorer.ProjectScore {
+		t.Helper()
+		graph, _, err := resolver.Resolve(gomodPath, true)
+		if err != nil {
+			t.Fatalf("Resolve failed: %v", err)
 		}
-		if dep1.RiskScore != score2 {
-			t.Errorf("Risk score differs for %s: %d vs %d", dep1.Module, dep1.RiskScore, score2)
+		input := emptyScoreInput(graph)
+		input.Typosquats = scanner.NewTyposquatScanner().ScanAll(graph)
+		input.AIGenRisks = scanner.NewAIGenScanner().ScanAll(
+			graph,
+			map[string]*scanner.MaintainerInfo{},
+			map[string]*scanner.ResilienceInfo{},
+		)
+		return scorer.ScoreAll(input)
+	}
+
+	baseline := runOnce(t)
+	baselineByModule := make(map[string]int, len(baseline.Dependencies))
+	for _, d := range baseline.Dependencies {
+		baselineByModule[d.Module] = d.RiskScore
+	}
+
+	for i := 2; i <= stabilityRuns; i++ {
+		got := runOnce(t)
+		if got.OverallScore != baseline.OverallScore {
+			t.Errorf("run %d: overall score %d differs from baseline %d", i, got.OverallScore, baseline.OverallScore)
+		}
+		if len(got.Dependencies) != len(baseline.Dependencies) {
+			t.Errorf("run %d: dependency count %d differs from baseline %d", i, len(got.Dependencies), len(baseline.Dependencies))
+		}
+		for _, dep := range got.Dependencies {
+			want, ok := baselineByModule[dep.Module]
+			if !ok {
+				t.Errorf("run %d: module %s missing from baseline", i, dep.Module)
+				continue
+			}
+			if dep.RiskScore != want {
+				t.Errorf("run %d: risk score for %s is %d, baseline %d", i, dep.Module, dep.RiskScore, want)
+			}
 		}
 	}
-
-	t.Logf("Score stability verified: %d runs produced identical scores", 2)
 }
 
-// TestCIScanner_PinnedFixture loads pinned.yml and verifies no unpinned action warnings.
 func TestCIScanner_PinnedFixture(t *testing.T) {
-	workflowDir := testdataPath(t, "workflows")
-	ciScanner := scanner.NewCIScanner()
-
-	report, err := ciScanner.ScanWorkflows(workflowDir)
+	report, err := scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
-
 	if report == nil {
 		t.Fatal("ScanWorkflows returned nil report")
 	}
 
-	// Verify pinned.yml has no findings (all actions are pinned to SHA).
 	var pinnedWF *scanner.WorkflowRisk
 	for _, wr := range report.Workflows {
 		if wr.Name == "CI" {
@@ -233,37 +173,30 @@ func TestCIScanner_PinnedFixture(t *testing.T) {
 			break
 		}
 	}
-
 	if pinnedWF == nil {
 		t.Fatalf("CI workflow not found in report")
 	}
 
-	if len(pinnedWF.Findings) > 0 {
-		t.Errorf("Expected zero findings for pinned workflow, got %d:", len(pinnedWF.Findings))
-		for _, f := range pinnedWF.Findings {
-			t.Logf("  - %s: %s", f.Category, f.Description)
+	// The contract for pinned.yml is that it must not produce findings in the
+	// two categories the fixture is built to avoid. Total finding count is left
+	// loose so unrelated heuristics can grow without breaking this test.
+	for _, f := range pinnedWF.Findings {
+		switch f.Category {
+		case "unpinned_action", "expression_injection":
+			t.Errorf("pinned workflow should not produce %s finding: %s", f.Category, f.Description)
 		}
 	}
-
-	t.Logf("Pinned workflow scan passed: %d findings (expected 0)", len(pinnedWF.Findings))
 }
 
-// TestCIScanner_UnsafeFixture loads unsafe.yml and verifies findings for unpinned actions
-// and dangerous expression injection patterns.
 func TestCIScanner_UnsafeFixture(t *testing.T) {
-	workflowDir := testdataPath(t, "workflows")
-	ciScanner := scanner.NewCIScanner()
-
-	report, err := ciScanner.ScanWorkflows(workflowDir)
+	report, err := scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
-
 	if report == nil {
 		t.Fatal("ScanWorkflows returned nil report")
 	}
 
-	// Verify unsafe.yml has findings.
 	var unsafeWF *scanner.WorkflowRisk
 	for _, wr := range report.Workflows {
 		if wr.Name == "Unsafe" {
@@ -271,40 +204,37 @@ func TestCIScanner_UnsafeFixture(t *testing.T) {
 			break
 		}
 	}
-
 	if unsafeWF == nil {
 		t.Fatalf("Unsafe workflow not found in report")
 	}
-
 	if len(unsafeWF.Findings) == 0 {
-		t.Errorf("Expected findings in unsafe workflow, got none")
+		t.Fatalf("expected findings in unsafe workflow, got none")
 	}
 
-	// Verify we found unpinned action or expression injection.
-	hasUnpinned := false
-	hasExprInjection := false
+	hasUnpinned, hasExprInjection := false, false
 	for _, f := range unsafeWF.Findings {
-		if f.Category == "unpinned_action" {
+		switch f.Category {
+		case "unpinned_action":
 			hasUnpinned = true
-		}
-		if f.Category == "expression_injection" {
+		case "expression_injection":
 			hasExprInjection = true
 		}
 	}
-
 	if !hasUnpinned && !hasExprInjection {
-		t.Errorf("Expected unpinned_action or expression_injection finding, got: %v", unsafeWF.Findings)
-	}
-
-	t.Logf("Unsafe workflow scan found %d findings (expected >= 1)", len(unsafeWF.Findings))
-	for _, f := range unsafeWF.Findings {
-		t.Logf("  - %s (%s): %s", f.Category, f.Severity, f.Description)
+		t.Errorf("expected unpinned_action or expression_injection finding, got: %v", unsafeWF.Findings)
 	}
 }
 
-// BenchmarkPipeline_Simple measures the performance of a full offline pipeline run.
+// BenchmarkPipeline_Simple measures the offline pipeline. Scanners and the
+// shared empty-map scaffolding are hoisted so the benchmark reflects pipeline
+// work, not per-iteration allocator noise.
 func BenchmarkPipeline_Simple(b *testing.B) {
-	gomodPath := testdataPath(b, "gomod", "simple.mod")
+	gomodPath := testdataPath("gomod", "simple.mod")
+
+	typosquatScanner := scanner.NewTyposquatScanner()
+	aiGenScanner := scanner.NewAIGenScanner()
+	emptyMaintainers := map[string]*scanner.MaintainerInfo{}
+	emptyResilience := map[string]*scanner.ResilienceInfo{}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -312,24 +242,9 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Resolve failed: %v", err)
 		}
-
-		typosquatScanner := scanner.NewTyposquatScanner()
-		typosquatResults := typosquatScanner.ScanAll(graph)
-
-		aiGenScanner := scanner.NewAIGenScanner()
-		aiGenResults := aiGenScanner.ScanAll(graph, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
-
-		scoreInput := scorer.ScoreInput{
-			Graph:       graph,
-			Vulns:       make(map[string][]scanner.Vulnerability),
-			Maintenance: make(map[string]*scanner.MaintenanceInfo),
-			Maintainers: make(map[string]*scanner.MaintainerInfo),
-			Typosquats:  typosquatResults,
-			Resilience:  make(map[string]*scanner.ResilienceInfo),
-			AIGenRisks:  aiGenResults,
-			TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-		}
-
-		_ = scorer.ScoreAll(scoreInput)
+		input := emptyScoreInput(graph)
+		input.Typosquats = typosquatScanner.ScanAll(graph)
+		input.AIGenRisks = aiGenScanner.ScanAll(graph, emptyMaintainers, emptyResilience)
+		_ = scorer.ScoreAll(input)
 	}
 }
