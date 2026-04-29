@@ -62,8 +62,7 @@ type gvcFinding struct {
 
 // ScanVulns runs govulncheck on the project directory and returns
 // vulnerabilities grouped by module path.
-func ScanVulns(ctx context.Context, projectDir string) (map[string][]Vulnerability, []string, error) {
-	var warnings []string
+func ScanVulns(ctx context.Context, projectDir string) (vulns map[string][]Vulnerability, warnings []string, err error) {
 	var stdout bytes.Buffer
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")

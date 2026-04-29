@@ -39,7 +39,15 @@ type TextOptions struct {
 }
 
 // WriteText generates the human-readable terminal output.
-func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts TextOptions) error {
+func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions) error {
+	if opts == nil {
+		return fmt.Errorf("nil TextOptions provided")
+	}
+
+	if opts.Writer == nil {
+		return fmt.Errorf("nil TextOptions.Writer provided")
+	}
+
 	w := opts.Writer
 	c := colorFunc(opts.NoColor)
 
@@ -490,11 +498,12 @@ func depExplanation(ds *scorer.DependencyScore) string {
 	}
 
 	if ds.Maintenance != nil {
-		if ds.Maintenance.Archived {
+		switch {
+		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		} else if ds.Maintenance.MonthsSinceRelease >= 24 {
+		case ds.Maintenance.MonthsSinceRelease >= 24:
 			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-		} else if ds.Maintenance.MonthsSinceRelease >= 12 {
+		case ds.Maintenance.MonthsSinceRelease >= 12:
 			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
 		}
 	}

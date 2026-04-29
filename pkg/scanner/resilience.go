@@ -316,24 +316,26 @@ func computeResilienceScore(info *ResilienceInfo) int {
 	}
 
 	// Project age & track record (0-20 points).
-	if info.ProjectAgeDays > 365*5 {
+	switch {
+	case info.ProjectAgeDays > 365*5:
 		score += 20 // 5+ years
-	} else if info.ProjectAgeDays > 365*2 {
+	case info.ProjectAgeDays > 365*2:
 		score += 15 // 2+ years
-	} else if info.ProjectAgeDays > 365 {
+	case info.ProjectAgeDays > 365:
 		score += 10 // 1+ year
-	} else {
+	default:
 		score += 5
 	}
 
 	// Release count depth (0-15 points).
-	if info.TotalReleases >= 20 {
+	switch {
+	case info.TotalReleases >= 20:
 		score += 15
-	} else if info.TotalReleases >= 10 {
+	case info.TotalReleases >= 10:
 		score += 10
-	} else if info.TotalReleases >= 5 {
+	case info.TotalReleases >= 5:
 		score += 7
-	} else {
+	default:
 		score += 2
 	}
 

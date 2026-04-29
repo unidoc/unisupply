@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
-	"github.com/unidoc/unisupply/internal/testutil"
 )
 
 // TestWriteJSON_ValidOutput tests that WriteJSON produces valid JSON with expected top-level keys.
@@ -251,10 +251,7 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 		t.Error("CI field should be nil, got non-nil value")
 	}
 
-	// Takeovers should be nil or empty
-	if report.Takeovers == nil {
-		// This is fine for omitempty
-	}
+	// Takeovers can be nil (omitempty in JSON output)
 }
 
 // TestWriteJSON_VulnerabilitiesPopulated tests that vulnerabilities are included.

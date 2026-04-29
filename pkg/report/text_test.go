@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
-	"github.com/unidoc/unisupply/internal/testutil"
 )
 
 // TestWriteText_ContainsSummary tests that output contains overall risk score and level.
@@ -41,7 +41,7 @@ func TestWriteText_ContainsSummary(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestWriteText_NoColor(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWriteText_ColorEnabled(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestWriteText_VulnSection(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestWriteText_RiskLevelGrouping(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 		Verbose: true, // Show all details
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestWriteText_SummaryStatistics(t *testing.T) {
 		Writer:  &bytes.Buffer{},
 	}
 
-	err := WriteText(graph, ps, opts)
+	err := WriteText(graph, ps, &opts)
 	if err != nil {
 		t.Fatalf("WriteText() failed: %v", err)
 	}

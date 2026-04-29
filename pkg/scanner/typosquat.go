@@ -294,11 +294,12 @@ func checkExtraChar(a, b string) bool {
 	j := 0
 	skipped := false
 	for i := 0; i < len(a) && j < len(b); i++ {
-		if a[i] == b[j] {
+		switch {
+		case a[i] == b[j]:
 			j++
-		} else if !skipped {
+		case !skipped:
 			skipped = true
-		} else {
+		default:
 			return false
 		}
 	}

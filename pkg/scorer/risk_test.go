@@ -3,8 +3,8 @@ package scorer
 import (
 	"testing"
 
-	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
 // TestLevelFromScore tests the risk level classification from score values.

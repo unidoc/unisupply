@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,9 @@ import (
 )
 
 const appVersion = "0.4.0"
+
+// errPolicyViolation is returned when the dependency graph fails policy evaluation.
+var errPolicyViolation = errors.New("policy violation")
 
 func main() {
 	var (
@@ -99,7 +103,11 @@ func main() {
 		trustIndexURL: trustIndexURL,
 	}
 
-	if err := run(cfg); err != nil {
+	if err := run(&cfg); err != nil {
+		// Policy violation should exit with code 2 for CI/CD integration.
+		if errors.Is(err, errPolicyViolation) {
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -123,7 +131,7 @@ type runConfig struct {
 	trustIndexURL string
 }
 
-func run(cfg runConfig) error {
+func run(cfg *runConfig) error {
 	// 1. Find go.mod.
 	gomodPath, err := parser.FindGoMod(cfg.path)
 	if err != nil {
@@ -261,7 +269,7 @@ func run(cfg runConfig) error {
 
 	switch cfg.format {
 	case "text":
-		err = report.WriteText(graph, projectScore, report.TextOptions{
+		err = report.WriteText(graph, projectScore, &report.TextOptions{
 			NoColor:     cfg.noColor,
 			Verbose:     cfg.verbose,
 			MinRisk:     cfg.minRisk,
@@ -325,7 +333,7 @@ func run(cfg runConfig) error {
 		fmt.Fprint(os.Stderr, result.FormatText(cfg.noColor))
 
 		if !result.Pass {
-			os.Exit(2) // Non-zero exit for CI/CD integration.
+			return errPolicyViolation
 		}
 	}
 

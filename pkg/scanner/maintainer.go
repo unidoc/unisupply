@@ -277,7 +277,7 @@ func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContr
 }
 
 func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func assessTakeover(info *MaintainerInfo) {
 	}
 }
 
-func parseGitHubPath(modPath string) (string, string) {
+func parseGitHubPath(modPath string) (owner, repo string) {
 	if !strings.HasPrefix(modPath, "github.com/") {
 		return "", ""
 	}
