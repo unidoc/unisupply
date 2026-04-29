@@ -12,11 +12,11 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-// testdataPath returns the absolute path to a file under testdata/ alongside this test.
-func testdataPath(parts ...string) string {
-	_, thisFile, _, ok := runtime.Caller(1)
+func testdataPath(t testing.TB, parts ...string) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
-		panic("could not determine test file path")
+		t.Fatalf("could not determine test file path")
 	}
 	pathParts := append([]string{filepath.Dir(thisFile), "testdata"}, parts...)
 	return filepath.Join(pathParts...)
@@ -25,12 +25,7 @@ func testdataPath(parts ...string) string {
 // TestFullPipeline_Simple exercises the offline pipeline end-to-end:
 // parse -> resolve -> scan (typosquat, AI-gen) -> score.
 func TestFullPipeline_Simple(t *testing.T) {
-	// Parse testdata/gomod/simple.mod
-	gomodPath := testdataPath("gomod", "simple.mod")
-	_, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		t.Fatalf("ParseGoMod failed: %v", err)
-	}
+	gomodPath := testdataPath(t, "gomod", "simple.mod")
 
 	// Resolve dependency graph (direct only to avoid network calls).
 	graph, warnings, err := resolver.Resolve(gomodPath, true)
@@ -92,7 +87,7 @@ func TestFullPipeline_Simple(t *testing.T) {
 // TestFullPipeline_Empty parses an empty go.mod and ensures the pipeline
 // handles zero dependencies gracefully.
 func TestFullPipeline_Empty(t *testing.T) {
-	gomodPath := testdataPath("gomod", "empty.mod")
+	gomodPath := testdataPath(t, "gomod", "empty.mod")
 	gomod, err := parser.ParseGoMod(gomodPath)
 	if err != nil {
 		t.Fatalf("ParseGoMod failed: %v", err)
@@ -143,7 +138,7 @@ func TestFullPipeline_Empty(t *testing.T) {
 // TestFullPipeline_ScoreStability runs the offline pipeline twice against
 // simple.mod and verifies risk scores are deterministic.
 func TestFullPipeline_ScoreStability(t *testing.T) {
-	gomodPath := testdataPath("gomod", "simple.mod")
+	gomodPath := testdataPath(t, "gomod", "simple.mod")
 
 	// Run 1.
 	graph1, _, err := resolver.Resolve(gomodPath, true)
@@ -197,22 +192,19 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 		t.Errorf("Dependency counts differ: %d vs %d", len(scores1.Dependencies), len(scores2.Dependencies))
 	}
 
+	scoresByModule := make(map[string]int, len(scores2.Dependencies))
+	for _, d := range scores2.Dependencies {
+		scoresByModule[d.Module] = d.RiskScore
+	}
+
 	for _, dep1 := range scores1.Dependencies {
-		// Find corresponding dep in scores2.
-		var dep2 *scorer.DependencyScore
-		for _, d := range scores2.Dependencies {
-			if d.Module == dep1.Module {
-				dep2 = d
-				break
-			}
-		}
-		if dep2 == nil {
+		score2, ok := scoresByModule[dep1.Module]
+		if !ok {
 			t.Errorf("Module %s missing in second run", dep1.Module)
 			continue
 		}
-
-		if dep1.RiskScore != dep2.RiskScore {
-			t.Errorf("Risk score differs for %s: %d vs %d", dep1.Module, dep1.RiskScore, dep2.RiskScore)
+		if dep1.RiskScore != score2 {
+			t.Errorf("Risk score differs for %s: %d vs %d", dep1.Module, dep1.RiskScore, score2)
 		}
 	}
 
@@ -221,7 +213,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 
 // TestCIScanner_PinnedFixture loads pinned.yml and verifies no unpinned action warnings.
 func TestCIScanner_PinnedFixture(t *testing.T) {
-	workflowDir := testdataPath("workflows")
+	workflowDir := testdataPath(t, "workflows")
 	ciScanner := scanner.NewCIScanner()
 
 	report, err := ciScanner.ScanWorkflows(workflowDir)
@@ -259,7 +251,7 @@ func TestCIScanner_PinnedFixture(t *testing.T) {
 // TestCIScanner_UnsafeFixture loads unsafe.yml and verifies findings for unpinned actions
 // and dangerous expression injection patterns.
 func TestCIScanner_UnsafeFixture(t *testing.T) {
-	workflowDir := testdataPath("workflows")
+	workflowDir := testdataPath(t, "workflows")
 	ciScanner := scanner.NewCIScanner()
 
 	report, err := ciScanner.ScanWorkflows(workflowDir)
@@ -312,7 +304,7 @@ func TestCIScanner_UnsafeFixture(t *testing.T) {
 
 // BenchmarkPipeline_Simple measures the performance of a full offline pipeline run.
 func BenchmarkPipeline_Simple(b *testing.B) {
-	gomodPath := testdataPath("gomod", "simple.mod")
+	gomodPath := testdataPath(b, "gomod", "simple.mod")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
