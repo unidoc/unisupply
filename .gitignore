@@ -8,3 +8,15 @@
 
 bin/
 coverage.out
+
+# Generated reports
+*.pdf
+
+# Build binary dropped at repo root (go build ./cmd/unisupply)
+/unisupply
+
+# Coverage artifacts
+*.coverprofile
+
+# Release archives
+dist/
