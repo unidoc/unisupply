@@ -147,7 +147,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 	}
 
 	typosquat1 := scanner.NewTyposquatScanner().ScanAll(graph1)
-	aigen1 := scanner.NewAIGenScanner().ScanAll(graph1, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
+	aiGen1 := scanner.NewAIGenScanner().ScanAll(graph1, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
 
 	input1 := scorer.ScoreInput{
 		Graph:       graph1,
@@ -156,7 +156,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 		Maintainers: make(map[string]*scanner.MaintainerInfo),
 		Typosquats:  typosquat1,
 		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  aigen1,
+		AIGenRisks:  aiGen1,
 		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
 	}
 	scores1 := scorer.ScoreAll(input1)
@@ -168,7 +168,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 	}
 
 	typosquat2 := scanner.NewTyposquatScanner().ScanAll(graph2)
-	aigen2 := scanner.NewAIGenScanner().ScanAll(graph2, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
+	aiGen2 := scanner.NewAIGenScanner().ScanAll(graph2, make(map[string]*scanner.MaintainerInfo), make(map[string]*scanner.ResilienceInfo))
 
 	input2 := scorer.ScoreInput{
 		Graph:       graph2,
@@ -177,7 +177,7 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 		Maintainers: make(map[string]*scanner.MaintainerInfo),
 		Typosquats:  typosquat2,
 		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  aigen2,
+		AIGenRisks:  aiGen2,
 		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
 	}
 	scores2 := scorer.ScoreAll(input2)
