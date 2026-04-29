@@ -10,8 +10,9 @@
 # then open a PR against master (will be gated by ci.yml like any other change).
 # To remove a maintainer: delete their line and open a PR.
 #
-# IMPORTANT: Replace the placeholder line below with a real public key before
-# the first release. The release workflow will fail on any tag push until at
-# least one valid entry exists.
-maintainer1@unidoc.io ssh-ed25519 AAAAC3NzREPLACEWITHREALPUBLICKEY unisupply-release-key-1
-# maintainer2@unidoc.io ssh-ed25519 AAAAC3NzREPLACEWITHREALPUBLICKEY unisupply-release-key-2
+# IMPORTANT: Uncomment and replace with real maintainer public keys before the
+# first release. The release workflow will fail at tag-signature verification
+# until at least one valid entry exists.
+# Example entries (replace email and key body, then uncomment):
+# maintainer1@unidoc.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI<replace-with-real-public-key> unisupply-release-key-1
+# maintainer2@unidoc.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI<replace-with-real-public-key> unisupply-release-key-2

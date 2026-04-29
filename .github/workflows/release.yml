@@ -170,12 +170,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release create "$TAG" \
-            --draft \
-            --title "$TAG" \
-            --generate-notes \
-            --notes "Draft release built from signed tag \`$TAG\`. Review the assets and auto-generated notes, edit as needed, then click **Publish release**." \
-            dist/archive/*
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/archive/* --clobber
+          else
+            gh release create "$TAG" \
+              --draft \
+              --title "$TAG" \
+              --generate-notes \
+              --notes "Draft release built from signed tag \`$TAG\`. Review the assets and auto-generated notes, edit as needed, then click **Publish release**." \
+              dist/archive/*
+          fi
 
       - name: Upload release artifacts
         if: always()
