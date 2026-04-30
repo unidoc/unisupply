@@ -14,6 +14,7 @@ import (
 // CIRiskLevel categorizes CI/CD risk.
 type CIRiskLevel string
 
+// CI/CD risk level bands. Mirrors scorer.RiskLevel for consistency in reports.
 const (
 	CIRiskLow      CIRiskLevel = "LOW"
 	CIRiskMedium   CIRiskLevel = "MEDIUM"

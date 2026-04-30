@@ -22,7 +22,10 @@ linters-settings:
   goimports:
     local-prefixes: github.com/unidoc/unisupply
   revive:
-    severity: warning
+    severity: error
+    rules:
+      - name: exported
+      - name: package-comments
   gocritic:
     enabled-tags: [diagnostic, style, performance]
 
