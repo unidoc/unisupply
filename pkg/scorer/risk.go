@@ -21,6 +21,7 @@ const (
 // RiskLevel categorizes the risk score.
 type RiskLevel string
 
+// Risk level bands. Boundaries are documented in CLAUDE.md.
 const (
 	RiskLow      RiskLevel = "LOW"
 	RiskMedium   RiskLevel = "MEDIUM"
