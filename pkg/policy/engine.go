@@ -69,7 +69,7 @@ type Result struct {
 
 // LoadPolicy reads a policy from a JSON file.
 func LoadPolicy(path string) (*Policy, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //#nosec G304 -- caller-supplied policy file path is the CLI's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading policy file: %w", err)
 	}

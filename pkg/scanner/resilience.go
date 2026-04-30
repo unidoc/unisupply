@@ -247,7 +247,7 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, f.path)
 		resp, err := rs.client.Head(url)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				*f.flag = true
 			}

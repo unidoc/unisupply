@@ -26,7 +26,7 @@ type GoMod struct {
 
 // ParseGoMod parses a go.mod file and returns structured data.
 func ParseGoMod(path string) (*GoMod, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //#nosec G304 -- caller-supplied go.mod path is the parser's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading go.mod: %w", err)
 	}
@@ -166,7 +166,7 @@ type GoSumEntry struct {
 
 // ParseGoSum parses a go.sum file and extracts unique module+version pairs.
 func ParseGoSum(path string) ([]GoSumEntry, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied go.sum path is the parser's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading go.sum: %w", err)
 	}
