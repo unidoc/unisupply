@@ -1,10 +1,17 @@
 .DS_Store
 .idea
 
-# Claude files and local settings
-.claude/plans
-.claude/projects
-.claude/settings.local.*
-
 bin/
 coverage.out
+
+# UniSupply generated report
+unisupply-report.pdf
+
+# Build binary dropped at repo root (go build ./cmd/unisupply)
+/unisupply
+
+# Coverage artifacts
+*.coverprofile
+
+# Release archives
+dist/
