@@ -100,11 +100,11 @@ jobs:
 
           for entry in "${targets[@]}"; do
             read -r GOOS GOARCH <<< "$entry"
+            export GOOS GOARCH
             EXT=""
             [ "$GOOS" = "windows" ] && EXT=".exe"
             echo "Building $GOOS/$GOARCH ..."
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -trimpath -ldflags='-s -w' \
+            CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
               -o "dist/bin/unisupply-${GOOS}-${GOARCH}${EXT}" \
               ./cmd/unisupply/
           done
@@ -152,7 +152,7 @@ jobs:
 
       - name: Generate SHA256SUMS
         run: |
-          cd dist/archive && sha256sum *.tar.gz *.zip > SHA256SUMS
+          cd dist/archive && sha256sum -- *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
       - name: Generate SBOMs
