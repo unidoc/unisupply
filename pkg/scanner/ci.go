@@ -314,7 +314,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 func (cs *CIScanner) scanDockerfile(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}
@@ -381,7 +381,7 @@ func (cs *CIScanner) scanDockerfile(path string) []CIFinding {
 func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}
@@ -425,7 +425,7 @@ func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 func (cs *CIScanner) scanShellScript(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}

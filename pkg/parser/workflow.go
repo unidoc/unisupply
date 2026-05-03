@@ -78,7 +78,7 @@ type rawStep struct {
 
 // ParseWorkflow parses a single GitHub Actions workflow YAML file.
 func ParseWorkflow(path string) (*Workflow, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //#nosec G304 -- caller-supplied workflow file path is the parser's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading workflow %s: %w", path, err)
 	}
