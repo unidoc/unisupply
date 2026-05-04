@@ -12,6 +12,12 @@ import (
 )
 
 // Policy defines organizational rules for acceptable supply chain risk.
+//
+// The JSON shape of this struct is the public schema users author at the
+// command line via --policy. Reference policy files live under examples/
+// (policy-strict.json, policy-moderate.json, policy-custom.json)
+// keep them in sync when fields change here. DefaultStrictPolicy and
+// DefaultModeratePolicy below define the values mirrored by the first two.
 type Policy struct {
 	// MaxRiskScore fails if any dependency exceeds this score (0-100).
 	MaxRiskScore *int `json:"max_risk_score,omitempty"`
