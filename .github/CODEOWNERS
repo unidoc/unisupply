@@ -1,0 +1,24 @@
+# CODEOWNERS for unisupply
+#
+# GitHub uses this file to auto-request reviews on pull requests.
+#
+# IMPORTANT: CODEOWNERS reviews are only *enforced* when branch protection is
+# configured to require them. Branch protection lands in a PR; until
+# then this file is dormant — it will request reviewers but cannot block a
+# merge. (See OpenSSF Scorecard "Branch-Protection" check.)
+#
+# Catch-all: every PR — including bot PRs (Dependabot/Renovate) — routes to
+# the maintainers team for review.
+
+* @unidoc/unidoc-devs
+
+# CI, release, and security workflows — extra-careful review on anything
+# that affects how releases are built, signed, or attested.
+/.github/                       @unidoc/unidoc-devs
+
+# The trust anchor for release signing. Any change here is a security-
+# critical event; treat reviews accordingly.
+/.github/allowed_signers        @unidoc/unidoc-devs
+
+# Product specification — design changes need maintainer sign-off.
+/spec/                          @unidoc/unidoc-devs
