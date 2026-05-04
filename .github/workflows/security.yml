@@ -73,7 +73,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          /tmp/unisupply ./ --format json --github-token "$GITHUB_TOKEN" | tee /tmp/unisupply.json
+          /tmp/unisupply ./ --format json --github-token "$GITHUB_TOKEN" \
+            > /tmp/unisupply.json
+          /tmp/unisupply ./ --no-color --github-token "$GITHUB_TOKEN" \
+            > /tmp/unisupply.txt
 
       - name: List stale direct dependencies
         run: |
@@ -120,10 +123,120 @@ jobs:
 
           echo "stale=$STALE_FLAG" >> "$GITHUB_OUTPUT"
 
-      - name: Upload gosec SARIF
-        uses: github/codeql-action/upload-sarif@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3
-        with:
-          sarif_file: /tmp/gosec.sarif
+      - name: Render supply-chain report to job summary
+        if: always()
+        env:
+          GOVULNCHECK_RC: ${{ steps.govulncheck.outputs.govulncheck_rc }}
+          STALE: ${{ steps.staleness.outputs.stale }}
+        run: |
+          set -euo pipefail
+
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+          if [ ! -s /tmp/unisupply.json ]; then
+            {
+              echo "# Supply Chain Self-Scan"
+              echo
+              echo "_unisupply self-scan did not produce output._"
+            } >> "$SUMMARY"
+            exit 0
+          fi
+
+          LEVEL=$(jq -r '.overall_risk_level // "UNKNOWN"' /tmp/unisupply.json)
+          SCORE=$(jq -r '.overall_risk_score // "?"'    /tmp/unisupply.json)
+
+          case "$LEVEL" in
+            LOW)      LEVEL_BADGE="🟢 LOW" ;;
+            MEDIUM)   LEVEL_BADGE="🟡 MEDIUM" ;;
+            HIGH)     LEVEL_BADGE="🟠 HIGH" ;;
+            CRITICAL) LEVEL_BADGE="🔴 CRITICAL" ;;
+            *)        LEVEL_BADGE="⚪ $LEVEL" ;;
+          esac
+
+          case "${GOVULNCHECK_RC:-}" in
+            0)  GOVULN_BADGE="🟢 0 — no vulnerabilities" ;;
+            3)  GOVULN_BADGE="🔴 3 — call-graph-reachable vulnerability found" ;;
+            "") GOVULN_BADGE="⚪ (not run)" ;;
+            *)  GOVULN_BADGE="🟠 ${GOVULNCHECK_RC} — tool error" ;;
+          esac
+
+          {
+            echo "# Supply Chain Self-Scan — unisupply (dogfood)"
+            echo
+            echo "- **Run:** \`${GITHUB_WORKFLOW}\` #${GITHUB_RUN_NUMBER}"
+            echo "- **Commit:** \`${GITHUB_SHA:0:12}\` (\`${GITHUB_REF_NAME}\`)"
+            echo "- **Generated:** $(jq -r '.generated_at // "?"' /tmp/unisupply.json)"
+            echo
+            echo "## Risk"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Overall risk level | ${LEVEL_BADGE} |"
+            echo "| Overall risk score | **${SCORE}** / 100 |"
+            echo "| govulncheck exit code | ${GOVULN_BADGE} |"
+            echo "| Stale dependencies (>90d) | ${STALE:-unknown} |"
+            echo
+            echo "## Project"
+            echo
+            jq -r '
+              .project as $p |
+              "| Field | Value |\n|---|---|\n" +
+              "| Module | `\($p.module)` |\n" +
+              "| Go version | \($p.go_version) |\n" +
+              "| Direct dependencies | \($p.direct_dependencies) |\n" +
+              "| Transitive dependencies | \($p.transitive_dependencies) |\n" +
+              "| Total dependencies | \($p.total_dependencies) |"
+            ' /tmp/unisupply.json
+            echo
+            echo "## Summary"
+            echo
+            jq -r '
+              .summary as $s |
+              "| Metric | Count |\n|---|---|\n" +
+              "| High risk | \($s.high_risk_count) |\n" +
+              "| Medium risk | \($s.medium_risk_count) |\n" +
+              "| Low risk | \($s.low_risk_count) |\n" +
+              "| Total vulnerabilities | \($s.total_vulnerabilities) |\n" +
+              "| Unmaintained ≥1yr | \($s.unmaintained_1yr) |\n" +
+              "| Unmaintained ≥2yr | \($s.unmaintained_2yr) |"
+            ' /tmp/unisupply.json
+            echo
+            echo "## Top 10 risky dependencies"
+            echo
+            echo "| Module | Version | Level | Score | Direct | Risk factors |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '
+              .dependencies
+              | sort_by(-.risk_score)
+              | .[0:10][]
+              | "| `\(.module)` | \(.version) | \(.risk_level) | \(.risk_score) | \(if .direct then "✅" else "—" end) | \((.risk_factors // []) | join(", ")) |"
+            ' /tmp/unisupply.json
+            echo
+
+            TAKEOVER_COUNT=$(jq -r '(.takeover_candidates // []) | length' /tmp/unisupply.json)
+            if [ "$TAKEOVER_COUNT" -gt 0 ]; then
+              echo "<details><summary><strong>Takeover candidates (${TAKEOVER_COUNT})</strong></summary>"
+              echo
+              jq -r '(.takeover_candidates // [])[] | "- `\(.)`"' /tmp/unisupply.json
+              echo
+              echo "</details>"
+              echo
+            fi
+
+            if [ -s /tmp/stale-90.txt ]; then
+              echo "<details><summary><strong>Dependencies older than 90 days</strong></summary>"
+              echo
+              echo '```'
+              cat /tmp/stale-90.txt
+              echo '```'
+              echo "</details>"
+              echo
+            fi
+
+            echo "---"
+            echo
+            echo "_Full JSON, plain-text report, gosec SARIF, and govulncheck output are attached as workflow artifacts (\`scan-results\`)._"
+          } >> "$SUMMARY"
 
       - name: Upload scan artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -132,9 +245,11 @@ jobs:
           path: |
             /tmp/govulncheck.json
             /tmp/unisupply.json
+            /tmp/unisupply.txt
+            /tmp/gosec.sarif
             /tmp/stale-deps.txt
             /tmp/stale-90.txt
-          retention-days: 1
+          retention-days: 30
           if-no-files-found: warn
 
   report:
