@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- version confirmed by PR 09 before merge; release date filled in by PR 11 -->
 
-First public release. Feature-complete: nine scanners, four output formats,
+First public release. Feature-complete: nine scanners, five output formats,
 policy engine, Trust Index integration, SBOM generation.
 
 ### Added

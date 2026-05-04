@@ -22,8 +22,9 @@ mechanism (OWASP SCVS V4.1).
 supply chain risk assessment. It runs nine focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
-file inspection, and Trust Index lookup — combines the signals into a weighted
-risk score per dependency, and renders the result as a colored terminal
+file inspection, and Trust Index lookup — combines the in-tree scanner signals
+into a weighted risk score per dependency, attaches the optional Trust Index
+data to each report alongside that score, and renders the result as a colored terminal
 summary, machine-readable JSON, an enterprise PDF report, or a CycloneDX /
 SPDX SBOM. A built-in policy engine fails CI on configurable thresholds
 (critical vulns, max age, blocked modules, unpinned actions, ...).
@@ -166,7 +167,7 @@ A minimal custom policy (every field is optional — see
   "max_depth": 8,
   "max_ci_score": 50,
   "blocked_modules": ["github.com/suspicious/pkg"],
-  "allowed_modules": ["golang.org/x/*", "github.com/unidoc/*"]
+  "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
 ```
 
@@ -175,8 +176,12 @@ Notable fields:
 - `no_known_vulns` / `no_critical_vulns` — fail on any vuln, or only on
   high/critical-severity vulns.
 - `no_single_maintainer` — fail if any **direct** dependency has bus factor ≤ 1.
-- `allowed_modules` — when set, acts as a strict whitelist; everything else
-  is rejected.
+- `allowed_modules` — when set, acts as a strict whitelist applied to **direct
+  dependencies only**; transitive modules are not gated by this rule. Each
+  entry matches by exact module path or by path-prefix (`"golang.org/x/"`
+  matches `golang.org/x/net`); glob patterns are not supported.
+- `blocked_modules` — applies to direct and transitive dependencies, with the
+  same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
 
@@ -247,9 +252,10 @@ output unchanged.
 
 ### Privacy and operational notes
 
-- The lookup payload contains **only module paths and versions** — the same
-  information that is already in your published `go.mod` / `go.sum`. It does
-  not include source code, scan results, or any project-identifying data.
+- The lookup payload contains **only module paths** — the same information
+  that is already in your published `go.mod`. Versions are not transmitted,
+  and the request includes no source code, scan results, or other
+  project-identifying data.
 - The whole feature is **opt-in and additive**. Leaving `--trust-index-url`
   off produces a fully self-contained scan — `unisupply` never reaches out
   to unitrust by default and has no implicit endpoint.

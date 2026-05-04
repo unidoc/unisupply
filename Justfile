@@ -68,7 +68,7 @@ lint:
 # Format code
 fmt:
     gofmt -w -s .
-    goimports -w .
+    goimports -w -local github.com/unidoc/unisupply .
 
 # Vet
 vet:
