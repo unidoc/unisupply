@@ -1,4 +1,4 @@
-name: security
+name: Security
 
 on:
   schedule:
@@ -269,6 +269,7 @@ jobs:
       - name: File weekly security issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           STALE: ${{ needs.audit.outputs.stale }}
           GOVULNCHECK_RC: ${{ needs.audit.outputs.govulncheck_rc }}
           EVENT_NAME: ${{ github.event_name }}
