@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - YYYY-MM-DD
 
-<!-- version confirmed by PR 09 before merge; release date filled in by PR 11 -->
+<!-- release date filled in by PR of rc-v* -->
 
 First public release. Feature-complete: nine scanners, five output formats,
 policy engine, Trust Index integration, SBOM generation.
