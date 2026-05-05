@@ -9,6 +9,7 @@
   "no_deprecated": true,
   "no_typosquatting": true,
   "no_unmaintained_months": 18,
+  "max_depth": 5,
   "allowed_modules": [
     "golang.org/x/",
     "github.com/unidoc/"

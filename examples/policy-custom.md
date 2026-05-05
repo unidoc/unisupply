@@ -81,6 +81,14 @@ well-known module. **Strict preset:** enabled.
 Fails any dependency whose last release is older than the given number
 of months. **Strict preset:** `24`.
 
+### Dependency graph rules
+
+#### `.max_depth` *(int)*
+Fails any dependency whose transitive depth from the root module
+exceeds this value. Direct dependencies are at depth `1`. Use this to
+flag deeply-nested transitive chains where a compromise is harder to
+notice. Neither preset enables this rule.
+
 ### Allow / deny lists
 
 #### `.allowed_modules` *(string[])*
@@ -95,6 +103,9 @@ Transitive modules are not evaluated against this list.
   "github.com/spf13/pflag"    // matches that exact module only
 ]
 ```
+
+A trailing `/` on a prefix entry is optional — `golang.org/x/` and
+`golang.org/x` both match `golang.org/x/<anything>`.
 
 #### `.blocked_modules` *(string[])*
 Always-fail list, applied to direct and transitive dependencies.

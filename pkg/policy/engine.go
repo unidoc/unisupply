@@ -174,7 +174,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// Blocked modules.
 		for _, blocked := range p.BlockedModules {
-			if ds.Module == blocked || strings.HasPrefix(ds.Module, blocked+"/") {
+			prefix := strings.TrimSuffix(blocked, "/")
+			if ds.Module == prefix || strings.HasPrefix(ds.Module, prefix+"/") {
 				result.addError("blocked_module", ds.Module,
 					fmt.Sprintf("module is on the blocklist"))
 			}
@@ -184,7 +185,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		if len(p.AllowedModules) > 0 && ds.Direct {
 			allowed := false
 			for _, a := range p.AllowedModules {
-				if ds.Module == a || strings.HasPrefix(ds.Module, a+"/") {
+				prefix := strings.TrimSuffix(a, "/")
+				if ds.Module == prefix || strings.HasPrefix(ds.Module, prefix+"/") {
 					allowed = true
 					break
 				}
