@@ -1,0 +1,21 @@
+{
+  "max_risk_score": 75,
+  "max_overall_score": 60,
+  "max_ci_score": 50,
+  "no_known_vulns": false,
+  "no_critical_vulns": true,
+  "no_single_maintainer": true,
+  "no_archived": true,
+  "no_deprecated": true,
+  "no_typosquatting": true,
+  "no_unmaintained_months": 18,
+  "max_depth": 5,
+  "allowed_modules": [
+    "golang.org/x/",
+    "github.com/unidoc/"
+  ],
+  "blocked_modules": [
+    "github.com/suspicious/pkg",
+    "github.com/known-bad/"
+  ]
+}

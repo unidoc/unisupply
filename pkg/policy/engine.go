@@ -12,6 +12,12 @@ import (
 )
 
 // Policy defines organizational rules for acceptable supply chain risk.
+//
+// The JSON shape of this struct is the public schema users author at the
+// command line via --policy. Reference policy files live under examples/
+// (policy-strict.json, policy-moderate.json, policy-custom.json)
+// keep them in sync when fields change here. DefaultStrictPolicy and
+// DefaultModeratePolicy below define the values mirrored by the first two.
 type Policy struct {
 	// MaxRiskScore fails if any dependency exceeds this score (0-100).
 	MaxRiskScore *int `json:"max_risk_score,omitempty"`
@@ -168,7 +174,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// Blocked modules.
 		for _, blocked := range p.BlockedModules {
-			if ds.Module == blocked || strings.HasPrefix(ds.Module, blocked+"/") {
+			prefix := strings.TrimSuffix(blocked, "/")
+			if ds.Module == prefix || strings.HasPrefix(ds.Module, prefix+"/") {
 				result.addError("blocked_module", ds.Module,
 					fmt.Sprintf("module is on the blocklist"))
 			}
@@ -178,7 +185,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		if len(p.AllowedModules) > 0 && ds.Direct {
 			allowed := false
 			for _, a := range p.AllowedModules {
-				if ds.Module == a || strings.HasPrefix(ds.Module, a+"/") {
+				prefix := strings.TrimSuffix(a, "/")
+				if ds.Module == prefix || strings.HasPrefix(ds.Module, prefix+"/") {
 					allowed = true
 					break
 				}

@@ -1,0 +1,61 @@
+# Drop-in GitHub Actions integration for unisupply.
+#
+# Add this as `.github/workflows/supply-chain.yml` in your project. It scans
+# every push and pull request, enforces the policy file at the repo root, and
+# uploads the JSON report as a workflow artifact even when the policy gate
+# fails. Replace `v0.4.0` with the unisupply release you want to pin to.
+#
+# Action SHAs below match the pinning the unisupply project uses for itself.
+# Update them when you bump action major versions.
+
+name: Supply chain
+
+on:
+  push:
+    branches: [main, master, development]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unisupply:
+    name: unisupply scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      UNISUPPLY_VERSION: v0.4.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Install unisupply
+        run: |
+          go install "github.com/unidoc/unisupply/cmd/unisupply@${UNISUPPLY_VERSION}"
+          unisupply --version
+
+      - name: Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          unisupply ./ \
+            --format json \
+            --output unisupply.json \
+            --policy ./policy.json \
+            --github-token "$GITHUB_TOKEN"
+
+      # Always upload, even when the previous step exits 2 on a policy
+      # violation, so the report is available for triage.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: unisupply-report
+          path: unisupply.json
+          retention-days: 30

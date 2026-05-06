@@ -772,6 +772,57 @@ func TestEvaluate_AllowedModules_PrefixMatch(t *testing.T) {
 	}
 }
 
+// Tests for Evaluate - AllowedModules (prefix entry with trailing slash)
+func TestEvaluate_AllowedModules_PrefixTrailingSlash(t *testing.T) {
+	p := &policy.Policy{
+		AllowedModules: []string{"github.com/allowed/"},
+	}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:      "github.com/allowed/pkg",
+			Version:     "v1.0.0",
+			Direct:      true,
+			RiskScore:   30,
+			Maintenance: &scanner.MaintenanceInfo{},
+		},
+	}
+
+	input := makeEvalInput(deps, 30)
+	result := p.Evaluate(input)
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true for trailing-slash prefix, got false. Violations: %v", result.Violations)
+	}
+}
+
+// Tests for Evaluate - BlockedModules (prefix entry with trailing slash)
+func TestEvaluate_BlockedModules_PrefixTrailingSlash(t *testing.T) {
+	p := &policy.Policy{
+		BlockedModules: []string{"github.com/blocked/"},
+	}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:      "github.com/blocked/pkg",
+			Version:     "v1.0.0",
+			Direct:      true,
+			RiskScore:   30,
+			Maintenance: &scanner.MaintenanceInfo{},
+		},
+	}
+
+	input := makeEvalInput(deps, 30)
+	result := p.Evaluate(input)
+
+	if result.Pass {
+		t.Errorf("expected Pass=false for trailing-slash blocked prefix, got true")
+	}
+	if len(result.Violations) != 1 || result.Violations[0].Rule != "blocked_module" {
+		t.Errorf("expected one blocked_module violation, got %v", result.Violations)
+	}
+}
+
 // Tests for Evaluate - MaxCIScore
 func TestEvaluate_MaxCIScore(t *testing.T) {
 	maxCI := 50
