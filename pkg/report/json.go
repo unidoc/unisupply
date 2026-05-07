@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -167,7 +168,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 	report := JSONReport{
 		Tool:        "unisupply",
-		Version:     version,
+		Version:     version.Version,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Project: JSONProject{
 			Module:     graph.Root,

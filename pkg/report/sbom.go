@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -81,7 +82,7 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		Metadata: cdxMetadata{
 			Timestamp: now.Format(time.RFC3339),
 			Tools: []cdxTool{
-				{Vendor: "UniDoc", Name: "unisupply", Version: version},
+				{Vendor: "UniDoc", Name: "unisupply", Version: version.Version},
 			},
 			Component: &cdxComponent{
 				Type:    "application",
@@ -228,7 +229,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		DocumentNamespace: fmt.Sprintf("https://spdx.org/spdxdocs/unisupply-%s-%s", graph.Root, now.Format("20060102T150405Z")),
 		CreationInfo: spdxCreationInfo{
 			Created:  now.Format(time.RFC3339),
-			Creators: []string{fmt.Sprintf("Tool: unisupply-%s", version)},
+			Creators: []string{fmt.Sprintf("Tool: unisupply-%s", version.Version)},
 		},
 	}
 
@@ -283,7 +284,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 					pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
 						AnnotationDate: now.Format(time.RFC3339),
 						AnnotationType: "REVIEW",
-						Annotator:      fmt.Sprintf("Tool: unisupply-%s", version),
+						Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
 						Comment:        fmt.Sprintf("risk_score=%d risk_level=%s", ds.RiskScore, ds.RiskLevel),
 					})
 					break
