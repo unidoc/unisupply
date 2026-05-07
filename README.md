@@ -324,9 +324,8 @@ Environment variables:
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
 - [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog 1.1)
+- [RELEASING.md](RELEASING.md) — maintainer release procedure
 - [LICENSE](LICENSE) — Apache License 2.0
-
-<!-- TODO (PR 09 / M7.x): add RELEASING.md link here once the release-prep PR lands. -->
 
 ## License
 
