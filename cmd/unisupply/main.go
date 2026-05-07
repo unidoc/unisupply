@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/report"
@@ -19,8 +20,6 @@ import (
 
 	flag "github.com/spf13/pflag"
 )
-
-const appVersion = "0.4.0"
 
 // errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
@@ -70,7 +69,10 @@ func main() {
 	}
 
 	if showVer {
-		fmt.Printf("unisupply v%s\n", appVersion)
+		fmt.Printf("unisupply v%s\n", version.String())
+		if version.IsPreRelease() {
+			fmt.Fprintln(os.Stderr, "[WARNING] pre-release build — not for production use")
+		}
 		os.Exit(0)
 	}
 
@@ -341,7 +343,7 @@ func run(cfg *runConfig) error {
 }
 
 func printUsage() {
-	fmt.Printf("unisupply v%s — Go Supply Chain Risk Assessment\n", appVersion)
+	fmt.Printf("unisupply v%s — Go Supply Chain Risk Assessment\n", version.String())
 	fmt.Println("by UniDoc (unidoc.io)")
 	fmt.Println()
 	fmt.Println("Usage:")

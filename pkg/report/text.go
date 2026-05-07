@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
-
-const version = "0.4.0"
 
 // ANSI color codes.
 const (
@@ -52,7 +51,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	c := colorFunc(opts.NoColor)
 
 	// Header.
-	fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("unisupply v%s — Go Supply Chain Risk Assessment", version)))
+	fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("unisupply v%s — Go Supply Chain Risk Assessment", version.String())))
 	fmt.Fprintf(w, "%s\n\n", c(colorDim, "by UniDoc (unidoc.io)"))
 
 	fmt.Fprintf(w, "Project: %s\n", graph.Root)
