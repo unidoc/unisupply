@@ -71,7 +71,7 @@ func main() {
 	if showVer {
 		fmt.Printf("unisupply v%s\n", version.String())
 		if version.IsPreRelease() {
-			fmt.Println("[WARNING] pre-release build — not for production use")
+			fmt.Fprintln(os.Stderr, "[WARNING] pre-release build — not for production use")
 		}
 		os.Exit(0)
 	}
