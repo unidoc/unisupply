@@ -1,6 +1,6 @@
 module github.com/unidoc/unisupply
 
-go 1.25.3
+go 1.25.10
 
 require (
 	github.com/spf13/pflag v1.0.10
