@@ -18,7 +18,7 @@
 
 # The trust anchor for release signing. Any change here is a security-
 # critical event; treat reviews accordingly.
-/.github/allowed_signers        @unidoc/unidoc-devs
+/.github/allowed_signers        @unidoc-alip @ahall @gunnsth
 
 # Product specification — design changes need maintainer sign-off.
 /spec/                          @unidoc/unidoc-devs
