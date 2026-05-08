@@ -1,5 +1,5 @@
 name: Verify Version Parity
-description: Check that both source-code version constants match the expected version.
+description: Check that the version constant in internal/version/version.go matches the release tag.
 
 inputs:
   version:
@@ -14,12 +14,10 @@ runs:
       env:
         EXPECTED: ${{ inputs.version }}
       run: |
-        APP_VER=$(grep -E '^const appVersion = "[^"]+"' cmd/unisupply/main.go \
-                   | sed -E 's/.*"([^"]+)".*/\1/')
-        TXT_VER=$(grep -E '^const version = "[^"]+"' pkg/report/text.go \
-                   | sed -E 's/.*"([^"]+)".*/\1/')
-        echo "expected=$EXPECTED  main.go=$APP_VER  text.go=$TXT_VER"
-        fail=0
-        [ "$APP_VER" = "$EXPECTED" ] || { echo "::error::cmd/unisupply/main.go appVersion ($APP_VER) != $EXPECTED"; fail=1; }
-        [ "$TXT_VER" = "$EXPECTED" ] || { echo "::error::pkg/report/text.go version ($TXT_VER) != $EXPECTED"; fail=1; }
-        exit $fail
+        VER=$(grep -E '^const Version = "[^"]+"' internal/version/version.go \
+               | sed -E 's/.*"([^"]+)".*/\1/')
+        echo "expected=$EXPECTED  internal/version/version.go=$VER"
+        [ "$VER" = "$EXPECTED" ] || {
+          echo "::error::internal/version/version.go Version ($VER) != $EXPECTED"
+          exit 1
+        }
