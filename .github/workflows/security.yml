@@ -78,6 +78,11 @@ jobs:
           /tmp/unisupply ./ --no-color --github-token "$GITHUB_TOKEN" \
             > /tmp/unisupply.txt
 
+      - name: Run unisupply CI/CD scan
+        run: |
+          set -euo pipefail
+          /tmp/unisupply ./ --scan-ci --no-color --policy-preset moderate
+
       - name: List stale direct dependencies
         run: |
           set -euo pipefail
