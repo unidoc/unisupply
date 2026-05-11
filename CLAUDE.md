@@ -41,9 +41,9 @@ Risk Score (0-100) =
   + Depth           × 0.15
   + Maintainer Risk × 0.10
   + Maturity        × 0.10
-  + Typosquat Bonus (0-20)
-  + AIGen Bonus     (0-15)
-  - Resilience      (0-6)
+  + Typosquat Penalty      (0-20)
+  + AI-Gen Penalty         (0-15)
+  + Low-Resilience Penalty (0-6) // adds when resilience score < 30
 ```
 
 Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
@@ -138,7 +138,7 @@ unisupply ./ --min-risk medium --show-only vulnerabilities,maintenance
 | Var | Purpose |
 |-----|---------|
 | `GITHUB_TOKEN` | GitHub API access (higher rate limits, private repos) |
-| `UNIDOC_API_KEY` | UniDoc license key (for PDF generation) |
+| `UNIDOC_LICENSE_API_KEY` | UniDoc license key (for PDF generation) |
 
 ## Policy engine
 
@@ -146,14 +146,21 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
 
 ```json
 {
-  "max_critical": 0,
-  "max_high": 5,
-  "max_vulnerability_age_days": 30,
-  "require_pinned_actions": true,
+  "max_risk_score": 75,
+  "max_overall_score": 60,
+  "no_critical_vulns": true,
+  "no_single_maintainer": true,
+  "no_unmaintained_months": 18,
+  "no_archived": true,
+  "no_typosquatting": true,
+  "max_ci_score": 50,
   "blocked_modules": ["github.com/suspicious/pkg"],
-  "whitelisted_modules": ["golang.org/x/*"]
+  "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
 ```
+
+See `pkg/policy/engine.go` for the full schema and `examples/policy-custom.json`
+for an annotated reference.
 
 Exit code 2 on policy violation — designed for CI/CD fail-fast.
 
@@ -187,7 +194,7 @@ just run-verbose ./            # scan with verbose output
 
 # Reports
 just json ./                   # JSON output
-just pdf ./                    # PDF report (needs UNIDOC_API_KEY)
+just pdf ./                    # PDF report (needs UNIDOC_LICENSE_API_KEY)
 just sbom-cyclonedx ./         # CycloneDX SBOM
 just sbom-spdx ./              # SPDX SBOM
 

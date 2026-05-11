@@ -120,9 +120,9 @@ Risk Score (0–100) =
   + Depth           × 0.15
   + Maintainer Risk × 0.10
   + Maturity        × 0.10
-  + Typosquat Bonus       (0–20)
-  + AIGen Bonus           (0–15)
-  + Low-Resilience Bonus  (0–6)   // adds when resilience score < 30
+  + Typosquat Penalty      (0–20)
+  + AI-Gen Penalty         (0–15)
+  + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
 ```
 
 Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL** 76–100.
@@ -307,7 +307,8 @@ The most frequently used flags:
 | `--trust-index-url`     | unitrust endpoint for curated trust scores                    |
 | `--policy-preset`       | `strict` or `moderate`                                        |
 | `--policy`              | Path to a custom policy JSON file                             |
-| `--scan-ci`             | Enable GitHub Actions / Dockerfile / Makefile audit           |
+| `--scan-workflows`      | Audit `.github/workflows/*.yml` only                          |
+| `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts |
 | `--min-risk`            | Hide dependencies below the given score                       |
 | `--direct-only`         | Skip transitive dependencies                                  |
 | `-v, --verbose`         | Per-dependency breakdown                                      |
@@ -321,6 +322,7 @@ Environment variables:
 
 ## Documentation
 
+- [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
 - [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog 1.1)
