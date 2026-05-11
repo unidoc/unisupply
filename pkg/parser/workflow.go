@@ -28,44 +28,44 @@ type WorkflowPermissions struct {
 
 // WorkflowJob represents a job in a workflow.
 type WorkflowJob struct {
-	Name        string
-	RunsOn      string
-	Permissions WorkflowPermissions
-	Steps       []WorkflowStep
+	Name         string
+	RunsOn       string
+	Permissions  WorkflowPermissions
+	Steps        []WorkflowStep
 	IsSelfHosted bool
 }
 
 // WorkflowStep represents a step in a job.
 type WorkflowStep struct {
-	Name     string
-	Uses     string // action reference, e.g., "actions/checkout@v4"
-	Run      string // shell command
-	With     map[string]string
-	Env      map[string]string
+	Name string
+	Uses string // action reference, e.g., "actions/checkout@v4"
+	Run  string // shell command
+	With map[string]string
+	Env  map[string]string
 }
 
 // ActionRef represents a parsed action reference.
 type ActionRef struct {
-	Owner   string
-	Repo    string
-	Version string
-	IsPinned bool   // true if version is a full SHA
-	IsLocal  bool   // true if it's a local action (e.g., ./.github/actions/foo)
+	Owner    string
+	Repo     string
+	Version  string
+	IsPinned bool // true if version is a full SHA
+	IsLocal  bool // true if it's a local action (e.g., ./.github/actions/foo)
 }
 
 // rawWorkflow is the raw YAML structure for unmarshaling.
 type rawWorkflow struct {
-	Name        string                       `yaml:"name"`
-	Permissions interface{}                  `yaml:"permissions"`
-	On          interface{}                  `yaml:"on"`
-	Jobs        map[string]rawJob            `yaml:"jobs"`
+	Name        string            `yaml:"name"`
+	Permissions interface{}       `yaml:"permissions"`
+	On          interface{}       `yaml:"on"`
+	Jobs        map[string]rawJob `yaml:"jobs"`
 }
 
 type rawJob struct {
-	Name        string                       `yaml:"name"`
-	RunsOn      interface{}                  `yaml:"runs-on"`
-	Permissions interface{}                  `yaml:"permissions"`
-	Steps       []rawStep                    `yaml:"steps"`
+	Name        string      `yaml:"name"`
+	RunsOn      interface{} `yaml:"runs-on"`
+	Permissions interface{} `yaml:"permissions"`
+	Steps       []rawStep   `yaml:"steps"`
 }
 
 type rawStep struct {
@@ -78,7 +78,7 @@ type rawStep struct {
 
 // ParseWorkflow parses a single GitHub Actions workflow YAML file.
 func ParseWorkflow(path string) (*Workflow, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //#nosec G304 -- caller-supplied workflow file path is the parser's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading workflow %s: %w", path, err)
 	}
@@ -200,15 +200,15 @@ func IsOfficialAction(ref *ActionRef) bool {
 	}
 
 	trustedOrgs := map[string]bool{
-		"actions":    true,
-		"github":     true,
-		"docker":     true,
-		"azure":      true,
-		"aws-actions": true,
+		"actions":               true,
+		"github":                true,
+		"docker":                true,
+		"azure":                 true,
+		"aws-actions":           true,
 		"google-github-actions": true,
-		"hashicorp":  true,
-		"goreleaser": true,
-		"codecov":    true,
+		"hashicorp":             true,
+		"goreleaser":            true,
+		"codecov":               true,
 	}
 
 	return trustedOrgs[ref.Owner]

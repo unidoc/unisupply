@@ -13,12 +13,12 @@ import (
 
 // Dependency represents a resolved dependency with graph info.
 type Dependency struct {
-	Module       parser.Module
-	Direct       bool
-	Depth        int      // 0 = direct, 1 = one level transitive, etc.
-	UsedBy       []string // module paths that depend on this
-	Replaced     bool     // whether this module is replaced in go.mod
-	TransitiveDeps int    // how many dependencies this module itself pulls in
+	Module         parser.Module
+	Direct         bool
+	Depth          int      // 0 = direct, 1 = one level transitive, etc.
+	UsedBy         []string // module paths that depend on this
+	Replaced       bool     // whether this module is replaced in go.mod
+	TransitiveDeps int      // how many dependencies this module itself pulls in
 }
 
 // Graph holds the resolved dependency graph.

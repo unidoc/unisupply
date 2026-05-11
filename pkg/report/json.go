@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -27,11 +28,11 @@ type JSONReport struct {
 
 // JSONProject holds project-level info.
 type JSONProject struct {
-	Module    string `json:"module"`
-	GoVersion string `json:"go_version"`
-	DirectDeps int   `json:"direct_dependencies"`
-	TransDeps  int   `json:"transitive_dependencies"`
-	TotalDeps  int   `json:"total_dependencies"`
+	Module     string `json:"module"`
+	GoVersion  string `json:"go_version"`
+	DirectDeps int    `json:"direct_dependencies"`
+	TransDeps  int    `json:"transitive_dependencies"`
+	TotalDeps  int    `json:"total_dependencies"`
 }
 
 // JSONSummary holds summary statistics.
@@ -99,11 +100,11 @@ type JSONMaintainer struct {
 
 // JSONScoreBreakdown shows how the risk score was computed.
 type JSONScoreBreakdown struct {
-	VulnScore       float64 `json:"vuln_score"`
+	VulnScore        float64 `json:"vuln_score"`
 	MaintenanceScore float64 `json:"maintenance_score"`
-	DepthScore      float64 `json:"depth_score"`
-	MaintainerScore float64 `json:"maintainer_score"`
-	MaturityScore   float64 `json:"maturity_score"`
+	DepthScore       float64 `json:"depth_score"`
+	MaintainerScore  float64 `json:"maintainer_score"`
+	MaturityScore    float64 `json:"maturity_score"`
 }
 
 // JSONTyposquat holds typosquatting analysis.
@@ -115,13 +116,13 @@ type JSONTyposquat struct {
 
 // JSONCIReport holds CI/CD risk assessment.
 type JSONCIReport struct {
-	OverallScore      int               `json:"overall_score"`
-	OverallLevel      string            `json:"overall_level"`
-	UnpinnedActions   int               `json:"unpinned_actions"`
-	ThirdPartyActions int               `json:"third_party_actions"`
-	TotalFindings     int               `json:"total_findings"`
-	Workflows         []JSONCIWorkflow  `json:"workflows,omitempty"`
-	BuildFindings     []JSONCIFinding   `json:"build_findings,omitempty"`
+	OverallScore      int              `json:"overall_score"`
+	OverallLevel      string           `json:"overall_level"`
+	UnpinnedActions   int              `json:"unpinned_actions"`
+	ThirdPartyActions int              `json:"third_party_actions"`
+	TotalFindings     int              `json:"total_findings"`
+	Workflows         []JSONCIWorkflow `json:"workflows,omitempty"`
+	BuildFindings     []JSONCIFinding  `json:"build_findings,omitempty"`
 }
 
 // JSONCIWorkflow holds per-workflow CI risk.
@@ -167,11 +168,11 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 	report := JSONReport{
 		Tool:        "unisupply",
-		Version:     version,
+		Version:     version.Version,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Project: JSONProject{
-			Module:    graph.Root,
-			GoVersion: opts.GoVersion,
+			Module:     graph.Root,
+			GoVersion:  opts.GoVersion,
 			DirectDeps: directCount,
 			TransDeps:  transitiveCount,
 			TotalDeps:  directCount + transitiveCount,
@@ -190,11 +191,11 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 	for _, ds := range ps.Dependencies {
 		jd := JSONDependency{
-			Module:         ds.Module,
-			Version:        ds.Version,
-			Direct:         ds.Direct,
-			RiskScore:      ds.RiskScore,
-			RiskLevel:      string(ds.RiskLevel),
+			Module:    ds.Module,
+			Version:   ds.Version,
+			Direct:    ds.Direct,
+			RiskScore: ds.RiskScore,
+			RiskLevel: string(ds.RiskLevel),
 			ScoreBreakdown: &JSONScoreBreakdown{
 				VulnScore:        ds.VulnScore,
 				MaintenanceScore: ds.MaintenanceScore,

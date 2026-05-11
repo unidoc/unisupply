@@ -21,6 +21,7 @@ const (
 // RiskLevel categorizes the risk score.
 type RiskLevel string
 
+// Risk level bands. Boundaries are documented in CLAUDE.md.
 const (
 	RiskLow      RiskLevel = "LOW"
 	RiskMedium   RiskLevel = "MEDIUM"
@@ -30,20 +31,20 @@ const (
 
 // DependencyScore holds the risk assessment for a single dependency.
 type DependencyScore struct {
-	Module         string                    `json:"module"`
-	Version        string                    `json:"version"`
-	Direct         bool                      `json:"direct"`
-	RiskScore      int                       `json:"risk_score"`
-	RiskLevel      RiskLevel                 `json:"risk_level"`
-	DependencyPath []string                  `json:"dependency_path"`
-	Vulns          []scanner.Vulnerability    `json:"vulnerabilities,omitempty"`
-	Maintenance    *scanner.MaintenanceInfo   `json:"maintenance,omitempty"`
-	MaintainerInfo *scanner.MaintainerInfo    `json:"maintainer_info,omitempty"`
-	Typosquat      *scanner.TyposquatResult   `json:"typosquat,omitempty"`
-	Resilience     *scanner.ResilienceInfo    `json:"resilience,omitempty"`
-	AIGenRisk      *scanner.AIGenRisk         `json:"ai_gen_risk,omitempty"`
-	TrustIndex     *scanner.TrustIndexEntry   `json:"trust_index,omitempty"`
-	RiskFactors    []string                   `json:"risk_factors,omitempty"`
+	Module         string                   `json:"module"`
+	Version        string                   `json:"version"`
+	Direct         bool                     `json:"direct"`
+	RiskScore      int                      `json:"risk_score"`
+	RiskLevel      RiskLevel                `json:"risk_level"`
+	DependencyPath []string                 `json:"dependency_path"`
+	Vulns          []scanner.Vulnerability  `json:"vulnerabilities,omitempty"`
+	Maintenance    *scanner.MaintenanceInfo `json:"maintenance,omitempty"`
+	MaintainerInfo *scanner.MaintainerInfo  `json:"maintainer_info,omitempty"`
+	Typosquat      *scanner.TyposquatResult `json:"typosquat,omitempty"`
+	Resilience     *scanner.ResilienceInfo  `json:"resilience,omitempty"`
+	AIGenRisk      *scanner.AIGenRisk       `json:"ai_gen_risk,omitempty"`
+	TrustIndex     *scanner.TrustIndexEntry `json:"trust_index,omitempty"`
+	RiskFactors    []string                 `json:"risk_factors,omitempty"`
 
 	// Component scores (for verbose output).
 	VulnScore        float64 `json:"-"`
@@ -55,15 +56,15 @@ type DependencyScore struct {
 
 // ProjectScore holds the overall project risk assessment.
 type ProjectScore struct {
-	OverallScore     int                `json:"overall_risk_score"`
-	OverallLevel     RiskLevel          `json:"overall_risk_level"`
-	Dependencies     []*DependencyScore `json:"dependencies"`
-	HighRiskCount    int                `json:"high_risk_count"`
-	MediumRiskCount  int                `json:"medium_risk_count"`
-	LowRiskCount     int                `json:"low_risk_count"`
-	TotalVulns       int                `json:"total_vulnerabilities"`
-	Unmaintained2yr  int                `json:"unmaintained_2yr"`
-	Unmaintained1yr  int                `json:"unmaintained_1yr"`
+	OverallScore    int                `json:"overall_risk_score"`
+	OverallLevel    RiskLevel          `json:"overall_risk_level"`
+	Dependencies    []*DependencyScore `json:"dependencies"`
+	HighRiskCount   int                `json:"high_risk_count"`
+	MediumRiskCount int                `json:"medium_risk_count"`
+	LowRiskCount    int                `json:"low_risk_count"`
+	TotalVulns      int                `json:"total_vulnerabilities"`
+	Unmaintained2yr int                `json:"unmaintained_2yr"`
+	Unmaintained1yr int                `json:"unmaintained_1yr"`
 }
 
 // ScoreInput bundles all scan results for scoring.

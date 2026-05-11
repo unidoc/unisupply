@@ -126,8 +126,8 @@ unisupply ./ --format json --output results.json
 unisupply ./ --format sbom-cyclonedx --output sbom.json
 
 # Policy enforcement (exits 2 on violation)
-unisupply ./ --policy strict
-unisupply ./ --policy-file ./my-policy.json
+unisupply ./ --policy-preset strict
+unisupply ./ --policy ./my-policy.json
 
 # Filter output
 unisupply ./ --min-risk medium --show-only vulnerabilities,maintenance

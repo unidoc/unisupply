@@ -1,0 +1,10 @@
+{
+  "max_risk_score": 70,
+  "max_overall_score": 50,
+  "no_critical_vulns": true,
+  "no_single_maintainer": true,
+  "no_unmaintained_months": 24,
+  "no_archived": true,
+  "no_typosquatting": true,
+  "max_ci_score": 50
+}

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -31,8 +33,8 @@ type cdxBOM struct {
 }
 
 type cdxMetadata struct {
-	Timestamp string       `json:"timestamp"`
-	Tools     []cdxTool    `json:"tools"`
+	Timestamp string        `json:"timestamp"`
+	Tools     []cdxTool     `json:"tools"`
 	Component *cdxComponent `json:"component,omitempty"`
 }
 
@@ -80,7 +82,7 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		Metadata: cdxMetadata{
 			Timestamp: now.Format(time.RFC3339),
 			Tools: []cdxTool{
-				{Vendor: "UniDoc", Name: "unisupply", Version: version},
+				{Vendor: "UniDoc", Name: "unisupply", Version: version.Version},
 			},
 			Component: &cdxComponent{
 				Type:    "application",
@@ -114,14 +116,16 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		if ps != nil {
 			for _, ds := range ps.Dependencies {
 				if ds.Module == dep.Module.Path {
-					comp.Properties = append(comp.Properties, cdxProperty{
-						Name:  "unisupply:risk_score",
-						Value: fmt.Sprintf("%d", ds.RiskScore),
-					})
-					comp.Properties = append(comp.Properties, cdxProperty{
-						Name:  "unisupply:risk_level",
-						Value: string(ds.RiskLevel),
-					})
+					comp.Properties = append(comp.Properties,
+						cdxProperty{
+							Name:  "unisupply:risk_score",
+							Value: fmt.Sprintf("%d", ds.RiskScore),
+						},
+						cdxProperty{
+							Name:  "unisupply:risk_level",
+							Value: string(ds.RiskLevel),
+						},
+					)
 					break
 				}
 			}
@@ -156,6 +160,10 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		})
 	}
 
+	sort.Slice(bom.Components, func(i, j int) bool {
+		return bom.Components[i].Name < bom.Components[j].Name
+	})
+
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(bom)
@@ -164,13 +172,13 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 // ---- SPDX 2.3 ----
 
 type spdxDocument struct {
-	SPDXVersion       string            `json:"spdxVersion"`
-	DataLicense       string            `json:"dataLicense"`
-	SPDXID            string            `json:"SPDXID"`
-	Name              string            `json:"name"`
-	DocumentNamespace string            `json:"documentNamespace"`
-	CreationInfo      spdxCreationInfo  `json:"creationInfo"`
-	Packages          []spdxPackage     `json:"packages"`
+	SPDXVersion       string             `json:"spdxVersion"`
+	DataLicense       string             `json:"dataLicense"`
+	SPDXID            string             `json:"SPDXID"`
+	Name              string             `json:"name"`
+	DocumentNamespace string             `json:"documentNamespace"`
+	CreationInfo      spdxCreationInfo   `json:"creationInfo"`
+	Packages          []spdxPackage      `json:"packages"`
 	Relationships     []spdxRelationship `json:"relationships"`
 }
 
@@ -180,14 +188,14 @@ type spdxCreationInfo struct {
 }
 
 type spdxPackage struct {
-	SPDXID           string              `json:"SPDXID"`
-	Name             string              `json:"name"`
-	VersionInfo      string              `json:"versionInfo"`
-	DownloadLocation string              `json:"downloadLocation"`
-	FilesAnalyzed    bool                `json:"filesAnalyzed"`
-	Supplier         string              `json:"supplier,omitempty"`
-	ExternalRefs     []spdxExternalRef   `json:"externalRefs,omitempty"`
-	Annotations      []spdxAnnotation    `json:"annotations,omitempty"`
+	SPDXID           string            `json:"SPDXID"`
+	Name             string            `json:"name"`
+	VersionInfo      string            `json:"versionInfo"`
+	DownloadLocation string            `json:"downloadLocation"`
+	FilesAnalyzed    bool              `json:"filesAnalyzed"`
+	Supplier         string            `json:"supplier,omitempty"`
+	ExternalRefs     []spdxExternalRef `json:"externalRefs,omitempty"`
+	Annotations      []spdxAnnotation  `json:"annotations,omitempty"`
 }
 
 type spdxExternalRef struct {
@@ -221,7 +229,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		DocumentNamespace: fmt.Sprintf("https://spdx.org/spdxdocs/unisupply-%s-%s", graph.Root, now.Format("20060102T150405Z")),
 		CreationInfo: spdxCreationInfo{
 			Created:  now.Format(time.RFC3339),
-			Creators: []string{fmt.Sprintf("Tool: unisupply-%s", version)},
+			Creators: []string{fmt.Sprintf("Tool: unisupply-%s", version.Version)},
 		},
 	}
 
@@ -276,7 +284,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 					pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
 						AnnotationDate: now.Format(time.RFC3339),
 						AnnotationType: "REVIEW",
-						Annotator:      fmt.Sprintf("Tool: unisupply-%s", version),
+						Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
 						Comment:        fmt.Sprintf("risk_score=%d risk_level=%s", ds.RiskScore, ds.RiskLevel),
 					})
 					break

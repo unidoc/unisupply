@@ -14,6 +14,7 @@ import (
 // CIRiskLevel categorizes CI/CD risk.
 type CIRiskLevel string
 
+// CI/CD risk level bands. Mirrors scorer.RiskLevel for consistency in reports.
 const (
 	CIRiskLow      CIRiskLevel = "LOW"
 	CIRiskMedium   CIRiskLevel = "MEDIUM"
@@ -33,22 +34,22 @@ type CIFinding struct {
 
 // WorkflowRisk holds the risk assessment for a single workflow file.
 type WorkflowRisk struct {
-	Name     string       `json:"name"`
-	FilePath string       `json:"file_path"`
-	Score    int          `json:"score"`
-	Level    CIRiskLevel  `json:"level"`
-	Findings []CIFinding  `json:"findings"`
+	Name     string      `json:"name"`
+	FilePath string      `json:"file_path"`
+	Score    int         `json:"score"`
+	Level    CIRiskLevel `json:"level"`
+	Findings []CIFinding `json:"findings"`
 }
 
 // CIReport holds the full CI/CD risk assessment.
 type CIReport struct {
-	Workflows        []*WorkflowRisk `json:"workflows,omitempty"`
-	BuildFindings    []CIFinding     `json:"build_findings,omitempty"`
-	OverallScore     int             `json:"overall_score"`
-	OverallLevel     CIRiskLevel     `json:"overall_level"`
-	UnpinnedActions  int             `json:"unpinned_actions"`
-	ThirdPartyActions int            `json:"third_party_actions"`
-	TotalFindings    int             `json:"total_findings"`
+	Workflows         []*WorkflowRisk `json:"workflows,omitempty"`
+	BuildFindings     []CIFinding     `json:"build_findings,omitempty"`
+	OverallScore      int             `json:"overall_score"`
+	OverallLevel      CIRiskLevel     `json:"overall_level"`
+	UnpinnedActions   int             `json:"unpinned_actions"`
+	ThirdPartyActions int             `json:"third_party_actions"`
+	TotalFindings     int             `json:"total_findings"`
 }
 
 // CIScanner scans CI/CD configuration for security risks.
@@ -313,7 +314,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 func (cs *CIScanner) scanDockerfile(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}
@@ -380,7 +381,7 @@ func (cs *CIScanner) scanDockerfile(path string) []CIFinding {
 func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}
@@ -424,7 +425,7 @@ func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 func (cs *CIScanner) scanShellScript(path string) []CIFinding {
 	var findings []CIFinding
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) //#nosec G304 -- caller-supplied build file path is the scanner's input contract
 	if err != nil {
 		return nil
 	}

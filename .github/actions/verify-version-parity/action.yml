@@ -1,0 +1,23 @@
+name: Verify Version Parity
+description: Check that the version constant in internal/version/version.go matches the release tag.
+
+inputs:
+  version:
+    description: 'Expected version string (X.Y.Z, no v prefix)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check version constants
+      shell: bash
+      env:
+        EXPECTED: ${{ inputs.version }}
+      run: |
+        VER=$(grep -E '^const Version = "[^"]+"' internal/version/version.go \
+               | sed -E 's/.*"([^"]+)".*/\1/')
+        echo "expected=$EXPECTED  internal/version/version.go=$VER"
+        [ "$VER" = "$EXPECTED" ] || {
+          echo "::error::internal/version/version.go Version ($VER) != $EXPECTED"
+          exit 1
+        }

@@ -16,23 +16,23 @@ import (
 // ResilienceInfo holds long-term reliability indicators for a module.
 type ResilienceInfo struct {
 	// Release cadence.
-	TotalReleases     int     `json:"total_releases"`
-	AvgDaysBetween    float64 `json:"avg_days_between_releases"`
-	ReleaseCadence    string  `json:"release_cadence"`   // "frequent", "regular", "slow", "stale"
-	LastReleaseDate   time.Time `json:"last_release_date"`
-	FirstReleaseDate  time.Time `json:"first_release_date"`
-	ProjectAgeDays    int     `json:"project_age_days"`
+	TotalReleases    int       `json:"total_releases"`
+	AvgDaysBetween   float64   `json:"avg_days_between_releases"`
+	ReleaseCadence   string    `json:"release_cadence"` // "frequent", "regular", "slow", "stale"
+	LastReleaseDate  time.Time `json:"last_release_date"`
+	FirstReleaseDate time.Time `json:"first_release_date"`
+	ProjectAgeDays   int       `json:"project_age_days"`
 
 	// Stability.
-	HasStableRelease  bool   `json:"has_stable_release"`  // v1+ exists
-	MajorVersions     int    `json:"major_versions"`
-	PreReleaseOnly    bool   `json:"pre_release_only"`    // only v0.x or rc/beta
-	VersionScheme     string `json:"version_scheme"`      // "semver", "date", "pseudo", "mixed"
+	HasStableRelease bool   `json:"has_stable_release"` // v1+ exists
+	MajorVersions    int    `json:"major_versions"`
+	PreReleaseOnly   bool   `json:"pre_release_only"` // only v0.x or rc/beta
+	VersionScheme    string `json:"version_scheme"`   // "semver", "date", "pseudo", "mixed"
 
 	// Succession / governance.
-	HasSecurityPolicy  bool `json:"has_security_policy"`   // SECURITY.md exists (from GitHub)
-	HasContribGuide    bool `json:"has_contrib_guide"`     // CONTRIBUTING.md
-	HasCodeOfConduct   bool `json:"has_code_of_conduct"`   // CODE_OF_CONDUCT.md
+	HasSecurityPolicy      bool `json:"has_security_policy"` // SECURITY.md exists (from GitHub)
+	HasContribGuide        bool `json:"has_contrib_guide"`   // CONTRIBUTING.md
+	HasCodeOfConduct       bool `json:"has_code_of_conduct"` // CODE_OF_CONDUCT.md
 	HasMultipleMaintainers bool `json:"has_multiple_maintainers"`
 
 	// Computed resilience score (0-100).
@@ -165,7 +165,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	}
 
 	// Classify cadence.
-	info.ReleaseCadence = classifyCadence(info)
+	info.ReleaseCadence = classifyCadence(time.Now(), info)
 
 	// Classify version scheme.
 	info.VersionScheme = classifyVersionScheme(versions)
@@ -247,7 +247,7 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, f.path)
 		resp, err := rs.client.Head(url)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				*f.flag = true
 			}
@@ -255,12 +255,12 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 	}
 }
 
-func classifyCadence(info *ResilienceInfo) string {
+func classifyCadence(now time.Time, info *ResilienceInfo) string {
 	if info.TotalReleases <= 1 {
 		return "stale"
 	}
 
-	monthsSinceLast := monthsSince(info.LastReleaseDate)
+	monthsSinceLast := monthsSince(now, info.LastReleaseDate)
 
 	if monthsSinceLast > 24 {
 		return "stale"
@@ -269,11 +269,11 @@ func classifyCadence(info *ResilienceInfo) string {
 	avg := info.AvgDaysBetween
 	switch {
 	case avg < 30:
-		return "frequent"  // Monthly or faster
+		return "frequent" // Monthly or faster
 	case avg < 90:
-		return "regular"   // Quarterly
+		return "regular" // Quarterly
 	case avg < 180:
-		return "slow"      // Semi-annual
+		return "slow" // Semi-annual
 	default:
 		return "stale"
 	}
@@ -316,24 +316,26 @@ func computeResilienceScore(info *ResilienceInfo) int {
 	}
 
 	// Project age & track record (0-20 points).
-	if info.ProjectAgeDays > 365*5 {
+	switch {
+	case info.ProjectAgeDays > 365*5:
 		score += 20 // 5+ years
-	} else if info.ProjectAgeDays > 365*2 {
+	case info.ProjectAgeDays > 365*2:
 		score += 15 // 2+ years
-	} else if info.ProjectAgeDays > 365 {
+	case info.ProjectAgeDays > 365:
 		score += 10 // 1+ year
-	} else {
+	default:
 		score += 5
 	}
 
 	// Release count depth (0-15 points).
-	if info.TotalReleases >= 20 {
+	switch {
+	case info.TotalReleases >= 20:
 		score += 15
-	} else if info.TotalReleases >= 10 {
+	case info.TotalReleases >= 10:
 		score += 10
-	} else if info.TotalReleases >= 5 {
+	case info.TotalReleases >= 5:
 		score += 7
-	} else {
+	default:
 		score += 2
 	}
 

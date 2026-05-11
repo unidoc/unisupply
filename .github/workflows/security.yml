@@ -1,0 +1,388 @@
+name: Security
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - go.mod
+      - go.sum
+
+permissions: {}
+
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    outputs:
+      stale: ${{ steps.staleness.outputs.stale }}
+      govulncheck_rc: ${{ steps.govulncheck.outputs.govulncheck_rc }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build unisupply
+        run: |
+          set -euo pipefail
+          go build -o /tmp/unisupply ./cmd/unisupply/ || { echo "::error::unisupply build failed"; exit 1; }
+
+      - name: Install govulncheck
+        run: |
+          set -euo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Run govulncheck
+        id: govulncheck
+        run: |
+          set -euo pipefail
+          GOVULNCHECK_RC=0
+          govulncheck -format json ./... | tee /tmp/govulncheck.json || GOVULNCHECK_RC=$?
+          if [ "$GOVULNCHECK_RC" -ne 0 ] && [ "$GOVULNCHECK_RC" -ne 3 ]; then
+            echo "::error::govulncheck tool error (exit $GOVULNCHECK_RC)"
+            exit "$GOVULNCHECK_RC"
+          fi
+          echo "govulncheck_rc=$GOVULNCHECK_RC" >> "$GITHUB_OUTPUT"
+
+      - name: Install gosec
+        run: |
+          set -euo pipefail
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.1
+
+      - name: Run gosec
+        run: |
+          set -euo pipefail
+          gosec -no-fail -fmt sarif -out /tmp/gosec.sarif ./...
+
+      - name: Run unisupply self-scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          /tmp/unisupply ./ --format json --github-token "$GITHUB_TOKEN" \
+            > /tmp/unisupply.json
+          /tmp/unisupply ./ --no-color --github-token "$GITHUB_TOKEN" \
+            > /tmp/unisupply.txt
+
+      - name: Run unisupply CI/CD scan
+        run: |
+          set -euo pipefail
+          /tmp/unisupply ./ --scan-ci --no-color --policy-preset moderate
+
+      - name: List stale direct dependencies
+        run: |
+          set -euo pipefail
+          go list -e -m -json -u all | jq -r '
+            select(.Indirect | not) |
+            select(.Update != null) |
+            .Path + " " + .Version + " → " + .Update.Version
+          ' > /tmp/stale-deps.txt
+
+      - name: Check 90-day staleness
+        id: staleness
+        run: |
+          set -euo pipefail
+
+          STALE_FLAG=false
+
+          date_to_epoch() {
+            local d="${1:0:10}"  # YYYY-MM-DD
+            date -d "$d" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$d" +%s
+          }
+
+          : > /tmp/stale-90.txt
+
+          while IFS=' ' read -r MODULE VERSION _; do
+            [ -z "$MODULE" ] && continue
+            INFO=$(curl -sf "https://proxy.golang.org/${MODULE}/@v/${VERSION}.info") || continue
+            MOD_TIME=$(echo "$INFO" | jq -r '.Time // empty')
+            [ -z "$MOD_TIME" ] && continue
+            MOD_EPOCH=$(date_to_epoch "$MOD_TIME")
+            NOW_EPOCH=$(date +%s)
+            DAYS=$(( (NOW_EPOCH - MOD_EPOCH) / 86400 ))
+            if [ "$DAYS" -gt 90 ]; then
+              echo "STALE($DAYS days): $MODULE $VERSION" | tee -a /tmp/stale-90.txt
+              STALE_FLAG=true
+            fi
+          done < /tmp/stale-deps.txt
+
+          # Remove the file if no stale entries were recorded so upload-artifact's
+          # if-no-files-found: warn behavior surfaces it as missing rather than empty.
+          if [ ! -s /tmp/stale-90.txt ]; then
+            rm -f /tmp/stale-90.txt
+          fi
+
+          echo "stale=$STALE_FLAG" >> "$GITHUB_OUTPUT"
+
+      - name: Render supply-chain report to job summary
+        if: always()
+        env:
+          GOVULNCHECK_RC: ${{ steps.govulncheck.outputs.govulncheck_rc }}
+          STALE: ${{ steps.staleness.outputs.stale }}
+        run: |
+          set -euo pipefail
+
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+          if [ ! -s /tmp/unisupply.json ]; then
+            {
+              echo "# Supply Chain Self-Scan"
+              echo
+              echo "_unisupply self-scan did not produce output._"
+            } >> "$SUMMARY"
+            exit 0
+          fi
+
+          LEVEL=$(jq -r '.overall_risk_level // "UNKNOWN"' /tmp/unisupply.json)
+          SCORE=$(jq -r '.overall_risk_score // "?"'    /tmp/unisupply.json)
+
+          case "$LEVEL" in
+            LOW)      LEVEL_BADGE="🟢 LOW" ;;
+            MEDIUM)   LEVEL_BADGE="🟡 MEDIUM" ;;
+            HIGH)     LEVEL_BADGE="🟠 HIGH" ;;
+            CRITICAL) LEVEL_BADGE="🔴 CRITICAL" ;;
+            *)        LEVEL_BADGE="⚪ $LEVEL" ;;
+          esac
+
+          case "${GOVULNCHECK_RC:-}" in
+            0)  GOVULN_BADGE="🟢 0 — no vulnerabilities" ;;
+            3)  GOVULN_BADGE="🔴 3 — call-graph-reachable vulnerability found" ;;
+            "") GOVULN_BADGE="⚪ (not run)" ;;
+            *)  GOVULN_BADGE="🟠 ${GOVULNCHECK_RC} — tool error" ;;
+          esac
+
+          {
+            echo "# Supply Chain Self-Scan — unisupply (dogfood)"
+            echo
+            echo "- **Run:** \`${GITHUB_WORKFLOW}\` #${GITHUB_RUN_NUMBER}"
+            echo "- **Commit:** \`${GITHUB_SHA:0:12}\` (\`${GITHUB_REF_NAME}\`)"
+            echo "- **Generated:** $(jq -r '.generated_at // "?"' /tmp/unisupply.json)"
+            echo
+            echo "## Risk"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Overall risk level | ${LEVEL_BADGE} |"
+            echo "| Overall risk score | **${SCORE}** / 100 |"
+            echo "| govulncheck exit code | ${GOVULN_BADGE} |"
+            echo "| Stale dependencies (>90d) | ${STALE:-unknown} |"
+            echo
+            echo "## Project"
+            echo
+            jq -r '
+              .project as $p |
+              "| Field | Value |\n|---|---|\n" +
+              "| Module | `\($p.module)` |\n" +
+              "| Go version | \($p.go_version) |\n" +
+              "| Direct dependencies | \($p.direct_dependencies) |\n" +
+              "| Transitive dependencies | \($p.transitive_dependencies) |\n" +
+              "| Total dependencies | \($p.total_dependencies) |"
+            ' /tmp/unisupply.json
+            echo
+            echo "## Summary"
+            echo
+            jq -r '
+              .summary as $s |
+              "| Metric | Count |\n|---|---|\n" +
+              "| High risk | \($s.high_risk_count) |\n" +
+              "| Medium risk | \($s.medium_risk_count) |\n" +
+              "| Low risk | \($s.low_risk_count) |\n" +
+              "| Total vulnerabilities | \($s.total_vulnerabilities) |\n" +
+              "| Unmaintained ≥1yr | \($s.unmaintained_1yr) |\n" +
+              "| Unmaintained ≥2yr | \($s.unmaintained_2yr) |"
+            ' /tmp/unisupply.json
+            echo
+            echo "## Top 10 risky dependencies"
+            echo
+            echo "| Module | Version | Level | Score | Direct | Risk factors |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '
+              .dependencies
+              | sort_by(-.risk_score)
+              | .[0:10][]
+              | "| `\(.module)` | \(.version) | \(.risk_level) | \(.risk_score) | \(if .direct then "✅" else "—" end) | \((.risk_factors // []) | join(", ")) |"
+            ' /tmp/unisupply.json
+            echo
+
+            TAKEOVER_COUNT=$(jq -r '(.takeover_candidates // []) | length' /tmp/unisupply.json)
+            if [ "$TAKEOVER_COUNT" -gt 0 ]; then
+              echo "<details><summary><strong>Takeover candidates (${TAKEOVER_COUNT})</strong></summary>"
+              echo
+              jq -r '(.takeover_candidates // [])[] | "- `\(.)`"' /tmp/unisupply.json
+              echo
+              echo "</details>"
+              echo
+            fi
+
+            if [ -s /tmp/stale-90.txt ]; then
+              echo "<details><summary><strong>Dependencies older than 90 days</strong></summary>"
+              echo
+              echo '```'
+              cat /tmp/stale-90.txt
+              echo '```'
+              echo "</details>"
+              echo
+            fi
+
+            echo "---"
+            echo
+            echo "_Full JSON, plain-text report, gosec SARIF, and govulncheck output are attached as workflow artifacts (\`scan-results\`)._"
+          } >> "$SUMMARY"
+
+      - name: Upload scan artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: scan-results
+          path: |
+            /tmp/govulncheck.json
+            /tmp/unisupply.json
+            /tmp/unisupply.txt
+            /tmp/gosec.sarif
+            /tmp/stale-deps.txt
+            /tmp/stale-90.txt
+          retention-days: 30
+          if-no-files-found: warn
+
+  report:
+    needs: audit
+    if: github.repository_owner == 'unidoc'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download scan artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: scan-results
+          path: .
+
+      - name: File weekly security issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          STALE: ${{ needs.audit.outputs.stale }}
+          GOVULNCHECK_RC: ${{ needs.audit.outputs.govulncheck_rc }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          WEEK_KEY="[Security Scan] $(date -u +%Y-W%V)"
+
+          EXISTING=$(gh issue list \
+            --label security-scan \
+            --state open \
+            --json title \
+            --jq "[.[] | select(.title == \"$WEEK_KEY\")] | length")
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "Open issue for $WEEK_KEY already exists; skipping."
+            exit 0
+          fi
+
+          RISK_LEVEL="UNKNOWN"
+          RISK_SCORE="?"
+          if [ -f ./unisupply.json ]; then
+            RISK_LEVEL=$(jq -r '.overall_risk_level // "UNKNOWN"' ./unisupply.json)
+            RISK_SCORE=$(jq -r '.overall_risk_score // "?"' ./unisupply.json)
+          fi
+
+          FIRE=false
+          if [ "$GOVULNCHECK_RC" = "3" ]; then
+            FIRE=true
+          fi
+          case "$RISK_LEVEL" in
+            MEDIUM|HIGH|CRITICAL) FIRE=true ;;
+          esac
+          if [ "$STALE" = "true" ]; then
+            FIRE=true
+          fi
+
+          if [ "$FIRE" != "true" ]; then
+            echo "No gate condition met (govulncheck_rc=$GOVULNCHECK_RC risk_level=$RISK_LEVEL stale=$STALE); not filing issue."
+            exit 0
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          RUN_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          cat > ./issue-body.md <<BODYEOF
+          # Weekly Supply Chain Security Scan
+
+          - **Run date:** ${RUN_DATE}
+          - **Trigger:** ${EVENT_NAME}
+          - **Workflow run:** ${RUN_URL}
+
+          ## Risk Summary
+
+          - **Risk level:** ${RISK_LEVEL}
+          - **Risk score:** ${RISK_SCORE}
+          - **govulncheck exit code:** ${GOVULNCHECK_RC} (3 = call-graph-reachable vulnerability)
+          - **Stale dependencies (>90 days):** ${STALE}
+
+          ## Top Findings
+
+          See the workflow run for full SARIF (gosec) and JSON (govulncheck, unisupply) output.
+          The gosec findings are also visible under **Security → Code scanning**.
+
+          ## Stale Dependencies
+
+          ### Direct dependencies with available updates
+
+          \`\`\`
+          BODYEOF
+
+          if [ -s ./stale-deps.txt ]; then
+            cat ./stale-deps.txt >> ./issue-body.md
+          else
+            echo "(none)" >> ./issue-body.md
+          fi
+
+          cat >> ./issue-body.md <<'BODYEOF'
+          ```
+
+          ### Dependencies older than 90 days
+
+          ```
+          BODYEOF
+
+          if [ -f ./stale-90.txt ]; then
+            cat ./stale-90.txt >> ./issue-body.md
+          else
+            echo "(none)" >> ./issue-body.md
+          fi
+
+          cat >> ./issue-body.md <<'BODYEOF'
+          ```
+
+          ---
+
+          ## Closure guidance
+
+          Close this issue **only after the underlying findings are actioned** (e.g.
+          dependency bumps merged, vulnerabilities resolved, annotations added). Closing
+          the issue does not silence future scans — a fresh issue is filed each ISO week.
+          BODYEOF
+
+          gh label create security-scan \
+            --color B60205 \
+            --description "Weekly supply chain security scan findings" \
+            --force >/dev/null
+
+          gh issue create \
+            --body-file ./issue-body.md \
+            --label security-scan \
+            --title "$WEEK_KEY"

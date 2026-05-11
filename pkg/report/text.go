@@ -8,12 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
-
-const version = "0.4.0"
 
 // ANSI color codes.
 const (
@@ -29,22 +28,30 @@ const (
 
 // TextOptions configures text output.
 type TextOptions struct {
-	NoColor    bool
-	Verbose    bool
-	MinRisk    int
-	Writer     io.Writer
-	CIReport   *scanner.CIReport
-	Takeovers  []*scanner.MaintainerInfo
+	NoColor     bool
+	Verbose     bool
+	MinRisk     int
+	Writer      io.Writer
+	CIReport    *scanner.CIReport
+	Takeovers   []*scanner.MaintainerInfo
 	StdlibVulns []scanner.Vulnerability
 }
 
 // WriteText generates the human-readable terminal output.
-func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts TextOptions) error {
+func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions) error {
+	if opts == nil {
+		return fmt.Errorf("nil TextOptions provided")
+	}
+
+	if opts.Writer == nil {
+		return fmt.Errorf("nil TextOptions.Writer provided")
+	}
+
 	w := opts.Writer
 	c := colorFunc(opts.NoColor)
 
 	// Header.
-	fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("unisupply v%s — Go Supply Chain Risk Assessment", version)))
+	fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("unisupply v%s — Go Supply Chain Risk Assessment", version.String())))
 	fmt.Fprintf(w, "%s\n\n", c(colorDim, "by UniDoc (unidoc.io)"))
 
 	fmt.Fprintf(w, "Project: %s\n", graph.Root)
@@ -490,11 +497,12 @@ func depExplanation(ds *scorer.DependencyScore) string {
 	}
 
 	if ds.Maintenance != nil {
-		if ds.Maintenance.Archived {
+		switch {
+		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		} else if ds.Maintenance.MonthsSinceRelease >= 24 {
+		case ds.Maintenance.MonthsSinceRelease >= 24:
 			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-		} else if ds.Maintenance.MonthsSinceRelease >= 12 {
+		case ds.Maintenance.MonthsSinceRelease >= 12:
 			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
 		}
 	}
