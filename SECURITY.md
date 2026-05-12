@@ -8,12 +8,12 @@ treat findings it produces against their own code.
 
 | Version  | Status                                  |
 | -------- | --------------------------------------- |
-| `0.4.x`  | Supported — receives security fixes     |
-| `< 0.4`  | Not supported — please upgrade          |
+| `0.4.x`  | Supported — current release line        |
+| `< 0.4`  | Not supported — no public release exists |
 
-Once a future version is promoted to stable, the previous minor will continue
-to receive security fixes for one release cycle. The supported set above will
-be updated when that happens — always treat this table as authoritative.
+`0.4.0` is the first public release. Once a future minor or major is cut, the
+previous line will continue to receive security fixes for one release cycle,
+and this table will be updated accordingly — always treat it as authoritative.
 
 ## Reporting a vulnerability
 

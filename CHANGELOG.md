@@ -25,7 +25,7 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - **Typosquatting** — Levenshtein-distance comparison against ~75 well-known
   Go modules with confidence scoring.
 - **Resilience** — scores release cadence, governance file presence
-  (`LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`), and
+  (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`), and
   version-scheme consistency on a 0–100 sub-scale.
 - **AI-generated code** — flags modules matching supply-chain-attack patterns:
   very few releases, anonymous single maintainer, generic naming, no governance
@@ -44,17 +44,18 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 
 - **Weighted composite risk score** — 0–100 per dependency:
   `Vuln×0.40 + Maint×0.25 + Depth×0.15 + Maintainer×0.10 + Maturity×0.10`,
-  with typosquat (+0–20) and AI-gen (+0–15) bonuses and a resilience credit
-  (−0–6). Bands: LOW · MEDIUM · HIGH · CRITICAL.
+  with typosquat (+0–20), AI-gen (+0–15), and low-resilience (+0–6) penalties.
+  Bands: LOW · MEDIUM · HIGH · CRITICAL.
 - **Policy engine** — built-in `strict` and `moderate` presets plus custom
-  JSON policies (`max_critical`, `max_high`, `max_vulnerability_age_days`,
-  `require_pinned_actions`, `blocked_modules`, `whitelisted_modules`). Exits
-  `2` on violation for CI fail-fast.
+  JSON policies (`max_risk_score`, `max_overall_score`, `no_critical_vulns`,
+  `no_single_maintainer`, `no_unmaintained_months`, `no_archived`,
+  `no_typosquatting`, `max_ci_score`, `blocked_modules`, `allowed_modules`).
+  Exits `2` on violation for CI fail-fast.
 - **Output formats** — colored terminal text, JSON, enterprise PDF (UniPDF +
   UniChart), CycloneDX 1.5 SBOM, and SPDX 2.3 SBOM.
 - **CLI** — `pflag`-based interface with per-scanner toggles, `--min-risk`
   filtering, `--policy` / `--policy-preset`, `--format`, `--output`,
-  `--scan-ci`, `--scan-buildfiles`, and `--verbose`.
+  `--scan-ci`, `--scan-workflows`, and `--verbose`.
 
 ### Improvements
 
@@ -104,8 +105,6 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
   by `govulncheck`: `x/net` `v0.35.0` → `v0.53.0`, `x/crypto` `v0.33.0` →
   `v0.50.0`, `x/image` `v0.24.0` → `v0.39.0`. (#17)
 - Self-scan risk score: 26/100 (MEDIUM) → 21/100 (LOW); CVE count: 12 → 0. (#17)
-- CI/CD scanner refuses to follow symlinks outside the workflow directory,
-  preventing path-traversal during scan.
 - Policy engine always exits non-zero on violation — never fails silently.
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
