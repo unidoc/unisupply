@@ -160,7 +160,7 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
 ```
 
 See `pkg/policy/engine.go` for the full schema and `examples/policy-custom.json`
-for an annotated reference.
+for an example reference.
 
 Exit code 2 on policy violation — designed for CI/CD fail-fast.
 

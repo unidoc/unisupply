@@ -15,14 +15,14 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
 | AI-generated     | Fresh modules, few releases, generic names                 | Module metadata heuristics |
-| CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.yml`  |
+| CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.{yml,yaml}` |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
 
 The CI/CD and Build-files scanners are off by default; enable them with
-`--scan-workflows` (workflows only) or `--scan-ci` (workflows + Dockerfile +
-Makefile + shell scripts). The Trust Index scanner activates when
-`--trust-index-url` is supplied.
+`--scan-workflows` (workflow files `*.yml` and `*.yaml` only) or `--scan-ci`
+(workflows + Dockerfile + Makefile + shell scripts). The Trust Index scanner
+activates when `--trust-index-url` is supplied.
 
 ## Risk score
 

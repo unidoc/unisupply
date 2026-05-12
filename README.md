@@ -307,7 +307,7 @@ The most frequently used flags:
 | `--trust-index-url`     | unitrust endpoint for curated trust scores                    |
 | `--policy-preset`       | `strict` or `moderate`                                        |
 | `--policy`              | Path to a custom policy JSON file                             |
-| `--scan-workflows`      | Audit `.github/workflows/*.yml` only                          |
+| `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
 | `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts |
 | `--min-risk`            | Hide dependencies below the given score                       |
 | `--direct-only`         | Skip transitive dependencies                                  |

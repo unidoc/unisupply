@@ -6,9 +6,10 @@ treat findings it produces against their own code.
 
 ## Supported versions
 
-| Version  | Status                |
-| -------- | --------------------- |
-| `0.4.x`  | Current release line  |
+| Version  | Status                                  |
+| -------- | --------------------------------------- |
+| `0.4.x`  | Supported — current release line        |
+| `< 0.4`  | Not supported — no public release exists |
 
 `0.4.0` is the first public release. Once a future minor or major is cut, the
 previous line will continue to receive security fixes for one release cycle,
