@@ -33,7 +33,7 @@ import (
 
 // Version is the semver string for the unisupply binary.
 // Bump this on every release; append -dev between releases.
-const Version = "0.4.0-dev"
+const Version = "0.4.0"
 
 // Commit and BuildDate are populated at link time via:
 //

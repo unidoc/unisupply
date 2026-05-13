@@ -19,6 +19,13 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
+          fetch-tags: true
+
+      # Workaround for actions/checkout#290: checkout re-fetches the tag using
+      # the commit SHA as the source refspec, which clobbers the annotated tag
+      # object with a lightweight tag. Re-fetch by tag name to restore it.
+      - name: Restore annotated tag object
+        run: git fetch --force origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
@@ -150,11 +157,6 @@ jobs:
 
           (cd dist/stage && zip -r "../archive/unisupply-${VERSION}-${PLATFORM}.zip" "$DIR")
 
-      - name: Generate SHA256SUMS
-        run: |
-          cd dist/archive && sha256sum -- *.tar.gz *.zip > SHA256SUMS
-          cat SHA256SUMS
-
       - name: Generate SBOMs
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -165,6 +167,13 @@ jobs:
           /tmp/unisupply -f sbom-cyclonedx -o "dist/archive/unisupply-${VERSION}-sbom.cdx.json" ./
           /tmp/unisupply -f sbom-spdx      -o "dist/archive/unisupply-${VERSION}-sbom.spdx.json" ./
 
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist/archive && sha256sum -- *.tar.gz *.zip *-sbom.cdx.json *-sbom.spdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      # --generate-notes walks back to the previous tag; on the first tag it walks to repo init.
+      # The release is created as a draft — edit the auto-generated notes before publishing.
       - name: Create draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -180,11 +189,3 @@ jobs:
               --notes "Draft release built from signed tag \`$TAG\`. Review the assets and auto-generated notes, edit as needed, then click **Publish release**." \
               dist/archive/*
           fi
-
-      - name: Upload release artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: release-${{ steps.tag.outputs.tag }}
-          path: dist/archive/
-          retention-days: 30
