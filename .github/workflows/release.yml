@@ -21,6 +21,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # Workaround for actions/checkout#290: checkout re-fetches the tag using
+      # the commit SHA as the source refspec, which clobbers the annotated tag
+      # object with a lightweight tag. Re-fetch by tag name to restore it.
+      - name: Restore annotated tag object
+        run: git fetch --force origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
         with:
           go-version-file: go.mod
