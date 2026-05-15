@@ -154,8 +154,9 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintln(w)
 	}
 
-	// CI/CD Risk Assessment section.
-	if opts.CIReport != nil && (len(opts.CIReport.Workflows) > 0 || len(opts.CIReport.BuildFindings) > 0) {
+	// CI/CD and build-file sections are always rendered when the scanner was invoked,
+	// so reviewers can confirm the scanner ran even when there are no findings.
+	if opts.CIReport != nil {
 		writeCIReportText(w, opts.CIReport, c)
 	}
 
@@ -374,6 +375,9 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 	fmt.Fprintf(w, "  Third-party actions: %d\n", ciReport.ThirdPartyActions)
 	fmt.Fprintf(w, "  Total findings:      %d\n\n", ciReport.TotalFindings)
 
+	// ## CI/CD section — always rendered so reviewers know the scanner ran.
+	fmt.Fprintf(w, "## CI/CD\n")
+	ciCount := 0
 	for _, wr := range ciReport.Workflows {
 		if len(wr.Findings) == 0 {
 			continue
@@ -385,13 +389,18 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 			sColor := ciRiskColor(f.Severity)
 			fmt.Fprintf(w, "    %s %s\n", c(sColor, "["+severity+"]"), f.Description)
 			fmt.Fprintf(w, "    %s %s\n", c(colorDim, "  Fix:"), f.Remediation)
+			ciCount++
 		}
 		fmt.Fprintln(w)
 	}
+	if ciCount == 0 {
+		fmt.Fprintf(w, "  No findings\n")
+	}
+	fmt.Fprintln(w)
 
-	// Build findings.
+	// ## Build files section — always rendered so reviewers know the scanner ran.
+	fmt.Fprintf(w, "## Build files\n")
 	if len(ciReport.BuildFindings) > 0 {
-		fmt.Fprintf(w, "  %s\n", c(colorBold, "Build Pipeline Findings"))
 		for _, f := range ciReport.BuildFindings {
 			sColor := ciRiskColor(f.Severity)
 			loc := f.File
@@ -401,8 +410,10 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 			fmt.Fprintf(w, "    %s %s (%s)\n", c(sColor, "["+string(f.Severity)+"]"), f.Description, loc)
 			fmt.Fprintf(w, "    %s %s\n", c(colorDim, "  Fix:"), f.Remediation)
 		}
-		fmt.Fprintln(w)
+	} else {
+		fmt.Fprintf(w, "  No findings\n")
 	}
+	fmt.Fprintln(w)
 }
 
 func writeTakeoverText(w io.Writer, takeovers []*scanner.MaintainerInfo, c func(string, string) string) {
