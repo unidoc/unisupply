@@ -1079,3 +1079,225 @@ func TestAIGenScanner_ZeroFirstReleaseDate(t *testing.T) {
 		t.Errorf("Should not flag zero FirstReleaseDate as recently created")
 	}
 }
+
+// TestAIGenScanner_PreChatGPTModuleNotFlagged verifies that a module first
+// released before 2022-11-01 (the ChatGPT public launch date) is excluded from
+// the AI-gen detector regardless of its other characteristics.
+// github.com/kr/text was first released in 2014 — it must never be flagged.
+func TestAIGenScanner_PreChatGPTModuleNotFlagged(t *testing.T) {
+	scanner := NewAIGenScanner()
+
+	firstRelease2014 := time.Date(2014, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/kr/text",
+			Version: "v0.2.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+		OwnerName:        "",
+		OwnerBio:         "",
+		OwnerLocation:    "",
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease2014,
+		TotalReleases:     2,
+		HasSecurityPolicy: false,
+		HasContribGuide:   false,
+		HasCodeOfConduct:  false,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.RiskLevel != "none" {
+		t.Errorf("Pre-ChatGPT module must not be flagged: got risk_level=%q score=%d indicators=%v",
+			risk.RiskLevel, risk.Score, risk.Indicators)
+	}
+	if risk.Score != 0 {
+		t.Errorf("Pre-ChatGPT module must have score 0, got %d", risk.Score)
+	}
+	if len(risk.Indicators) != 0 {
+		t.Errorf("Pre-ChatGPT module must have no indicators, got %v", risk.Indicators)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("Pre-ChatGPT module must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_PostChatGPTAllThreeIndicatorsFlagged verifies that a
+// synthetic module with all three high-confidence signals (first release within
+// the last 12 months, single release, generic name "utils") is flagged and
+// promoted via MeetsPromotionGate.
+func TestAIGenScanner_PostChatGPTAllThreeIndicatorsFlagged(t *testing.T) {
+	scanner := NewAIGenScanner()
+
+	// First release 6 months ago: post-ChatGPT and within the 12-month window.
+	firstRelease := time.Now().AddDate(0, -6, 0)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name "utils"
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            true,
+		ContributorCount: 5,
+		BusFactor:        2,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease,
+		TotalReleases:     1, // single release — releasesAtMost2 = true
+		HasSecurityPolicy: false,
+		HasContribGuide:   false,
+		HasCodeOfConduct:  false,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.Score == 0 {
+		t.Error("Post-ChatGPT module with all three indicators must have score > 0")
+	}
+	if !risk.MeetsPromotionGate {
+		t.Errorf("Post-ChatGPT module with age<12mo + <=2 releases + generic name must meet promotion gate (score=%d indicators=%v)", risk.Score, risk.Indicators)
+	}
+	if !slices.Contains(risk.Indicators, "generic_package_name") {
+		t.Errorf("Expected generic_package_name indicator, got %v", risk.Indicators)
+	}
+	if !slices.Contains(risk.Indicators, "very_few_releases") {
+		t.Errorf("Expected very_few_releases indicator, got %v", risk.Indicators)
+	}
+}
+
+// TestAIGenScanner_NilResilienceInfoNoFlag verifies that a nil ResilienceInfo
+// causes the detector to skip entirely and produce no risk flag.
+// Missing data must never trigger a false positive.
+func TestAIGenScanner_NilResilienceInfoNoFlag(t *testing.T) {
+	scanner := NewAIGenScanner()
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name — would score if ri were present
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+		OwnerName:        "",
+	}
+
+	// ri == nil: no resilience data available.
+	risk := scanner.analyzeModule(dep, maintainerInfo, nil)
+
+	if risk.Score != 0 {
+		t.Errorf("nil ResilienceInfo must produce score 0, got %d (indicators: %v)", risk.Score, risk.Indicators)
+	}
+	if risk.RiskLevel != "none" {
+		t.Errorf("nil ResilienceInfo must produce risk_level none, got %q", risk.RiskLevel)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("nil ResilienceInfo must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_ZeroFirstReleaseDateNoFlag verifies that a zero
+// FirstReleaseDate causes the detector to skip entirely and produce no flag.
+// This guards against false positives when GitHub API data is unavailable.
+func TestAIGenScanner_ZeroFirstReleaseDateNoFlag(t *testing.T) {
+	scanner := NewAIGenScanner()
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name — would score if date were known
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate: time.Time{}, // zero: date unknown
+		TotalReleases:    1,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.Score != 0 {
+		t.Errorf("Zero FirstReleaseDate must produce score 0, got %d (indicators: %v)", risk.Score, risk.Indicators)
+	}
+	if risk.RiskLevel != "none" {
+		t.Errorf("Zero FirstReleaseDate must produce risk_level none, got %q", risk.RiskLevel)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("Zero FirstReleaseDate must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_SingleIndicatorPopulatesIndicatorsNotRiskFactors verifies
+// that a module with only one indicator (generic_name only, no recent age, no
+// few releases) populates aigen.Indicators for transparency but does NOT meet
+// the promotion gate that drives risk_factors in the scorer.
+func TestAIGenScanner_SingleIndicatorPopulatesIndicatorsNotRiskFactors(t *testing.T) {
+	scanner := NewAIGenScanner()
+
+	// Module first released in 2023 (post-ChatGPT) but more than 12 months ago
+	// so it does NOT meet age < 12 months.
+	firstRelease := time.Date(2023, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name only
+			Version: "v2.0.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            true,
+		ContributorCount: 10,
+		BusFactor:        5,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease,
+		TotalReleases:     20, // many releases, so releasesAtMost2 = false
+		HasSecurityPolicy: true,
+		HasContribGuide:   true,
+		HasCodeOfConduct:  true,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	// generic_package_name indicator must be populated for transparency.
+	if !slices.Contains(risk.Indicators, "generic_package_name") {
+		t.Errorf("Single-indicator hit must populate Indicators: got %v", risk.Indicators)
+	}
+	if risk.Score == 0 {
+		t.Error("Single-indicator hit must have non-zero score")
+	}
+
+	// But the promotion gate must NOT fire (only one of the three signals is present).
+	if risk.MeetsPromotionGate {
+		t.Errorf("Single generic_name indicator must NOT meet promotion gate (score=%d indicators=%v)",
+			risk.Score, risk.Indicators)
+	}
+}
