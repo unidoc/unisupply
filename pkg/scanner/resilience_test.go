@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -532,14 +533,16 @@ func (rs *ResilienceScanner) checkGovernanceFilesWithBase(base, owner, repo stri
 		{"CODE_OF_CONDUCT.md", &info.HasCodeOfConduct},
 	}
 
+	host := ""
+	if u, err := url.Parse(base); err == nil {
+		host = u.Host
+	}
+
 	for _, f := range files {
-		url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", base, owner, repo, f.path)
-		resp, err := rs.client.Head(url)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				*f.flag = true
-			}
+		fileURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", base, owner, repo, f.path)
+		resp, err := rs.client.Head(context.Background(), fileURL, GetOptions{Host: host})
+		if err == nil && resp.StatusCode == http.StatusOK {
+			*f.flag = true
 		}
 	}
 }
@@ -687,6 +690,68 @@ func TestResilienceScanner_ProxyError(t *testing.T) {
 
 	if info.TotalReleases != 0 {
 		t.Errorf("expected 0 releases on proxy error, got %d", info.TotalReleases)
+	}
+	// DataAvailable must be false when the proxy returned a non-200 status.
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false when proxy returns 500")
+	}
+}
+
+// TestResilienceScanner_DataAvailable_FalseOnNetworkError verifies that a
+// network-level failure (connection refused) sets DataAvailable to false.
+func TestResilienceScanner_DataAvailable_FalseOnNetworkError(t *testing.T) {
+	// Point at a closed server so the TCP connection is immediately refused.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // Closed immediately — all requests will fail.
+
+	sc := NewResilienceScanner(5 * time.Second)
+	sc.proxyURL = srv.URL
+
+	info := sc.analyzeModule("example.com/network-fail")
+
+	if info == nil {
+		t.Fatal("analyzeModule returned nil")
+	}
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false on network error")
+	}
+	if info.TotalReleases != 0 {
+		t.Errorf("TotalReleases = %d on network error, want 0", info.TotalReleases)
+	}
+}
+
+// TestResilienceScanner_DataAvailable_TrueOnSuccess verifies that a successful
+// proxy response sets DataAvailable to true.
+func TestResilienceScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/@v/list") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "v1.0.0\n")
+		} else if strings.Contains(r.URL.Path, "/@v/v1.0.0.info") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"Version": "v1.0.0",
+				"Time":    "2023-01-01T00:00:00Z",
+			})
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxyServer.Close()
+
+	sc := NewResilienceScanner(5 * time.Second)
+	sc.proxyURL = proxyServer.URL
+
+	info := sc.analyzeModule("example.com/success")
+
+	if info == nil {
+		t.Fatal("analyzeModule returned nil")
+	}
+	if !info.DataAvailable {
+		t.Errorf("DataAvailable = false, want true on successful proxy response")
+	}
+	if info.TotalReleases == 0 {
+		t.Errorf("TotalReleases = 0 with DataAvailable=true, want > 0")
 	}
 }
 

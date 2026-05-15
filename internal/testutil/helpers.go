@@ -88,9 +88,13 @@ func MakeMaintenanceInfo(monthsSince int, archived, deprecated bool) *scanner.Ma
 }
 
 // MakeMaintainerInfo constructs a scanner.MaintainerInfo with the supplied
-// ownership signals.
+// ownership signals. DataAvailable is set to true because the caller is
+// providing real data — zero-value MaintainerInfo structs (DataAvailable==false)
+// represent failed API calls and are not suitable for unit-test fixtures that
+// exercise scoring logic.
 func MakeMaintainerInfo(busFactor, contributorCount int, isOrg bool) *scanner.MaintainerInfo {
 	return &scanner.MaintainerInfo{
+		DataAvailable:    true,
 		BusFactor:        busFactor,
 		ContributorCount: contributorCount,
 		IsOrg:            isOrg,

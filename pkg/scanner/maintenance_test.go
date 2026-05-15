@@ -233,8 +233,8 @@ func TestNewMaintenanceScanner(t *testing.T) {
 		t.Error("client is nil")
 	}
 
-	if ms.client.Timeout != 10*time.Second {
-		t.Errorf("client timeout = %v, want 10s", ms.client.Timeout)
+	if ms.client.Timeout() != 10*time.Second {
+		t.Errorf("client timeout = %v, want 10s", ms.client.Timeout())
 	}
 
 	if ms.proxyURL != "https://proxy.golang.org" {

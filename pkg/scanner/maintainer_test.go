@@ -1029,6 +1029,66 @@ func TestMaintainerScanner_AnalyzeRepo_APIError(t *testing.T) {
 	if info.Repo != "repo" {
 		t.Errorf("Repo = %q, want %q", info.Repo, "repo")
 	}
+	// DataAvailable must be false when the API returned a non-200 status.
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false for 404 API response")
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_FalseOn403 verifies that a 403 response
+// from the GitHub API sets DataAvailable to false. This covers the unauthenticated
+// rate-limit scenario where stars/bus-factor would otherwise be read as zero.
+func TestMaintainerScanner_DataAvailable_FalseOn403(t *testing.T) {
+	// Serve a 403 for all /repos/ requests.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "" /* no token */)
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo("docker", "docker")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false when GitHub API returns 403")
+	}
+	// Zero-valued fields must not be treated as real measurements.
+	if info.Stars != 0 {
+		t.Errorf("Stars = %d on 403 response, want 0 (zero-valued, not real)", info.Stars)
+	}
+	if info.BusFactor != 0 {
+		t.Errorf("BusFactor = %d on 403 response, want 0 (zero-valued, not real)", info.BusFactor)
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_TrueOnSuccess verifies that a successful
+// GitHub API response sets DataAvailable to true.
+func TestMaintainerScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
+	server := newMockGitHub()
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "test-token")
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo("golang", "go")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if !info.DataAvailable {
+		t.Errorf("DataAvailable = false, want true for successful API response")
+	}
+	if info.Stars == 0 {
+		t.Errorf("Stars = 0 with DataAvailable=true, want real star count")
+	}
 }
 
 // TestMaintainerScanner_Cache verifies caching of repo data.

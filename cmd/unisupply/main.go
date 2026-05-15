@@ -25,25 +25,32 @@ import (
 // errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
 
+// errTokenPrecondition is returned when --require-github-token is set but the
+// token is missing or invalid. Exit code 3 is reserved for this precondition
+// failure so CI pipelines can distinguish it from a runtime error (1) or a
+// policy violation (2).
+var errTokenPrecondition = errors.New("github token precondition failed")
+
 func main() {
 	var (
-		format        string
-		output        string
-		verbose       bool
-		noColor       bool
-		minRisk       int
-		directOnly    bool
-		timeout       time.Duration
-		showHelp      bool
-		showVer       bool
-		scanWorkflows bool
-		scanCI        bool
-		workflowPath  string
-		githubToken   string
-		policyFile    string
-		policyPreset  string
-		trustIndexURL string
-		progressMode  string
+		format             string
+		output             string
+		verbose            bool
+		noColor            bool
+		minRisk            int
+		directOnly         bool
+		timeout            time.Duration
+		showHelp           bool
+		showVer            bool
+		scanWorkflows      bool
+		scanCI             bool
+		workflowPath       string
+		githubToken        string
+		requireGithubToken bool
+		policyFile         string
+		policyPreset       string
+		trustIndexURL      string
+		progressMode       string
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -59,6 +66,7 @@ func main() {
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
 	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
+	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
@@ -82,6 +90,15 @@ func main() {
 	// GitHub token from env if not set via flag.
 	if githubToken == "" {
 		githubToken = os.Getenv("GITHUB_TOKEN")
+	}
+
+	// --require-github-token: exit 3 immediately if no token is present.
+	// Token validation is intentionally lightweight — we only check for
+	// presence here; a 401/403 from the GitHub API during the actual scan
+	// would surface through DataAvailable==false in the results.
+	if requireGithubToken && githubToken == "" {
+		fmt.Fprintln(os.Stderr, "Error: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)")
+		os.Exit(3)
 	}
 
 	// Determine target path.
@@ -113,6 +130,10 @@ func main() {
 		// Policy violation should exit with code 2 for CI/CD integration.
 		if errors.Is(err, errPolicyViolation) {
 			os.Exit(2)
+		}
+		// Token precondition failure exits with code 3.
+		if errors.Is(err, errTokenPrecondition) {
+			os.Exit(3)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -390,19 +411,26 @@ func printUsage() {
 	fmt.Println("  unisupply [flags] [path]")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  unisupply                                  # Analyze current directory")
-	fmt.Println("  unisupply ./myproject                       # Analyze specific project")
-	fmt.Println("  unisupply -f json -o report.json            # JSON output to file")
-	fmt.Println("  unisupply -f pdf                            # Generate PDF risk report")
-	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json    # CycloneDX SBOM")
-	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json    # SPDX SBOM")
-	fmt.Println("  unisupply --min-risk 50                     # Only show medium+ risk deps")
-	fmt.Println("  unisupply --scan-workflows                  # Include GitHub Actions audit")
-	fmt.Println("  unisupply --scan-ci                         # Full CI/CD pipeline scan")
-	fmt.Println("  unisupply --policy policy.json              # Evaluate against policy file")
-	fmt.Println("  unisupply --policy-preset strict            # Use strict built-in policy")
-	fmt.Println("  unisupply --progress plain                  # Plain log-style progress on stderr")
-	fmt.Println("  unisupply --progress none -f json           # Silent run; JSON to stdout")
+	fmt.Println("  unisupply                                    # Analyze current directory")
+	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
+	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
+	fmt.Println("  unisupply -f pdf                             # Generate PDF risk report")
+	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
+	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
+	fmt.Println("  unisupply --min-risk 50                      # Only show medium+ risk deps")
+	fmt.Println("  unisupply --scan-workflows                   # Include GitHub Actions audit")
+	fmt.Println("  unisupply --scan-ci                          # Full CI/CD pipeline scan")
+	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
+	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
+	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if no token")
+	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
+	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
+	fmt.Println()
+	fmt.Println("Exit codes:")
+	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")
+	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
+	fmt.Println("  2  Policy violation — one or more policy rules failed")
+	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

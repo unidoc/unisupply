@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +16,13 @@ import (
 
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
+	// DataAvailable is false when the GitHub API was unreachable, returned a
+	// non-200 status (e.g. 403 rate-limit or 404), or when the token was
+	// missing for an authenticated-only endpoint. When false, all numeric
+	// fields (Stars, BusFactor, etc.) are zero-valued and MUST NOT be
+	// interpreted as real measurements.
+	DataAvailable bool `json:"data_available"`
+
 	Owner            string    `json:"owner"`
 	Repo             string    `json:"repo"`
 	OwnerName        string    `json:"owner_name"`     // display name of owner
@@ -48,7 +54,7 @@ type MaintainerInfo struct {
 
 // MaintainerScanner analyzes module maintainership via the GitHub API.
 type MaintainerScanner struct {
-	client    *http.Client
+	client    *Client
 	token     string
 	cache     map[string]*MaintainerInfo
 	userCache map[string]*githubUser
@@ -58,9 +64,7 @@ type MaintainerScanner struct {
 // NewMaintainerScanner creates a new maintainer scanner.
 func NewMaintainerScanner(timeout time.Duration, githubToken string) *MaintainerScanner {
 	return &MaintainerScanner{
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:    NewClient(ClientOptions{Timeout: timeout}),
 		token:     githubToken,
 		cache:     make(map[string]*MaintainerInfo),
 		userCache: make(map[string]*githubUser),
@@ -171,7 +175,8 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 		Repo:  repo,
 	}
 
-	// Fetch repo info.
+	// Fetch repo info. On any failure (network error, 403, 404, etc.) we
+	// leave DataAvailable as false so callers know zero-values are not real.
 	repoData, err := ms.fetchRepo(owner, repo)
 	if err != nil {
 		ms.mu.Lock()
@@ -179,6 +184,9 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 		ms.mu.Unlock()
 		return info
 	}
+
+	// The primary API call succeeded: all fields that follow are real data.
+	info.DataAvailable = true
 
 	info.Description = repoData.Description
 	info.IsArchived = repoData.Archived
@@ -297,23 +305,23 @@ func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContr
 }
 
 func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, http.NoBody)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	auth := ""
 	if ms.token != "" {
-		req.Header.Set("Authorization", "Bearer "+ms.token)
+		auth = "Bearer " + ms.token
 	}
-	resp, err := ms.client.Do(req)
+	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+		Host:       "api.github.com",
+		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
+		AuthHeader: auth,
+		Accept:     "application/vnd.github.v3+json",
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	return body, nil
 }
 
 func classifyActivity(lastCommit time.Time) string {

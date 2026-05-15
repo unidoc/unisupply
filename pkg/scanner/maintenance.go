@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +14,16 @@ import (
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
+
+// proxyHost extracts the hostname from the configured proxy URL for use as
+// the host-pin value in httpclient.GetOptions. Tests override proxyURL to
+// point at a local httptest server, so we cannot hardcode "proxy.golang.org".
+func proxyHost(proxyURL string) string {
+	if u, err := url.Parse(proxyURL); err == nil {
+		return u.Host
+	}
+	return ""
+}
 
 // MaintenanceInfo holds maintenance health data for a module.
 type MaintenanceInfo struct {
@@ -26,7 +36,7 @@ type MaintenanceInfo struct {
 
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
 type MaintenanceScanner struct {
-	client   *http.Client
+	client   *Client
 	proxyURL string
 	cache    map[string]*MaintenanceInfo
 	mu       sync.Mutex
@@ -35,9 +45,7 @@ type MaintenanceScanner struct {
 // NewMaintenanceScanner creates a new maintenance health scanner.
 func NewMaintenanceScanner(timeout time.Duration) *MaintenanceScanner {
 	return &MaintenanceScanner{
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:   NewClient(ClientOptions{Timeout: timeout}),
 		proxyURL: "https://proxy.golang.org",
 		cache:    make(map[string]*MaintenanceInfo),
 	}
@@ -139,19 +147,14 @@ func (ms *MaintenanceScanner) fetchVersionInfo(modPath, version string) (*proxyV
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, escapedPath, version)
 
-	resp, err := ms.client.Get(url)
+	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+		Host: proxyHost(ms.proxyURL),
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("proxy returned %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	var info proxyVersionInfo
@@ -166,18 +169,10 @@ func (ms *MaintenanceScanner) fetchLatestVersion(modPath string) (string, time.T
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@latest", ms.proxyURL, escapedPath)
 
-	resp, err := ms.client.Get(url)
-	if err != nil {
-		return "", time.Time{}
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", time.Time{}
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+		Host: proxyHost(ms.proxyURL),
+	})
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return "", time.Time{}
 	}
 
@@ -196,11 +191,12 @@ func (ms *MaintenanceScanner) checkDeprecation(modPath string, info *Maintenance
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/list", ms.proxyURL, escapedPath)
 
-	resp, err := ms.client.Get(url)
+	_, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+		Host: proxyHost(ms.proxyURL),
+	})
 	if err != nil {
 		return
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusGone {
 		info.Deprecated = true

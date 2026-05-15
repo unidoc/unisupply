@@ -2,6 +2,7 @@
 package scorer
 
 import (
+	"fmt"
 	"math"
 	"strings"
 
@@ -66,6 +67,11 @@ type ProjectScore struct {
 	TotalVulns        int                `json:"total_vulnerabilities"`
 	Unmaintained2yr   int                `json:"unmaintained_2yr"`
 	Unmaintained1yr   int                `json:"unmaintained_1yr"`
+	// Warnings surfaces data-quality issues to consumers. Entries explain
+	// which signals were unavailable during the scan (e.g. missing GitHub
+	// token) so downstream tooling can decide how to act on the scores.
+	// This field lives on the top-level ProjectScore only — NOT per-dep.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ScoreInput bundles all scan results for scoring.
@@ -83,6 +89,10 @@ type ScoreInput struct {
 // ScoreAll computes risk scores for all dependencies and the overall project.
 func ScoreAll(input ScoreInput) *ProjectScore {
 	ps := &ProjectScore{}
+
+	// Count modules whose maintainer data was unavailable. Used to build a
+	// top-level warning so consumers understand the scoring gap.
+	maintainerUnavailable := 0
 
 	for _, dep := range input.Graph.Dependencies {
 		ds := scoreDependency(
@@ -120,6 +130,19 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 				ps.Unmaintained1yr++
 			}
 		}
+
+		// Track missing maintainer signal. A nil entry means the scanner was
+		// not run (non-GitHub module); DataAvailable == false means it was
+		// attempted but failed (rate-limited, unauthenticated, network error).
+		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable {
+			maintainerUnavailable++
+		}
+	}
+
+	if maintainerUnavailable > 0 {
+		ps.Warnings = append(ps.Warnings,
+			fmt.Sprintf("GitHub API unauthenticated — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", maintainerUnavailable),
+		)
 	}
 
 	ps.OverallScore = computeOverallScore(ps.Dependencies)
@@ -176,8 +199,11 @@ func scoreDependency(
 	ds.DepthScore = depthScore(dep.Depth)
 
 	// 4. Maintainer risk score (0-100).
+	// When DataAvailable is false the API call failed; treat the score as 0
+	// so missing data does not inflate risk. The weight is also excluded from
+	// the denominator below (re-normalization).
 	ds.MaintainerScore = maintainerRiskScore(maintainerInfo, dep.Module.Path)
-	if maintainerInfo != nil {
+	if maintainerInfo != nil && maintainerInfo.DataAvailable {
 		if maintainerInfo.BusFactor <= 1 && maintainerInfo.ContributorCount > 0 {
 			ds.RiskFactors = append(ds.RiskFactors, "single_maintainer")
 		}
@@ -200,10 +226,17 @@ func scoreDependency(
 	}
 
 	// AI-generated code risk adds to score.
+	// The score-accumulation bonus fires on any non-zero AIGenRisk score so that
+	// partial signals still influence the weighted total. However, promotion to
+	// risk_factors (the human-visible flag) requires the stricter AND-gate
+	// (age_months < 12 AND release_count <= 2 AND generic_name) indicated by
+	// MeetsPromotionGate, preventing single-indicator false positives.
 	aiGenBonus := 0.0
 	if aiGenRisk != nil && aiGenRisk.Score > 0 {
 		aiGenBonus = float64(aiGenRisk.Score) * 0.15 // up to 15 extra points
-		ds.RiskFactors = append(ds.RiskFactors, "ai_gen_risk:"+aiGenRisk.RiskLevel)
+		if aiGenRisk.MeetsPromotionGate {
+			ds.RiskFactors = append(ds.RiskFactors, "ai_gen_risk:"+aiGenRisk.RiskLevel)
+		}
 	}
 
 	// Low resilience adds to score.
@@ -214,11 +247,33 @@ func scoreDependency(
 	}
 
 	// Weighted total.
-	weighted := ds.VulnScore*WeightVulnerabilities +
+	//
+	// Normal case: the five weights sum to 1.0 (0.40 + 0.25 + 0.15 + 0.10 + 0.10).
+	//
+	// Re-normalization: when maintainer data is unavailable (DataAvailable == false),
+	// the 0.10 maintainer weight is dropped and the four remaining weights are
+	// rescaled by dividing by their sum (0.90) so they still sum to 1.0.
+	// NOTE: after re-normalization the five declared WeightMaintainerRisk +
+	// remaining weights no longer equal 1.0 — this is intentional and
+	// expected; the denominator variable below carries the corrected total.
+	weightedBase := ds.VulnScore*WeightVulnerabilities +
 		ds.MaintenanceScore*WeightMaintenance +
 		ds.DepthScore*WeightDepthRisk +
-		ds.MaintainerScore*WeightMaintainerRisk +
-		ds.MaturityScore*WeightMaturity +
+		ds.MaturityScore*WeightMaturity
+
+	denominator := WeightVulnerabilities + WeightMaintenance + WeightDepthRisk + WeightMaturity
+
+	if maintainerInfo == nil || maintainerInfo.DataAvailable {
+		// Maintainer data is present: include its contribution and restore
+		// the full denominator so the total weight equals 1.0.
+		weightedBase += ds.MaintainerScore * WeightMaintainerRisk
+		denominator += WeightMaintainerRisk
+	}
+	// When maintainerInfo != nil && !maintainerInfo.DataAvailable the
+	// maintainer component is silently excluded; denominator stays at 0.90
+	// and the division below rescales the remaining four weights to 1.0.
+
+	weighted := weightedBase/denominator +
 		typosquatBonus +
 		aiGenBonus +
 		resilienceBonus
@@ -307,7 +362,14 @@ func maintainerRiskScore(info *scanner.MaintainerInfo, modPath string) float64 {
 	}
 
 	if info == nil {
-		return 30 // Unknown.
+		return 30 // Unknown: scanner not run for this module.
+	}
+
+	// GitHub API call failed (rate-limit, 403, network error). Return 0 so
+	// the absence of data does not inflate the score. The caller excludes
+	// this component from the denominator via re-normalization.
+	if !info.DataAvailable {
+		return 0
 	}
 
 	if info.BusFactor == 0 {

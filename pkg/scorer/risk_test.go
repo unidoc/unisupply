@@ -541,30 +541,55 @@ func TestScoreDependency_TyposquatBonus(t *testing.T) {
 	}
 }
 
-// TestScoreDependency_AIGenBonus tests that AI-generated code risk adds points.
+// TestScoreDependency_AIGenBonus tests that AI-generated code risk adds points
+// and that the risk_factors entry is gated on MeetsPromotionGate.
 func TestScoreDependency_AIGenBonus(t *testing.T) {
 	dep := testutil.MakeDep("github.com/aigen/pkg", "v1.0.0", true, 0)
-	aiGen := &scanner.AIGenRisk{
-		Score:     100,
-		RiskLevel: "high",
-	}
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil)
-
-	// Score should be 0 base + (100 * 0.15) = 15 bonus, can be adjusted slightly due to rounding
-	if ds.RiskScore < 15 || ds.RiskScore > 26 {
-		t.Errorf("expected RiskScore 15-26 range, got %d", ds.RiskScore)
-	}
-	found := false
-	for _, factor := range ds.RiskFactors {
-		if factor == "ai_gen_risk:high" {
-			found = true
-			break
+	t.Run("promotion_gate_true", func(t *testing.T) {
+		aiGen := &scanner.AIGenRisk{
+			Score:              100,
+			RiskLevel:          "high",
+			MeetsPromotionGate: true,
 		}
-	}
-	if !found {
-		t.Errorf("expected 'ai_gen_risk:high' in risk factors, got %v", ds.RiskFactors)
-	}
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil)
+
+		// Score should be 0 base + (100 * 0.15) = 15 bonus.
+		if ds.RiskScore < 15 || ds.RiskScore > 26 {
+			t.Errorf("expected RiskScore 15-26 range, got %d", ds.RiskScore)
+		}
+		found := false
+		for _, factor := range ds.RiskFactors {
+			if factor == "ai_gen_risk:high" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected 'ai_gen_risk:high' in risk factors when MeetsPromotionGate=true, got %v", ds.RiskFactors)
+		}
+	})
+
+	t.Run("promotion_gate_false", func(t *testing.T) {
+		// A non-zero score without the promotion gate still contributes the
+		// weighted bonus but must NOT appear in risk_factors.
+		aiGen := &scanner.AIGenRisk{
+			Score:              100,
+			RiskLevel:          "high",
+			MeetsPromotionGate: false,
+		}
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil)
+
+		// Bonus still applied.
+		if ds.RiskScore < 15 {
+			t.Errorf("expected weighted bonus even without promotion gate, got RiskScore %d", ds.RiskScore)
+		}
+		for _, factor := range ds.RiskFactors {
+			if factor == "ai_gen_risk:high" {
+				t.Errorf("ai_gen_risk must NOT appear in risk_factors when MeetsPromotionGate=false, got %v", ds.RiskFactors)
+			}
+		}
+	})
 }
 
 // TestScoreDependency_ResilienceBonus tests that low resilience adds points.
@@ -889,6 +914,7 @@ func TestComputeOverallScore_WeightedAverage(t *testing.T) {
 func TestScoreDependency_InactiveFlag(t *testing.T) {
 	dep := testutil.MakeDep("github.com/inactive/pkg", "v1.0.0", true, 0)
 	maintainer := &scanner.MaintainerInfo{
+		DataAvailable:    true,
 		BusFactor:        1,
 		ContributorCount: 5,
 		ActivityPattern:  "inactive",
@@ -912,6 +938,7 @@ func TestScoreDependency_InactiveFlag(t *testing.T) {
 func TestScoreDependency_TakeoverCandidate(t *testing.T) {
 	dep := testutil.MakeDep("github.com/vulnerable/pkg", "v1.0.0", true, 0)
 	maintainer := &scanner.MaintainerInfo{
+		DataAvailable:     true,
 		BusFactor:         1,
 		ContributorCount:  1,
 		TakeoverCandidate: true,
@@ -1051,6 +1078,7 @@ func TestScoreAll_HighRiskCounting(t *testing.T) {
 // TestMaintainerRiskScore_ZeroContributors tests bus factor with zero contributors.
 func TestMaintainerRiskScore_ZeroContributors(t *testing.T) {
 	info := &scanner.MaintainerInfo{
+		DataAvailable:    true,
 		BusFactor:        1,
 		ContributorCount: 0,
 	}
@@ -1060,5 +1088,117 @@ func TestMaintainerRiskScore_ZeroContributors(t *testing.T) {
 	// Bus factor 1 should return 50 even if contributors are 0
 	if got != 50 {
 		t.Errorf("expected 50, got %f", got)
+	}
+}
+
+// TestMaintainerRiskScore_DataUnavailable verifies that a missing-data
+// MaintainerInfo (DataAvailable == false) returns 0, not the "unknown" 30.
+func TestMaintainerRiskScore_DataUnavailable(t *testing.T) {
+	info := &scanner.MaintainerInfo{
+		DataAvailable: false, // API call failed
+		BusFactor:     0,
+	}
+
+	got := maintainerRiskScore(info, "github.com/test/pkg")
+
+	if got != 0 {
+		t.Errorf("maintainerRiskScore with DataAvailable=false = %f, want 0 (no penalty for missing data)", got)
+	}
+}
+
+// TestScoreDependency_MaintainerDataUnavailable verifies that when maintainer
+// DataAvailable is false the score uses the re-normalized 4-weight denominator.
+//
+// Construction: a module with only a maintenance signal (25 months → score=90)
+// and no other risk signals.
+//
+// With nil maintainer (5 weights, denom=1.0):
+//
+//	maintainerRiskScore(nil, path) = 30 (unknown)
+//	score = (0*0.40 + 90*0.25 + 0*0.15 + 30*0.10 + 0*0.10) / 1.0 = 25.5 → 26
+//
+// With DataAvailable=false (4 weights, denom=0.90):
+//
+//	maintainerRiskScore is excluded, denominator shrinks to 0.90
+//	score = (0*0.40 + 90*0.25 + 0*0.15 + 0*0.10) / 0.90 = 25.0 → 25
+//
+// The re-normalization correctly removes the "unknown maintainer" penalty
+// that would otherwise be applied to rate-limited modules.
+func TestScoreDependency_MaintainerDataUnavailable(t *testing.T) {
+	dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
+	maint := testutil.MakeMaintenanceInfo(25, false, false) // maintenance score = 90
+
+	// MaintainerInfo present but data unavailable (API returned 403).
+	maintainerUnavailable := &scanner.MaintainerInfo{
+		DataAvailable: false,
+	}
+
+	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil)
+	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil)
+
+	// nil maintainer: 5-weight denominator, unknown penalty included → 26
+	expectedNil := 26
+	// DataAvailable=false: 4-weight denominator, no penalty → 25
+	expectedUnavailable := 25
+
+	if dsNilMaintainer.RiskScore != expectedNil {
+		t.Errorf("nil maintainer score = %d, want %d (5-weight with unknown penalty)", dsNilMaintainer.RiskScore, expectedNil)
+	}
+	if dsDataUnavailable.RiskScore != expectedUnavailable {
+		t.Errorf("DataAvailable=false score = %d, want %d (4-weight re-normalized)", dsDataUnavailable.RiskScore, expectedUnavailable)
+	}
+}
+
+// TestScoreAll_WarningsPopulated verifies that ProjectScore.Warnings is
+// populated when maintainer data is unavailable for at least one module.
+func TestScoreAll_WarningsPopulated(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/test/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	maintainers := map[string]*scanner.MaintainerInfo{
+		"github.com/test/pkg": {DataAvailable: false},
+	}
+
+	ps := ScoreAll(ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: maintainers,
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	})
+
+	if len(ps.Warnings) == 0 {
+		t.Errorf("expected Warnings to be populated when maintainer data is unavailable, got empty")
+	}
+}
+
+// TestScoreAll_NoWarningsWhenDataAvailable verifies that Warnings is empty
+// when all maintainer data was successfully fetched.
+func TestScoreAll_NoWarningsWhenDataAvailable(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/test/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	maintainers := map[string]*scanner.MaintainerInfo{
+		"github.com/test/pkg": testutil.MakeMaintainerInfo(3, 10, true),
+	}
+
+	ps := ScoreAll(ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: maintainers,
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	})
+
+	if len(ps.Warnings) != 0 {
+		t.Errorf("expected no Warnings when all maintainer data available, got %v", ps.Warnings)
 	}
 }
