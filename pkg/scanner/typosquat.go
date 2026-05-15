@@ -10,11 +10,12 @@ import (
 
 // TyposquatResult holds typosquatting analysis for a module.
 type TyposquatResult struct {
-	Module     string   `json:"module"`
-	SimilarTo  string   `json:"similar_to"`
-	Distance   int      `json:"distance"`
-	Confidence float64  `json:"confidence"` // 0.0-1.0, higher = more suspicious
-	Indicators []string `json:"indicators"`
+	Module         string            `json:"module"`
+	SimilarTo      string            `json:"similar_to"`
+	Distance       int               `json:"distance"`
+	Confidence     float64           `json:"confidence"` // 0.0-1.0, higher = more suspicious
+	Indicators     []string          `json:"indicators"`
+	SuspectMatches []TyposquatResult `json:"suspect_matches,omitempty"` // Low-confidence matches for debuggability
 }
 
 // wellKnownModules is a list of popular Go modules that typosquatters target.
@@ -111,18 +112,34 @@ func (ts *TyposquatScanner) checkModule(modPath string) *TyposquatResult {
 	}
 
 	var bestMatch *TyposquatResult
+	var suspectMatches []TyposquatResult
 
 	for _, known := range wellKnownModules {
 		result := compareModules(modPath, known)
 		if result == nil {
 			continue
 		}
+
+		// Collect low-confidence matches as suspects.
+		if result.Confidence < 0.7 {
+			suspectMatches = append(suspectMatches, *result)
+			continue
+		}
+
+		// Track the best high-confidence match.
 		if bestMatch == nil || result.Confidence > bestMatch.Confidence {
 			bestMatch = result
 		}
 	}
 
-	return bestMatch
+	// If we have a high-confidence match, attach suspect matches for debuggability.
+	if bestMatch != nil {
+		bestMatch.SuspectMatches = suspectMatches
+		return bestMatch
+	}
+
+	// No high-confidence match found.
+	return nil
 }
 
 func compareModules(candidate, known string) *TyposquatResult {
