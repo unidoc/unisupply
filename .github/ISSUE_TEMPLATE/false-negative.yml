@@ -1,0 +1,112 @@
+name: False negative
+description: A scanner missed something it should have caught.
+title: "[False negative]: "
+labels: ["false-negative", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when unisupply did not report a finding you believe it
+        should have caught. Please include evidence — CVE IDs, maintainer
+        signals, or external advisories — so we can confirm the gap and
+        improve detection.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence — which scanner, which module, what was missed.
+      placeholder: The vulnerability scanner did not flag CVE-2024-XXXX in module foo.
+    validations:
+      required: true
+
+  - type: input
+    id: module
+    attributes:
+      label: Affected module
+      description: Full module path with version.
+      placeholder: "github.com/example/foo@v1.2.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scanner
+    attributes:
+      label: Scanner that should have fired
+      options:
+        - Vulnerability
+        - Maintenance
+        - Maintainer
+        - Typosquatting
+        - Resilience
+        - AI-generated
+        - CI/CD pipeline
+        - Build file
+        - Trust Index
+    validations:
+      required: true
+
+  - type: textarea
+    id: reported
+    attributes:
+      label: What unisupply reported
+      description: Paste the actual output for the module (or "no findings").
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to be reported
+      description: Specific CVE ID, staleness data, maintainer signal, or pattern that was missed. Include links or evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: discovery
+    attributes:
+      label: How you discovered the issue
+      description: e.g. another tool, manual review, external advisory.
+
+  - type: input
+    id: unisupply-version
+    attributes:
+      label: unisupply version
+      placeholder: "v0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: "go version go1.25.3 darwin/arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS / arch
+      options:
+        - Linux amd64
+        - Linux arm64
+        - macOS amd64
+        - macOS arm64
+        - Windows amd64
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have provided evidence that the missed finding is real.
+          required: true
+        - label: I understand that some gaps may be intentional — I checked CONTRIBUTING.md before filing.
+          required: true

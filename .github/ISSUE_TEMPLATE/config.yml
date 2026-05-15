@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/unidoc/unisupply/security/advisories/new
+    about: >
+      Do not open a public issue for security problems.
+      Use GitHub Private Vulnerability Reporting or email security@unidoc.io.
+  - name: Design question / discussion
+    url: https://github.com/unidoc/unisupply/discussions
+    about: >
+      Not sure if something is a bug? Start a discussion first.

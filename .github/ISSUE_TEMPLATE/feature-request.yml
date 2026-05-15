@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a new capability for unisupply.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. Lead with the problem you cannot
+        solve today — that helps us evaluate the idea before discussing
+        any specific solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What you cannot do today and why it matters. No solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you want unisupply to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other tools or workarounds you evaluated.
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Are you willing to contribute?
+      options:
+        - "Yes, I can open a PR"
+        - "Yes, with guidance"
+        - "No, just filing the idea"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and discussions — this is not a duplicate.
+          required: true
+        - label: This is a feature of the scanner / report / policy engine, not a request to whitelist a specific module (use policy files for that).
+          required: true
