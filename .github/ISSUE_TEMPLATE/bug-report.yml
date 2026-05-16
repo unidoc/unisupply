@@ -1,0 +1,101 @@
+name: Bug report
+description: Report a crash, wrong output, or unexpected behavior in unisupply.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill in as
+        much detail as possible — reproductions are what let us fix issues
+        quickly. Do **not** use this form for security vulnerabilities; see
+        the security link on the issue chooser page.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what went wrong.
+      placeholder: When I run unisupply against my project, it crashes with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: The exact `unisupply` invocation, including all flags.
+      render: shell
+      placeholder: |
+        unisupply ./ --format json --output report.json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you thought should happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior / output
+      description: Full terminal output, error message, or stack trace.
+      render: shell
+      placeholder: |
+        Error: ...
+        goroutine 1 [running]:
+        ...
+    validations:
+      required: true
+
+  - type: input
+    id: unisupply-version
+    attributes:
+      label: unisupply version
+      description: Output of `unisupply --version`.
+      placeholder: "v0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      description: Output of `go version`.
+      placeholder: "go version go1.25.3 darwin/arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS / arch
+      options:
+        - Linux amd64
+        - Linux arm64
+        - macOS amd64
+        - macOS arm64
+        - Windows amd64
+        - Other (please describe in Additional context)
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Related issues, workarounds tried, anything else.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am running the latest released version of unisupply.
+          required: true
