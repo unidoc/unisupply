@@ -107,14 +107,17 @@ func TestVulnScore(t *testing.T) {
 			expected: 25,
 		},
 		{
-			name: "unknown severity treated as medium (50)",
+			// UNKNOWN weight changed to 40 (more conservative than the old 50,
+			// reflecting the cost of not knowing how bad the CVE is).
+			name: "unknown severity returns 40",
 			vulns: []scanner.Vulnerability{
 				testutil.MakeVuln("CVE-2024-1234", "UNKNOWN", "v1.5.0"),
 			},
-			expected: 50,
+			expected: 40,
 		},
 		{
-			name: "multiple vulnerabilities capped at 100",
+			// Two CRITICALs: base=100, bonus=5×(2-1)=5 → capped at 100.
+			name: "multiple CRITICAL vulnerabilities capped at 100",
 			vulns: []scanner.Vulnerability{
 				testutil.MakeVuln("CVE-2024-1234", "CRITICAL", "v1.5.0"),
 				testutil.MakeVuln("CVE-2024-5678", "CRITICAL", "v1.6.0"),
@@ -122,12 +125,14 @@ func TestVulnScore(t *testing.T) {
 			expected: 100,
 		},
 		{
-			name: "multiple lower severity vulns sum correctly",
+			// max-plus-accumulator: base=max(50,25)=50; neither is HIGH-or-above,
+			// so bonus=0. Total=50 (old sum=75).
+			name: "multiple lower severity vulns use max not sum",
 			vulns: []scanner.Vulnerability{
 				testutil.MakeVuln("CVE-2024-1234", "MEDIUM", "v1.5.0"),
 				testutil.MakeVuln("CVE-2024-5678", "LOW", "v1.6.0"),
 			},
-			expected: 75, // 50 + 25
+			expected: 50, // max(MEDIUM=50, LOW=25) + 0 bonus
 		},
 		{
 			name: "case insensitive severity matching",
@@ -1173,6 +1178,155 @@ func TestScoreAll_WarningsPopulated(t *testing.T) {
 
 	if len(ps.Warnings) == 0 {
 		t.Errorf("expected Warnings to be populated when maintainer data is unavailable, got empty")
+	}
+}
+
+// TestVulnScoreAccumulator covers the three acceptance-criteria accumulator cases:
+//   - 1 CRITICAL → 100
+//   - 3 HIGH → min(100, 80 + 5×2) = 90
+//   - 1 CRITICAL + 5 LOW → 100 (CRITICAL dominates, LOWs not summed)
+func TestVulnScoreAccumulator(t *testing.T) {
+	tests := []struct {
+		name     string
+		vulns    []scanner.Vulnerability
+		expected float64
+	}{
+		{
+			name: "1 CRITICAL → vuln_score == 100",
+			vulns: []scanner.Vulnerability{
+				testutil.MakeVuln("CVE-2024-0001", "CRITICAL", "v1.1.0"),
+			},
+			expected: 100,
+		},
+		{
+			// base = 80 (HIGH), highOrAboveCount = 3, bonus = 5×(3-1) = 10
+			// total = 80 + 10 = 90
+			name: "3 HIGH → vuln_score == 90",
+			vulns: []scanner.Vulnerability{
+				testutil.MakeVuln("CVE-2024-0001", "HIGH", "v1.1.0"),
+				testutil.MakeVuln("CVE-2024-0002", "HIGH", "v1.1.0"),
+				testutil.MakeVuln("CVE-2024-0003", "HIGH", "v1.1.0"),
+			},
+			expected: 90,
+		},
+		{
+			// base = 100 (CRITICAL dominates max), highOrAboveCount = 1, bonus = 0
+			// LOWs do NOT contribute to highOrAboveCount, so no bonus stacking
+			// total = 100 + 0 = 100
+			name: "1 CRITICAL + 5 LOW → vuln_score == 100 (CRITICAL dominates)",
+			vulns: []scanner.Vulnerability{
+				testutil.MakeVuln("CVE-2024-0001", "CRITICAL", "v1.1.0"),
+				testutil.MakeVuln("CVE-2024-0002", "LOW", ""),
+				testutil.MakeVuln("CVE-2024-0003", "LOW", ""),
+				testutil.MakeVuln("CVE-2024-0004", "LOW", ""),
+				testutil.MakeVuln("CVE-2024-0005", "LOW", ""),
+				testutil.MakeVuln("CVE-2024-0006", "LOW", ""),
+			},
+			expected: 100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := vulnScore(tt.vulns)
+			if got != tt.expected {
+				t.Errorf("vulnScore() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSeverityFloor verifies that the severity-derived floor and risk_level
+// promotion work correctly for all four severity bands.
+func TestSeverityFloor(t *testing.T) {
+	tests := []struct {
+		name              string
+		vulns             []scanner.Vulnerability
+		wantMinScore      int
+		wantRiskLevel     RiskLevel
+	}{
+		{
+			name:          "CRITICAL CVE → floor 51, risk_level CRITICAL",
+			vulns:         []scanner.Vulnerability{testutil.MakeVuln("CVE-2024-0001", "CRITICAL", "v1.1.0")},
+			wantMinScore:  51,
+			wantRiskLevel: RiskCritical,
+		},
+		{
+			name:          "HIGH CVE → floor 51, risk_level HIGH minimum",
+			vulns:         []scanner.Vulnerability{testutil.MakeVuln("CVE-2024-0001", "HIGH", "v1.1.0")},
+			wantMinScore:  51,
+			wantRiskLevel: RiskHigh,
+		},
+		{
+			name:          "MEDIUM CVE → floor 26, risk_level MEDIUM minimum",
+			vulns:         []scanner.Vulnerability{testutil.MakeVuln("CVE-2024-0001", "MEDIUM", "v1.1.0")},
+			wantMinScore:  26,
+			wantRiskLevel: RiskMedium,
+		},
+		{
+			// LOW CVE with no age signal: no floor applied, risk_level stays LOW.
+			// Use a fresh dep so the base weighted score is LOW.
+			name:          "LOW CVE (no age) → no floor, risk_level LOW",
+			vulns:         []scanner.Vulnerability{testutil.MakeVuln("CVE-2024-0001", "LOW", "")},
+			wantMinScore:  0, // floor check: must not raise to ≥26
+			wantRiskLevel: RiskLow,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
+			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil)
+
+			if tt.wantMinScore > 0 && ds.RiskScore < tt.wantMinScore {
+				t.Errorf("RiskScore = %d, want >= %d", ds.RiskScore, tt.wantMinScore)
+			}
+			// For LOW with no age signal, verify it does NOT get elevated to MEDIUM.
+			if tt.wantRiskLevel == RiskLow && ds.RiskLevel != RiskLow {
+				t.Errorf("RiskLevel = %s, want LOW (no floor for bare LOW CVE)", ds.RiskLevel)
+			}
+			// For CRITICAL/HIGH/MEDIUM, verify promotion is correct.
+			if tt.wantRiskLevel != RiskLow && ds.RiskLevel != tt.wantRiskLevel {
+				t.Errorf("RiskLevel = %s, want %s", ds.RiskLevel, tt.wantRiskLevel)
+			}
+		})
+	}
+}
+
+// TestLowFixAge covers the fix-age amplifier for LOW-severity CVEs.
+func TestLowFixAge(t *testing.T) {
+	t.Run("LOW with fix 400 days ago → RiskScore >= 26", func(t *testing.T) {
+		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
+		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 500, 400, false)
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+
+		if ds.RiskScore < 26 {
+			t.Errorf("RiskScore = %d, want >= 26 (fix available 400 days ago)", ds.RiskScore)
+		}
+	})
+
+	t.Run("LOW with fix 10 days ago → no amplifier floor", func(t *testing.T) {
+		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
+		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 30, 10, false)
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+
+		// 10 days is below the 30-day threshold: amplifier must NOT raise to 26.
+		if ds.RiskScore >= 26 {
+			t.Errorf("RiskScore = %d, want < 26 (fix only 10 days old, no amplifier floor)", ds.RiskScore)
+		}
+	})
+}
+
+// TestUnknownSeverityFloor verifies that an UNKNOWN-severity CVE with
+// EnrichmentFailed=true gets a conservative MEDIUM floor (>= 26).
+func TestUnknownSeverityFloor(t *testing.T) {
+	dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
+	vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "UNKNOWN", 90, 0, true)
+	// EnrichmentFailed = true, so the scorer must apply the conservative MEDIUM floor.
+	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+
+	if ds.RiskScore < 26 {
+		t.Errorf("RiskScore = %d, want >= 26 (conservative floor for enrichment-failed UNKNOWN)", ds.RiskScore)
 	}
 }
 
