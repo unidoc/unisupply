@@ -14,21 +14,21 @@ import (
 
 // JSONReport is the top-level JSON output structure.
 type JSONReport struct {
-	Tool              string              `json:"tool"`
-	Version           string              `json:"version"`
-	GeneratedAt       string              `json:"generated_at"`
-	Project           JSONProject         `json:"project"`
-	OverallRisk       int                 `json:"overall_risk_score"`
-	OverallLevel      string              `json:"overall_risk_level"`
+	Tool         string      `json:"tool"`
+	Version      string      `json:"version"`
+	GeneratedAt  string      `json:"generated_at"`
+	Project      JSONProject `json:"project"`
+	OverallRisk  int         `json:"overall_risk_score"`
+	OverallLevel string      `json:"overall_risk_level"`
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
-	Warnings          []string            `json:"warnings,omitempty"`
-	Summary           JSONSummary         `json:"summary"`
-	Deps              []JSONDependency    `json:"dependencies"`
-	CI                *JSONCIReport       `json:"ci_cd_assessment,omitempty"`
-	CIFindings        []JSONFlatFinding   `json:"ci_findings"`
-	BuildFileFindings []JSONFlatFinding   `json:"build_file_findings"`
-	Takeovers         []JSONTakeover      `json:"takeover_candidates,omitempty"`
+	Warnings          []string          `json:"warnings,omitempty"`
+	Summary           JSONSummary       `json:"summary"`
+	Deps              []JSONDependency  `json:"dependencies"`
+	CI                *JSONCIReport     `json:"ci_cd_assessment,omitempty"`
+	CIFindings        []JSONFlatFinding `json:"ci_findings"`
+	BuildFileFindings []JSONFlatFinding `json:"build_file_findings"`
+	Takeovers         []JSONTakeover    `json:"takeover_candidates,omitempty"`
 }
 
 // JSONFlatFinding is a normalized top-level finding entry for CI/CD and build-file
@@ -68,9 +68,9 @@ type JSONSummary struct {
 
 // JSONDependency holds per-dependency info.
 type JSONDependency struct {
-	Module         string              `json:"module"`
-	Version        string              `json:"version"`
-	Direct         bool                `json:"direct"`
+	Module  string `json:"module"`
+	Version string `json:"version"`
+	Direct  bool   `json:"direct"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
 	// failed or was not run). When present it reflects the authoritative
 	// go list -m -json -test result: true = confirmed test-only,
@@ -144,9 +144,9 @@ type JSONScoreBreakdown struct {
 
 // JSONTyposquat holds typosquatting analysis.
 type JSONTyposquat struct {
-	SimilarTo      string                `json:"similar_to"`
-	Confidence     float64               `json:"confidence"`
-	Indicators     []string              `json:"indicators"`
+	SimilarTo      string                 `json:"similar_to"`
+	Confidence     float64                `json:"confidence"`
+	Indicators     []string               `json:"indicators"`
 	SuspectMatches []JSONTyposquatSuspect `json:"suspect_matches,omitempty"`
 }
 

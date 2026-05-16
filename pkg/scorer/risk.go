@@ -63,6 +63,16 @@ type DependencyScore struct {
 }
 
 // ProjectScore holds the overall project risk assessment.
+//
+// Task 10 introduces a two-axis headline:
+//
+//	OverallScore = max(MeanDepRiskScore, SeverityAdjustedVulnScore)
+//
+// MeanDepRiskScore is the legacy weighted-mean answer to "how risky is this
+// portfolio on average?" SeverityAdjustedVulnScore is a CVE-driven step
+// function that answers "how bad is the worst-case CVE pile-up?" The headline
+// takes the max so a single CRITICAL CVE cannot be diluted by hundreds of
+// clean transitives. HeadlineDriver records which axis won.
 type ProjectScore struct {
 	OverallScore      int                `json:"overall_risk_score"`
 	OverallLevel      RiskLevel          `json:"overall_risk_level"`
@@ -74,11 +84,119 @@ type ProjectScore struct {
 	TotalVulns        int                `json:"total_vulnerabilities"`
 	Unmaintained2yr   int                `json:"unmaintained_2yr"`
 	Unmaintained1yr   int                `json:"unmaintained_1yr"`
+
+	// MeanDepRiskScore is the weighted-mean axis (legacy formula). Equal to the
+	// pre-Task-10 OverallScore. Use this when you want a portfolio-wide signal
+	// that is not dominated by a single dep.
+	MeanDepRiskScore int `json:"mean_dep_risk_score"`
+
+	// SeverityAdjustedVulnScore is the CVE-driven step-function axis. Derived
+	// from the enriched CVE list with a test-only downgrade-then-step applied
+	// before counting. See severityAdjustedVulnScore in risk.go.
+	SeverityAdjustedVulnScore int `json:"severity_adjusted_vuln_score"`
+
+	// HeadlineDriver is "mean" or "severity_adjusted" — which axis produced
+	// OverallScore. Empty when there are no dependencies.
+	HeadlineDriver string `json:"headline_driver,omitempty"`
+
+	// WorstCVEID is the ID of the most-severe enriched CVE on a production-path
+	// dep (after test-only downgrade). Surfaces the load-bearing finding at a
+	// glance. Empty when no CVEs are present.
+	WorstCVEID string `json:"worst_cve_id,omitempty"`
+
+	// WorstCVESeverity is the severity tier (post-downgrade) of WorstCVEID.
+	WorstCVESeverity string `json:"worst_cve_severity,omitempty"`
+
+	// Diagnostics carries tail aggregates that the headline intentionally drops
+	// (they over-promote healthy projects with long stale-but-inert tails).
+	// NON-NORMATIVE: downstream consumers must not build policy gates on these
+	// fields. Retained for debugging only.
+	Diagnostics *Diagnostics `json:"diagnostics,omitempty"`
+
+	// DebugScoring is populated only when --debug-scoring is set. Contains the
+	// full per-dep + step-function inputs that produced the headline so a
+	// customer report can be reproduced offline.
+	//
+	// NON-NORMATIVE: downstream consumers must not build policy gates on these
+	// fields. The schema is internal to unisupply and may change between
+	// releases.
+	DebugScoring *DebugScoring `json:"debug_scoring,omitempty"`
+
 	// Warnings surfaces data-quality issues to consumers. Entries explain
 	// which signals were unavailable during the scan (e.g. missing GitHub
 	// token) so downstream tooling can decide how to act on the scores.
 	// This field lives on the top-level ProjectScore only — NOT per-dep.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// Diagnostics carries tail aggregates retained for debugging.
+//
+// NON-NORMATIVE: do not build policy gates on these fields. The headline
+// dropped them because empirically they over-promoted healthy projects with
+// long stale-but-inert tails. They remain useful for spot-checking outliers.
+type Diagnostics struct {
+	// MaxDepRiskScore is the maximum per-dep RiskScore across all dependencies.
+	MaxDepRiskScore int `json:"max_dep_risk_score"`
+	// P95DepRiskScore is the 95th-percentile per-dep RiskScore.
+	P95DepRiskScore int `json:"p95_dep_risk_score"`
+}
+
+// DebugScoring is the diagnostic block emitted under --debug-scoring.
+//
+// NON-NORMATIVE: schema may change between releases. Use for offline
+// reproduction of a headline only.
+type DebugScoring struct {
+	// MeanDepRiskScore and SeverityAdjustedVulnScore mirror the top-level
+	// fields for convenience.
+	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
+	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
+	HeadlineDriver            string `json:"headline_driver"`
+
+	// StepFunctionInputs holds the post-downgrade severity counts that fed the
+	// step function.
+	StepFunctionInputs StepFunctionInputs `json:"step_function_inputs"`
+
+	// EnrichedCVEs is the full list of CVEs considered by the step function,
+	// each annotated with the test-only flag and the post-downgrade tier.
+	EnrichedCVEs []DebugCVE `json:"enriched_cves"`
+
+	// PerDepInputs lists per-dep VulnScore inputs (worst-CVE severity, HIGH+
+	// count, floor applied, fix-age amplifier triggered). One entry per dep
+	// with at least one CVE.
+	PerDepInputs []DebugPerDepInput `json:"per_dep_inputs"`
+}
+
+// StepFunctionInputs records the post-downgrade severity counts.
+type StepFunctionInputs struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+}
+
+// DebugCVE annotates a single CVE with the inputs that determined its
+// contribution to the step function.
+type DebugCVE struct {
+	ID             string `json:"id"`
+	Module         string `json:"module"`
+	OriginalTier   string `json:"original_severity"`
+	DowngradedTier string `json:"downgraded_severity,omitempty"`
+	TestOnly       *bool  `json:"test_only,omitempty"`
+	// EnrichmentFailed mirrors scanner.Vulnerability.EnrichmentFailed so the
+	// reader can tell why an UNKNOWN was treated as MEDIUM in the step function.
+	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
+}
+
+// DebugPerDepInput records the inputs to vulnScore for one dependency.
+type DebugPerDepInput struct {
+	Module           string `json:"module"`
+	WorstSeverity    string `json:"worst_severity"`
+	HighOrAboveCount int    `json:"high_or_above_count"`
+	FloorApplied     int    `json:"floor_applied"`
+	FixAgeAmplifier  bool   `json:"fix_age_amplifier_triggered"`
+	FinalVulnScore   int    `json:"final_vuln_score"`
+	FinalRiskScore   int    `json:"final_risk_score"`
+	FinalRiskLevel   string `json:"final_risk_level"`
 }
 
 // ScoreInput bundles all scan results for scoring.

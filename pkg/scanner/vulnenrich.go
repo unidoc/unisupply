@@ -51,10 +51,10 @@ type VulnEnricherOptions struct {
 // Results are cached on disk for 24 hours to avoid hammering the APIs on
 // repeated scans of the same project.
 type VulnEnricher struct {
-	client  *Client
-	opts    VulnEnricherOptions
+	client   *Client
+	opts     VulnEnricherOptions
 	cacheDir string
-	now     func() time.Time
+	now      func() time.Time
 }
 
 // NewVulnEnricher creates a new VulnEnricher. The returned enricher is safe
@@ -288,11 +288,11 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (*enrichResult, 
 
 // ghsaResponse is a partial decode of the GitHub Advisory API response.
 type ghsaResponse struct {
-	GHSAID   string `json:"ghsa_id"`
-	CVSSV3   *struct {
+	GHSAID string `json:"ghsa_id"`
+	CVSSV3 *struct {
 		Score float64 `json:"score"`
 	} `json:"cvss"`
-	Severity string `json:"severity"` // low/medium/high/critical
+	Severity    string `json:"severity"` // low/medium/high/critical
 	PublishedAt string `json:"published_at"`
 	UpdatedAt   string `json:"updated_at"`
 }
@@ -409,7 +409,7 @@ func parseCVSSScore(s string) (float64, bool) {
 
 // cacheEntry is what gets written to / read from each cache file.
 type cacheEntry struct {
-	FetchedAt time.Time    `json:"fetched_at"`
+	FetchedAt time.Time     `json:"fetched_at"`
 	Result    *enrichResult `json:"result"`
 }
 

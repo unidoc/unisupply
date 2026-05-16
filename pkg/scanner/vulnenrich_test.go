@@ -347,8 +347,8 @@ func TestVulnEnrich_BothFail(t *testing.T) {
 	e := newEnricherWithTransport(t, st, "", nil)
 
 	v := &Vulnerability{
-		ID:      "CVE-2024-23653",
-		Aliases: []string{"GHSA-vc3v-ppc7-v486"},
+		ID:       "CVE-2024-23653",
+		Aliases:  []string{"GHSA-vc3v-ppc7-v486"},
 		Severity: "UNKNOWN",
 	}
 	warns := e.Enrich(context.Background(), v)

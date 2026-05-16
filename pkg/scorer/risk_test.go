@@ -1240,10 +1240,10 @@ func TestVulnScoreAccumulator(t *testing.T) {
 // promotion work correctly for all four severity bands.
 func TestSeverityFloor(t *testing.T) {
 	tests := []struct {
-		name              string
-		vulns             []scanner.Vulnerability
-		wantMinScore      int
-		wantRiskLevel     RiskLevel
+		name          string
+		vulns         []scanner.Vulnerability
+		wantMinScore  int
+		wantRiskLevel RiskLevel
 	}{
 		{
 			name:          "CRITICAL CVE → floor 51, risk_level CRITICAL",
