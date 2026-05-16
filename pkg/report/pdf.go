@@ -580,10 +580,22 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regular, bold *model.PdfFont, detailed bool) {
 	color := pdfRiskColor(ds.RiskLevel)
 
+	// Build the classification label for the module header.
+	classLabel := "transitive"
+	if ds.Direct {
+		classLabel = "direct"
+	}
+	// Append [test-only] when the classification is confirmed (IsTestOnly == &true).
+	// When IsTestOnly is nil (unknown) we omit the label — silence is safer than
+	// a wrong label.
+	if ds.IsTestOnly != nil && *ds.IsTestOnly {
+		classLabel += ", test-only"
+	}
+
 	// Module header.
 	header := c.NewStyledParagraph()
 	header.SetMargins(0, 0, 5, 3)
-	ch := header.Append(fmt.Sprintf("%s %s — Risk: %d/100", ds.Module, ds.Version, ds.RiskScore))
+	ch := header.Append(fmt.Sprintf("%s %s — Risk: %d/100 (%s)", ds.Module, ds.Version, ds.RiskScore, classLabel))
 	ch.Style.Font = bold
 	ch.Style.FontSize = 11
 	ch.Style.Color = color

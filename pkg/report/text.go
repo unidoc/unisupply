@@ -207,6 +207,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	if ds.Direct {
 		label = "direct"
 	}
+	// Append [test-only] when the classification is confirmed. When IsTestOnly
+	// is nil (unknown, go list failed) we show nothing — silence is better than
+	// a wrong label.
+	if ds.IsTestOnly != nil && *ds.IsTestOnly {
+		label += ", test-only"
+	}
 
 	fmt.Fprintf(w, "● %s %s  %s  (%s)\n",
 		ds.Module, ds.Version,

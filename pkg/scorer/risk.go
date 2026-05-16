@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -46,6 +47,12 @@ type DependencyScore struct {
 	AIGenRisk      *scanner.AIGenRisk       `json:"ai_gen_risk,omitempty"`
 	TrustIndex     *scanner.TrustIndexEntry `json:"trust_index,omitempty"`
 	RiskFactors    []string                 `json:"risk_factors,omitempty"`
+
+	// IsTestOnly carries the three-state test-only classification from the
+	// resolver. See resolver.Dependency.IsTestOnly for the full semantics.
+	// Task 10's discount logic MUST only apply the discount when this is &true
+	// (confirmed test-only). A nil value (unknown) must not trigger any discount.
+	IsTestOnly *bool `json:"is_test_only,omitempty"`
 
 	// Component scores (for verbose output).
 	VulnScore        float64 `json:"-"`
@@ -165,6 +172,7 @@ func scoreDependency(
 		Module:         dep.Module.Path,
 		Version:        dep.Module.Version,
 		Direct:         dep.Direct,
+		IsTestOnly:     dep.IsTestOnly,
 		DependencyPath: dep.UsedBy,
 		Vulns:          vulns,
 		Maintenance:    maint,
@@ -280,11 +288,35 @@ func scoreDependency(
 
 	ds.RiskScore = int(math.Round(weighted))
 
-	// Floor: any dependency with a known vulnerability should never be below 51
-	// (HIGH risk). A known CVE with a fix available is actionable and must not
-	// be buried in MEDIUM/LOW where it looks safe.
-	if len(vulns) > 0 && ds.RiskScore < 51 {
-		ds.RiskScore = 51
+	// Severity-derived floor: replaces the old blanket >= 51 floor.
+	// The floor and risk_level are determined by the worst CVE severity on this dep.
+	// UNKNOWN severity uses a conservative MEDIUM floor when enrichment failed
+	// (i.e. we could not determine severity — assume it could be HIGH).
+	//
+	// These tables answer different questions:
+	//   per-dep (here)    = "how risky is this module?"
+	//   project-level     = "worst-case CVE-driven floor for the whole project?" (Task 10)
+	// Never call one from the other.
+	if len(vulns) > 0 {
+		floor, promotedLevel := severityFloor(vulns)
+		if ds.RiskScore < floor {
+			ds.RiskScore = floor
+		}
+
+		// Per-dep risk_level promotion: CRITICAL/HIGH CVEs promote the band
+		// regardless of numeric score. This ensures a dep with CRITICAL CVE
+		// always surfaces as CRITICAL in per-dep risk_level even when other
+		// factors pull the numeric score below 76.
+		if ds.RiskScore > 100 {
+			ds.RiskScore = 100
+		}
+		numeric := levelFromScore(ds.RiskScore)
+		if riskLevelOrder(promotedLevel) > riskLevelOrder(numeric) {
+			ds.RiskLevel = promotedLevel
+		} else {
+			ds.RiskLevel = numeric
+		}
+		return ds
 	}
 
 	if ds.RiskScore > 100 {
@@ -295,31 +327,178 @@ func scoreDependency(
 	return ds
 }
 
+// severityWeight maps a normalized severity string to its per-dep weight.
+//
+// These weights answer: "how risky is this module?"
+// They differ intentionally from the project-level severity_adjusted_vuln_score
+// table in Task 10, which answers: "worst-case CVE-driven floor for the whole
+// project?" Never unify or call one from the other.
+func severityWeight(severity string) float64 {
+	switch strings.ToUpper(severity) {
+	case "CRITICAL":
+		return 100
+	case "HIGH":
+		return 80
+	case "MEDIUM":
+		return 50
+	case "LOW":
+		return 25
+	default:
+		// UNKNOWN: more conservative than the old 50; reflects the uncertainty
+		// cost of not knowing how bad the CVE is.
+		return 40
+	}
+}
+
+// vulnScore computes a per-dep vulnerability score using a max-plus-accumulator.
+//
+// Formula:
+//
+//	base = max(severityWeight) over all CVEs on this dep
+//	bonus = 5 × (count_of_HIGH_or_above − 1), capped such that total ≤ 100
+//
+// Rationale: a single CRITICAL must dominate many LOWs, but multiple CRITICALs
+// are materially worse than one CRITICAL. The bonus accounts for pile-up without
+// letting LOW-severity noise inflate the score past the base severity.
+//
+// These weights answer: "how risky is this module?" (per-dep axis).
+// See the project-level severity_adjusted_vuln_score table in Task 10 for the
+// complementary axis. Never call one from the other.
 func vulnScore(vulns []scanner.Vulnerability) float64 {
 	if len(vulns) == 0 {
 		return 0
 	}
 
-	total := 0.0
+	maxWeight := 0.0
+	highOrAboveCount := 0
+
 	for _, v := range vulns {
-		switch strings.ToUpper(v.Severity) {
-		case "CRITICAL":
-			total += 100
-		case "HIGH":
-			total += 80
-		case "MEDIUM":
-			total += 50
-		case "LOW":
-			total += 25
-		default:
-			total += 50 // Unknown severity treated as medium.
+		w := severityWeight(v.Severity)
+		if w > maxWeight {
+			maxWeight = w
+		}
+		sev := strings.ToUpper(v.Severity)
+		if sev == "CRITICAL" || sev == "HIGH" {
+			highOrAboveCount++
 		}
 	}
 
+	// Accumulator: base is the worst CVE; each additional HIGH-or-above adds 5.
+	bonus := 0.0
+	if highOrAboveCount > 1 {
+		bonus = float64(highOrAboveCount-1) * 5
+	}
+
+	total := maxWeight + bonus
 	if total > 100 {
 		total = 100
 	}
 	return total
+}
+
+// severityFloor derives the minimum RiskScore floor and the promoted RiskLevel
+// for a dep that has at least one vulnerability. The floor is based on the worst
+// CVE severity present. The second return value is the minimum RiskLevel that
+// must be applied regardless of the numeric score (per-dep risk_level promotion).
+//
+// Floor table:
+//
+//	CRITICAL or HIGH → 51 (HIGH band)
+//	MEDIUM           → 26 (MEDIUM band)
+//	LOW              → 0  (no floor; amplifier below may still raise it)
+//	UNKNOWN with enrichment failure → 26 (conservative MEDIUM)
+func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel) {
+	// Track the worst severity seen to determine the floor.
+	hasCritical := false
+	hasHigh := false
+	hasMedium := false
+	hasUnknownFailed := false
+
+	for _, v := range vulns {
+		switch strings.ToUpper(v.Severity) {
+		case "CRITICAL":
+			hasCritical = true
+		case "HIGH":
+			hasHigh = true
+		case "MEDIUM":
+			hasMedium = true
+		case "LOW":
+			// LOW: no floor from severity alone; handled by fix-age amplifier below.
+		default:
+			// UNKNOWN: conservative if enrichment failed.
+			if v.EnrichmentFailed {
+				hasUnknownFailed = true
+			}
+		}
+	}
+
+	switch {
+	case hasCritical:
+		return 51, RiskCritical
+	case hasHigh:
+		return 51, RiskHigh
+	case hasMedium:
+		return 26, RiskMedium
+	case hasUnknownFailed:
+		// We attempted enrichment but could not determine severity.
+		// Conservative floor: MEDIUM, because the CVE could be HIGH.
+		return 26, RiskMedium
+	default:
+		// Only LOW CVEs present; apply fix-age amplifier.
+		floor = lowFixAgeFloor(vulns)
+		return floor, RiskLow
+	}
+}
+
+// lowFixAgeFloor returns a floor score for deps whose worst CVE is LOW severity.
+// A LOW CVE that has had a fix available for a long time signals that the
+// upstream is not actively patching — a maintenance risk disguised as a low CVE.
+//
+// Amplifier table (applied to the worst LOW CVE's age signals):
+//
+//	fix_available && days_since_fix_published >= 365 → 26 (MEDIUM)
+//	fix_available && days_since_fix_published >= 180 → 20 (high LOW)
+//	fix_available && days_since_fix_published >= 30  → no floor
+//	!fix_available && days_since_disclosure >= 365   → 20
+//	otherwise                                        → no floor
+func lowFixAgeFloor(vulns []scanner.Vulnerability) int {
+	now := time.Now()
+	floor := 0
+
+	for _, v := range vulns {
+		// Only apply amplifier to LOW-severity CVEs.
+		if strings.ToUpper(v.Severity) != "LOW" {
+			continue
+		}
+
+		if v.FixPublishedAt != nil {
+			// Fix is available: measure how long the user has had the option to patch.
+			daysSinceFix := int(now.Sub(*v.FixPublishedAt).Hours() / 24)
+			switch {
+			case daysSinceFix >= 365:
+				if 26 > floor {
+					floor = 26
+				}
+			case daysSinceFix >= 180:
+				if 20 > floor {
+					floor = 20
+				}
+				// 30 <= daysSinceFix < 180: no floor contribution.
+			}
+		} else if v.PublishedAt != nil {
+			// No fix available: measure time since disclosure.
+			daysSinceDisclosure := int(now.Sub(*v.PublishedAt).Hours() / 24)
+			if daysSinceDisclosure >= 365 {
+				if 20 > floor {
+					floor = 20
+				}
+			}
+		}
+		// DaysUnpatched is precomputed by Task 07; it equals days since FixPublishedAt
+		// when a fix exists. It is used here indirectly via FixPublishedAt/PublishedAt.
+	}
+
+	return floor
 }
 
 func maintenanceScore(maint *scanner.MaintenanceInfo) float64 {
@@ -479,5 +658,20 @@ func levelFromScore(score int) RiskLevel {
 		return RiskMedium
 	default:
 		return RiskLow
+	}
+}
+
+// riskLevelOrder returns a numeric ordinal for a RiskLevel, used for comparisons.
+// Higher ordinal = higher risk.
+func riskLevelOrder(l RiskLevel) int {
+	switch l {
+	case RiskCritical:
+		return 3
+	case RiskHigh:
+		return 2
+	case RiskMedium:
+		return 1
+	default:
+		return 0
 	}
 }

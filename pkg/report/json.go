@@ -71,6 +71,11 @@ type JSONDependency struct {
 	Module         string              `json:"module"`
 	Version        string              `json:"version"`
 	Direct         bool                `json:"direct"`
+	// TestOnly is omitted when nil (classification was unavailable — go list
+	// failed or was not run). When present it reflects the authoritative
+	// go list -m -json -test result: true = confirmed test-only,
+	// false = confirmed production. Never infer "false" from absence.
+	TestOnly       *bool               `json:"test_only,omitempty"`
 	RiskScore      int                 `json:"risk_score"`
 	RiskLevel      string              `json:"risk_level"`
 	ScoreBreakdown *JSONScoreBreakdown `json:"score_breakdown"`
@@ -234,6 +239,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			Module:    ds.Module,
 			Version:   ds.Version,
 			Direct:    ds.Direct,
+			TestOnly:  ds.IsTestOnly,
 			RiskScore: ds.RiskScore,
 			RiskLevel: string(ds.RiskLevel),
 			ScoreBreakdown: &JSONScoreBreakdown{

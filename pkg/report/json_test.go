@@ -254,6 +254,216 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 	// Takeovers can be nil (omitempty in JSON output)
 }
 
+// TestWriteJSON_TestOnly_ConfirmedTrue verifies that a dep with IsTestOnly=&true
+// is serialised with "test_only": true in the JSON output.
+func TestWriteJSON_TestOnly_ConfirmedTrue(t *testing.T) {
+	trueVal := true
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:       "github.com/testfwk/containers",
+			Version:    "v0.40.0",
+			Direct:     false,
+			Depth:      1,
+			IsTestOnly: &trueVal,
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 15,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:     "github.com/testfwk/containers",
+				Version:    "v0.40.0",
+				Direct:     false,
+				IsTestOnly: &trueVal,
+				RiskScore:  15,
+				RiskLevel:  scorer.RiskLow,
+			},
+		},
+		LowRiskCount: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	if len(report.Deps) != 1 {
+		t.Fatalf("Deps length = %d, want 1", len(report.Deps))
+	}
+
+	dep := report.Deps[0]
+	if dep.TestOnly == nil {
+		t.Fatal("test_only field is nil (omitted), want &true")
+	}
+	if !*dep.TestOnly {
+		t.Errorf("test_only = false, want true")
+	}
+	if dep.Direct {
+		t.Errorf("direct = true for transitive dep, want false")
+	}
+}
+
+// TestWriteJSON_TestOnly_ConfirmedFalse verifies that a dep with IsTestOnly=&false
+// (confirmed production) is serialised with "test_only": false.
+func TestWriteJSON_TestOnly_ConfirmedFalse(t *testing.T) {
+	falseVal := false
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:       "github.com/example/production",
+			Version:    "v1.0.0",
+			Direct:     true,
+			Depth:      0,
+			IsTestOnly: &falseVal,
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 10,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:     "github.com/example/production",
+				Version:    "v1.0.0",
+				Direct:     true,
+				IsTestOnly: &falseVal,
+				RiskScore:  10,
+				RiskLevel:  scorer.RiskLow,
+			},
+		},
+		LowRiskCount: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	dep := report.Deps[0]
+	if dep.TestOnly == nil {
+		t.Fatal("test_only field is nil (omitted), want &false")
+	}
+	if *dep.TestOnly {
+		t.Errorf("test_only = true for confirmed production dep, want false")
+	}
+}
+
+// TestWriteJSON_TestOnly_NilOmitted verifies that when IsTestOnly is nil
+// (classification unavailable), the "test_only" key is absent from the JSON
+// output (omitempty semantics for *bool).
+func TestWriteJSON_TestOnly_NilOmitted(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:       "github.com/example/unknown",
+			Version:    "v1.0.0",
+			Direct:     false,
+			Depth:      1,
+			IsTestOnly: nil, // unknown — go list was unavailable
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 20,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:     "github.com/example/unknown",
+				Version:    "v1.0.0",
+				Direct:     false,
+				IsTestOnly: nil, // unknown
+				RiskScore:  20,
+				RiskLevel:  scorer.RiskLow,
+			},
+		},
+		LowRiskCount: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	// Unmarshal into a map to check key presence (not just value).
+	var raw map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON to map: %v", err)
+	}
+
+	deps, _ := raw["dependencies"].([]interface{})
+	if len(deps) != 1 {
+		t.Fatalf("dependencies length = %d, want 1", len(deps))
+	}
+
+	depMap, _ := deps[0].(map[string]interface{})
+	if _, present := depMap["test_only"]; present {
+		t.Errorf("test_only key is present in JSON for nil IsTestOnly, want omitted")
+	}
+}
+
+// TestWriteJSON_Transitive_Direct_RoundTrip verifies that a transitive dep's
+// Direct=false field passes through WriteJSON without re-derivation.
+// This is the regression guard required by Task 04's finding.
+func TestWriteJSON_Transitive_Direct_RoundTrip(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "github.com/transitive/pkg",
+			Version: "v1.2.3",
+			Direct:  false, // transitive — must not become true in JSON
+			Depth:   2,
+			UsedBy:  []string{"github.com/direct/framework"},
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 15,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:         "github.com/transitive/pkg",
+				Version:        "v1.2.3",
+				Direct:         false,
+				RiskScore:      15,
+				RiskLevel:      scorer.RiskLow,
+				DependencyPath: []string{"github.com/direct/framework"},
+			},
+		},
+		LowRiskCount: 1,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+
+	if len(report.Deps) != 1 {
+		t.Fatalf("Deps length = %d, want 1", len(report.Deps))
+	}
+
+	dep := report.Deps[0]
+	if dep.Direct {
+		t.Errorf("direct = true for transitive dep; regression: Direct must not be re-derived")
+	}
+	if len(dep.DependencyPath) != 1 || dep.DependencyPath[0] != "github.com/direct/framework" {
+		t.Errorf("DependencyPath = %v, want [github.com/direct/framework]", dep.DependencyPath)
+	}
+}
+
 // TestWriteJSON_VulnerabilitiesPopulated tests that vulnerabilities are included.
 func TestWriteJSON_VulnerabilitiesPopulated(t *testing.T) {
 	graph := testutil.MakeGraph(
