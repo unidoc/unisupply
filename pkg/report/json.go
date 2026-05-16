@@ -84,11 +84,16 @@ type JSONDependency struct {
 
 // JSONVuln is a vulnerability entry.
 type JSONVuln struct {
-	ID           string   `json:"id"`
-	Aliases      []string `json:"aliases"`
-	Summary      string   `json:"summary"`
-	Severity     string   `json:"severity"`
-	FixedVersion string   `json:"fixed_version,omitempty"`
+	ID                  string     `json:"id"`
+	Aliases             []string   `json:"aliases"`
+	Summary             string     `json:"summary"`
+	Severity            string     `json:"severity"`
+	FixedVersion        string     `json:"fixed_version,omitempty"`
+	EnrichmentAttempted bool       `json:"enrichment_attempted,omitempty"`
+	EnrichmentFailed    bool       `json:"enrichment_failed,omitempty"`
+	PublishedAt         *time.Time `json:"published_at,omitempty"`
+	FixPublishedAt      *time.Time `json:"fix_published_at,omitempty"`
+	DaysUnpatched       int        `json:"days_unpatched,omitempty"`
 }
 
 // JSONMaintenance is maintenance health info.
@@ -244,11 +249,16 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 		for _, v := range ds.Vulns {
 			jd.Vulns = append(jd.Vulns, JSONVuln{
-				ID:           v.ID,
-				Aliases:      v.Aliases,
-				Summary:      v.Summary,
-				Severity:     v.Severity,
-				FixedVersion: v.FixedVersion,
+				ID:                  v.ID,
+				Aliases:             v.Aliases,
+				Summary:             v.Summary,
+				Severity:            v.Severity,
+				FixedVersion:        v.FixedVersion,
+				EnrichmentAttempted: v.EnrichmentAttempted,
+				EnrichmentFailed:    v.EnrichmentFailed,
+				PublishedAt:         v.PublishedAt,
+				FixPublishedAt:      v.FixPublishedAt,
+				DaysUnpatched:       v.DaysUnpatched,
 			})
 		}
 

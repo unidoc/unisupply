@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"golang.org/x/vuln/scan"
 )
@@ -18,6 +19,28 @@ type Vulnerability struct {
 	Summary      string   `json:"summary"`
 	Severity     string   `json:"severity"`
 	FixedVersion string   `json:"fixed_version,omitempty"`
+
+	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
+
+	// EnrichmentAttempted is true when the enricher ran for this vuln (i.e.
+	// the original severity was UNKNOWN and the ID passed validation).
+	EnrichmentAttempted bool `json:"enrichment_attempted,omitempty"`
+
+	// EnrichmentFailed is true when enrichment was attempted but both OSV
+	// and GHSA lookups failed. Task 08 uses this to distinguish
+	// "no severity data" from "severity data unavailable due to API failure".
+	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
+
+	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
+	PublishedAt *time.Time `json:"published_at,omitempty"`
+
+	// FixPublishedAt is the date a fix became available, derived from OSV's
+	// published timestamp for the fixed version event.
+	FixPublishedAt *time.Time `json:"fix_published_at,omitempty"`
+
+	// DaysUnpatched is the number of days since a fix was available.
+	// Zero when no fix exists or the fix date is unknown.
+	DaysUnpatched int `json:"days_unpatched,omitempty"`
 }
 
 // govulncheck JSON output is a stream of objects, each with one top-level key.
@@ -32,6 +55,8 @@ type gvcOSV struct {
 	ID            string   `json:"id"`
 	Aliases       []string `json:"aliases"`
 	Summary       string   `json:"summary"`
+	Published     string   `json:"published"` // RFC3339 timestamp from govulncheck output
+	Modified      string   `json:"modified"`
 	Affected      []struct {
 		Package struct {
 			Name      string `json:"name"`
@@ -60,9 +85,11 @@ type gvcFinding struct {
 	FixedVersion string `json:"fixed_version,omitempty"`
 }
 
-// ScanVulns runs govulncheck on the project directory and returns
-// vulnerabilities grouped by module path.
-func ScanVulns(ctx context.Context, projectDir string) (vulns map[string][]Vulnerability, warnings []string, err error) {
+// ScanVulns runs govulncheck on the project directory, then enriches any
+// UNKNOWN-severity vulnerabilities via OSV.dev and the GitHub Advisory API.
+// githubToken may be empty; enrichment proceeds unauthenticated in that case
+// (OSV does not require authentication; GHSA fallback works but is rate-limited).
+func ScanVulns(ctx context.Context, projectDir string, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
 	var stdout bytes.Buffer
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
@@ -83,6 +110,19 @@ func ScanVulns(ctx context.Context, projectDir string) (vulns map[string][]Vulne
 	results, err := parseGovulncheckJSON(&stdout)
 	if err != nil {
 		return nil, append(warnings, err.Error()), nil
+	}
+
+	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
+	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	for modPath, modVulns := range results {
+		for i := range modVulns {
+			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
+				continue
+			}
+			enrichWarnings := enricher.Enrich(ctx, &modVulns[i])
+			warnings = append(warnings, enrichWarnings...)
+		}
+		results[modPath] = modVulns
 	}
 
 	return results, warnings, nil
@@ -170,6 +210,13 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			Summary:      osv.Summary,
 			Severity:     severity,
 			FixedVersion: fixedVersion,
+		}
+
+		// Capture the publication timestamp from the govulncheck OSV record.
+		if osv.Published != "" {
+			if t, err := time.Parse(time.RFC3339, osv.Published); err == nil {
+				vuln.PublishedAt = &t
+			}
 		}
 
 		results[modPath] = append(results[modPath], vuln)

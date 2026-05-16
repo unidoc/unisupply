@@ -195,7 +195,7 @@ func run(cfg *runConfig) error {
 	}
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir)
+	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
 	if err != nil {
 		rep.Warn("Vulnerability scan failed: %v", err)
 	}
@@ -255,6 +255,7 @@ func run(cfg *runConfig) error {
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
 	})
+	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport
