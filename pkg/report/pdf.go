@@ -139,16 +139,33 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 	project.SetMargins(0, 0, 20, 10)
 	_ = c.Draw(project)
 
-	// Overall risk score — large indicator.
+	// Supply-chain risk score — large indicator.
 	scoreColor := pdfRiskColor(ps.OverallLevel)
 	scorePara := c.NewStyledParagraph()
-	sChunk := scorePara.Append(fmt.Sprintf("Overall Risk Score: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
+	sChunk := scorePara.Append(fmt.Sprintf("Supply-Chain Risk: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
 	sChunk.Style.Font = bold
 	sChunk.Style.FontSize = 24
 	sChunk.Style.Color = scoreColor
 	scorePara.SetTextAlignment(creator.TextAlignmentCenter)
-	scorePara.SetMargins(0, 0, 40, 20)
+	scorePara.SetMargins(0, 0, 40, 10)
 	_ = c.Draw(scorePara)
+
+	// Headline driver + worst CVE sub-line (small, dim).
+	if ps.HeadlineDriver != "" {
+		driverPara := c.NewStyledParagraph()
+		txt := fmt.Sprintf("Driver: %s   (mean=%d, severity_adjusted=%d)",
+			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
+		if ps.WorstCVEID != "" {
+			txt += fmt.Sprintf("\nWorst CVE: %s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+		}
+		dChunk := driverPara.Append(txt)
+		dChunk.Style.Font = regular
+		dChunk.Style.FontSize = 11
+		dChunk.Style.Color = creator.ColorRGBFromHex("#666666")
+		driverPara.SetTextAlignment(creator.TextAlignmentCenter)
+		driverPara.SetMargins(0, 0, 0, 10)
+		_ = c.Draw(driverPara)
+	}
 
 	// Date.
 	datePara := c.NewStyledParagraph()
@@ -194,7 +211,15 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Direct Dependencies", fmt.Sprintf("%d", directCount), regular, bold)
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
-	addTableRow(c, table, "Overall Risk Score", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	addTableRow(c, table, "Supply-Chain Risk", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	if ps.HeadlineDriver != "" {
+		addTableRow(c, table, "Headline Driver", ps.HeadlineDriver, regular, bold)
+		addTableRow(c, table, "Mean Dep Risk", fmt.Sprintf("%d", ps.MeanDepRiskScore), regular, bold)
+		addTableRow(c, table, "Severity-Adjusted Vuln", fmt.Sprintf("%d", ps.SeverityAdjustedVulnScore), regular, bold)
+	}
+	if ps.WorstCVEID != "" {
+		addTableRow(c, table, "Worst CVE", fmt.Sprintf("%s (%s)", ps.WorstCVEID, ps.WorstCVESeverity), regular, bold)
+	}
 	_ = c.Draw(table)
 
 	// Risk distribution.

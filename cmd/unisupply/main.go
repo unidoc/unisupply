@@ -51,6 +51,7 @@ func main() {
 		policyPreset       string
 		trustIndexURL      string
 		progressMode       string
+		debugScoring       bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -71,6 +72,7 @@ func main() {
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
+	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
 	flag.Parse()
 
@@ -124,6 +126,7 @@ func main() {
 		policyPreset:  policyPreset,
 		trustIndexURL: trustIndexURL,
 		progressMode:  progressMode,
+		debugScoring:  debugScoring,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -157,6 +160,7 @@ type runConfig struct {
 	policyPreset  string
 	trustIndexURL string
 	progressMode  string
+	debugScoring  bool
 }
 
 func run(cfg *runConfig) error {
@@ -254,6 +258,7 @@ func run(cfg *runConfig) error {
 		Resilience:  resilience,
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
+		DebugMode:   cfg.debugScoring,
 	})
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	rep.Done("")
@@ -426,6 +431,7 @@ func printUsage() {
 	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if no token")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
+	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
 	fmt.Println()
 	fmt.Println("Exit codes:")
 	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")

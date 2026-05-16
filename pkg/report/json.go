@@ -20,6 +20,29 @@ type JSONReport struct {
 	Project      JSONProject `json:"project"`
 	OverallRisk  int         `json:"overall_risk_score"`
 	OverallLevel string      `json:"overall_risk_level"`
+
+	// MeanDepRiskScore is the legacy weighted-mean axis (the pre-Task-10
+	// overall_risk_score). SeverityAdjustedVulnScore is the CVE-driven
+	// step-function axis. HeadlineDriver records which axis produced
+	// overall_risk_score: "mean" or "severity_adjusted".
+	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
+	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
+	HeadlineDriver            string `json:"headline_driver,omitempty"`
+
+	// WorstCVEID + WorstCVESeverity surface the load-bearing CVE that drove the
+	// headline (post test-only downgrade). Empty when no CVEs are present.
+	WorstCVEID       string `json:"worst_cve_id,omitempty"`
+	WorstCVESeverity string `json:"worst_cve_severity,omitempty"`
+
+	// Diagnostics carries tail aggregates retained for debugging.
+	// NON-NORMATIVE: downstream consumers must not build policy gates on this
+	// field. Shape may evolve between releases.
+	Diagnostics *JSONDiagnostics `json:"diagnostics,omitempty"`
+
+	// DebugScoring is emitted only when --debug-scoring is set. NON-NORMATIVE:
+	// schema is internal and may change between releases.
+	DebugScoring *scorer.DebugScoring `json:"debug_scoring,omitempty"`
+
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
 	Warnings          []string          `json:"warnings,omitempty"`
@@ -29,6 +52,13 @@ type JSONReport struct {
 	CIFindings        []JSONFlatFinding `json:"ci_findings"`
 	BuildFileFindings []JSONFlatFinding `json:"build_file_findings"`
 	Takeovers         []JSONTakeover    `json:"takeover_candidates,omitempty"`
+}
+
+// JSONDiagnostics mirrors scorer.Diagnostics in the JSON output. NON-NORMATIVE:
+// downstream consumers must not build policy gates on these fields.
+type JSONDiagnostics struct {
+	MaxDepRiskScore int `json:"max_dep_risk_score"`
+	P95DepRiskScore int `json:"p95_dep_risk_score"`
 }
 
 // JSONFlatFinding is a normalized top-level finding entry for CI/CD and build-file
@@ -220,9 +250,16 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			TransDeps:  transitiveCount,
 			TotalDeps:  directCount + transitiveCount,
 		},
-		OverallRisk:  ps.OverallScore,
-		OverallLevel: string(ps.OverallLevel),
-		Warnings:     ps.Warnings,
+		OverallRisk:               ps.OverallScore,
+		OverallLevel:              string(ps.OverallLevel),
+		MeanDepRiskScore:          ps.MeanDepRiskScore,
+		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
+		HeadlineDriver:            ps.HeadlineDriver,
+		WorstCVEID:                ps.WorstCVEID,
+		WorstCVESeverity:          ps.WorstCVESeverity,
+		DebugScoring:              ps.DebugScoring,
+		Diagnostics:               jsonDiagnostics(ps.Diagnostics),
+		Warnings:                  ps.Warnings,
 		Summary: JSONSummary{
 			CriticalRiskCount: ps.CriticalRiskCount,
 			HighRiskCount:     ps.HighRiskCount,
@@ -427,4 +464,16 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	}
 
 	return nil
+}
+
+// jsonDiagnostics maps the scorer's Diagnostics struct to its JSON form.
+// Returns nil when the source is nil so the JSON field is omitted.
+func jsonDiagnostics(d *scorer.Diagnostics) *JSONDiagnostics {
+	if d == nil {
+		return nil
+	}
+	return &JSONDiagnostics{
+		MaxDepRiskScore: d.MaxDepRiskScore,
+		P95DepRiskScore: d.P95DepRiskScore,
+	}
 }

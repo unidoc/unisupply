@@ -1,9 +1,11 @@
 package scorer
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
@@ -1355,4 +1357,366 @@ func TestScoreAll_NoWarningsWhenDataAvailable(t *testing.T) {
 	if len(ps.Warnings) != 0 {
 		t.Errorf("expected no Warnings when all maintainer data available, got %v", ps.Warnings)
 	}
+}
+
+// =============================================================================
+// Task 10 — Two-axis aggregate score.
+//
+// The headline is OverallScore = max(MeanDepRiskScore, SeverityAdjustedVulnScore).
+// SeverityAdjustedVulnScore is a CVE-driven step function with a test-only
+// downgrade-then-step applied before counting. The tests below cover the seven
+// acceptance criteria from plan-29 task 10.
+// =============================================================================
+
+// twoAxisCleanDeps builds a graph with n clean-but-not-trusted dependencies
+// plus one "headline" dependency. The clean deps are designed to keep the
+// weighted-mean axis well below LOW (so the severity-adjusted axis is what
+// drives the headline). Each clean dep gets a depth-0 entry with no
+// maintenance/maintainer/typosquat/etc. signals.
+func twoAxisCleanDeps(n int, headline testutil.DepSpec) []testutil.DepSpec {
+	specs := make([]testutil.DepSpec, 0, n+1)
+	specs = append(specs, headline)
+	for i := 0; i < n; i++ {
+		specs = append(specs, testutil.DepSpec{
+			Path:    fmt.Sprintf("github.com/clean/pkg%d", i),
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   0,
+		})
+	}
+	return specs
+}
+
+func twoAxisEmptyInput(graph *resolver.Graph) ScoreInput {
+	return ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	}
+}
+
+// TestTwoAxis_CriticalOnProdPath verifies that a single CRITICAL CVE on a
+// production-path dep produces overall_risk_score == 95, level CRITICAL, and
+// headline_driver == "severity_adjusted" — regardless of how many clean deps
+// surround it.
+func TestTwoAxis_CriticalOnProdPath(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path:       "github.com/risky/pkg",
+		Version:    "v1.0.0",
+		Direct:     true,
+		Depth:      0,
+		IsTestOnly: testutil.BoolPtr(false), // confirmed production
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(100, headline)...)
+
+	input := twoAxisEmptyInput(graph)
+	input.Vulns["github.com/risky/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("CVE-2024-9999", "CRITICAL", "v1.0.1"),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 95 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 95", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.OverallScore != 95 {
+		t.Errorf("OverallScore = %d, want 95", ps.OverallScore)
+	}
+	if ps.OverallLevel != RiskCritical {
+		t.Errorf("OverallLevel = %s, want CRITICAL", ps.OverallLevel)
+	}
+	if ps.HeadlineDriver != "severity_adjusted" {
+		t.Errorf("HeadlineDriver = %q, want %q", ps.HeadlineDriver, "severity_adjusted")
+	}
+	if ps.WorstCVEID != "CVE-2024-9999" {
+		t.Errorf("WorstCVEID = %q, want CVE-2024-9999", ps.WorstCVEID)
+	}
+	if ps.WorstCVESeverity != "CRITICAL" {
+		t.Errorf("WorstCVESeverity = %q, want CRITICAL", ps.WorstCVESeverity)
+	}
+}
+
+// TestTwoAxis_CriticalOnTestOnly verifies the downgrade-then-step rule: a
+// CRITICAL on a test_only==true dep is downgraded to HIGH, the step function
+// fires "1–2 HIGH → 70", and the headline is 70 — NOT a halving (which would
+// give 47.5).
+func TestTwoAxis_CriticalOnTestOnly(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path:       "github.com/risky/pkg",
+		Version:    "v1.0.0",
+		Direct:     false,
+		Depth:      2,
+		IsTestOnly: testutil.BoolPtr(true), // confirmed test-only
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(100, headline)...)
+
+	input := twoAxisEmptyInput(graph)
+	input.Vulns["github.com/risky/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("CVE-2024-9999", "CRITICAL", "v1.0.1"),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 70 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 70 (CRITICAL→HIGH downgrade → 1 HIGH)", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.SeverityAdjustedVulnScore == 47 || ps.SeverityAdjustedVulnScore == 48 {
+		t.Errorf("SeverityAdjustedVulnScore looks like a halving, not a tier downgrade")
+	}
+	if ps.OverallScore != 70 {
+		t.Errorf("OverallScore = %d, want 70", ps.OverallScore)
+	}
+	if ps.OverallLevel != RiskHigh {
+		t.Errorf("OverallLevel = %s, want HIGH", ps.OverallLevel)
+	}
+	if ps.WorstCVESeverity != "HIGH" {
+		t.Errorf("WorstCVESeverity = %q, want HIGH (post-downgrade)", ps.WorstCVESeverity)
+	}
+}
+
+// TestTwoAxis_CriticalOnUnknownTestOnly verifies the Task 09 fallback: when
+// IsTestOnly is nil (classification was unavailable), the discount MUST NOT
+// apply. Score stays at 95 (CRITICAL).
+func TestTwoAxis_CriticalOnUnknownTestOnly(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path:       "github.com/risky/pkg",
+		Version:    "v1.0.0",
+		Direct:     false,
+		Depth:      2,
+		IsTestOnly: nil, // classification unavailable
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(100, headline)...)
+
+	input := twoAxisEmptyInput(graph)
+	input.Vulns["github.com/risky/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("CVE-2024-9999", "CRITICAL", "v1.0.1"),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 95 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 95 (no discount when IsTestOnly is nil)", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.OverallLevel != RiskCritical {
+		t.Errorf("OverallLevel = %s, want CRITICAL", ps.OverallLevel)
+	}
+}
+
+// TestTwoAxis_NoCVEsManyDeps verifies that a graph with no CVEs but 500
+// clean-but-not-trusted dependencies stays at LOW. The previous max/p95-based
+// formula over-promoted such projects; the mean axis correctly dilutes them.
+func TestTwoAxis_NoCVEsManyDeps(t *testing.T) {
+	specs := make([]testutil.DepSpec, 500)
+	for i := range specs {
+		specs[i] = testutil.DepSpec{
+			Path:    fmt.Sprintf("github.com/clean/pkg%d", i),
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   0,
+		}
+	}
+	graph := testutil.MakeGraph(specs...)
+
+	ps := ScoreAll(twoAxisEmptyInput(graph))
+
+	if ps.SeverityAdjustedVulnScore != 0 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 0 (no CVEs)", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.OverallLevel != RiskLow {
+		t.Errorf("OverallLevel = %s, want LOW (500 stale-but-inert deps)", ps.OverallLevel)
+	}
+	if ps.HeadlineDriver != "mean" {
+		t.Errorf("HeadlineDriver = %q, want %q (mean drives when severity_adjusted == 0)", ps.HeadlineDriver, "mean")
+	}
+}
+
+// TestTwoAxis_EnrichmentFailedCounts verifies that a CVE whose enrichment
+// failed (severity stayed UNKNOWN) is counted as MEDIUM in the step function,
+// producing severity_adjusted == 40.
+func TestTwoAxis_EnrichmentFailedCounts(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path:       "github.com/unknownseverity/pkg",
+		Version:    "v1.0.0",
+		Direct:     true,
+		Depth:      0,
+		IsTestOnly: testutil.BoolPtr(false),
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(50, headline)...)
+
+	input := twoAxisEmptyInput(graph)
+	// EnrichmentFailed=true with UNKNOWN severity — the canonical Task 07
+	// fallback case.
+	input.Vulns["github.com/unknownseverity/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVulnWithDates("CVE-2024-0000", "UNKNOWN", 90, 0, true),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 40 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 40 (enrichment-failed UNKNOWN → MEDIUM in step function)", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.OverallLevel != RiskMedium {
+		t.Errorf("OverallLevel = %s, want MEDIUM", ps.OverallLevel)
+	}
+}
+
+// TestTwoAxis_HeadlineDriverPopulated verifies that HeadlineDriver is set
+// correctly across the no-CVE, CVE-dominates, and equal-score cases.
+func TestTwoAxis_HeadlineDriverPopulated(t *testing.T) {
+	t.Run("severity_adjusted wins", func(t *testing.T) {
+		headline := testutil.DepSpec{
+			Path: "github.com/risky/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+			IsTestOnly: testutil.BoolPtr(false),
+		}
+		graph := testutil.MakeGraph(twoAxisCleanDeps(100, headline)...)
+		input := twoAxisEmptyInput(graph)
+		input.Vulns["github.com/risky/pkg"] = []scanner.Vulnerability{
+			testutil.MakeVuln("CVE-2024-1", "CRITICAL", "v1.0.1"),
+		}
+		ps := ScoreAll(input)
+		if ps.HeadlineDriver != "severity_adjusted" {
+			t.Errorf("HeadlineDriver = %q, want severity_adjusted", ps.HeadlineDriver)
+		}
+	})
+
+	t.Run("mean wins when no CVEs", func(t *testing.T) {
+		graph := testutil.MakeGraph(testutil.DepSpec{
+			Path: "github.com/test/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+		})
+		ps := ScoreAll(twoAxisEmptyInput(graph))
+		if ps.HeadlineDriver != "mean" {
+			t.Errorf("HeadlineDriver = %q, want mean (no CVEs)", ps.HeadlineDriver)
+		}
+	})
+
+	t.Run("empty graph has empty driver", func(t *testing.T) {
+		graph := testutil.MakeGraph()
+		ps := ScoreAll(twoAxisEmptyInput(graph))
+		if ps.HeadlineDriver != "" {
+			t.Errorf("HeadlineDriver = %q, want empty (no deps)", ps.HeadlineDriver)
+		}
+	})
+}
+
+// TestTwoAxis_WorstCVEPopulated verifies that WorstCVEID is the most-severe
+// post-downgrade CVE across all deps.
+func TestTwoAxis_WorstCVEPopulated(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path: "github.com/multi/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+		IsTestOnly: testutil.BoolPtr(false),
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(10, headline)...)
+
+	input := twoAxisEmptyInput(graph)
+	input.Vulns["github.com/multi/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("CVE-2024-LOW", "LOW", ""),
+		testutil.MakeVuln("CVE-2024-CRIT", "CRITICAL", "v1.0.1"),
+		testutil.MakeVuln("CVE-2024-MED", "MEDIUM", "v1.0.1"),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.WorstCVEID != "CVE-2024-CRIT" {
+		t.Errorf("WorstCVEID = %q, want CVE-2024-CRIT", ps.WorstCVEID)
+	}
+	if ps.WorstCVESeverity != "CRITICAL" {
+		t.Errorf("WorstCVESeverity = %q, want CRITICAL", ps.WorstCVESeverity)
+	}
+}
+
+// TestTwoAxis_MeanWinsWhenLargerThanSeverity verifies that the mean axis can
+// drive the headline when it exceeds the severity-adjusted axis (e.g. many
+// archived deps without CVEs).
+func TestTwoAxis_MeanWinsWhenLargerThanSeverity(t *testing.T) {
+	// 3 archived deps — each scores ~40 via maintenance, no CVEs.
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/old/pkg1", Version: "v1.0.0", Direct: true, Depth: 0},
+		testutil.DepSpec{Path: "github.com/old/pkg2", Version: "v1.0.0", Direct: true, Depth: 0},
+		testutil.DepSpec{Path: "github.com/old/pkg3", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	input := twoAxisEmptyInput(graph)
+	input.Maintenance["github.com/old/pkg1"] = testutil.MakeMaintenanceInfo(36, true, false)
+	input.Maintenance["github.com/old/pkg2"] = testutil.MakeMaintenanceInfo(36, true, false)
+	input.Maintenance["github.com/old/pkg3"] = testutil.MakeMaintenanceInfo(36, true, false)
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 0 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 0 (no CVEs)", ps.SeverityAdjustedVulnScore)
+	}
+	if ps.MeanDepRiskScore == 0 {
+		t.Errorf("MeanDepRiskScore = 0, expected >0 (archived deps)")
+	}
+	if ps.HeadlineDriver != "mean" {
+		t.Errorf("HeadlineDriver = %q, want mean", ps.HeadlineDriver)
+	}
+	if ps.OverallScore != ps.MeanDepRiskScore {
+		t.Errorf("OverallScore = %d, want MeanDepRiskScore = %d", ps.OverallScore, ps.MeanDepRiskScore)
+	}
+}
+
+// TestTwoAxis_DebugScoringOptIn verifies that DebugScoring is populated only
+// when ScoreInput.DebugMode is true. The block is non-normative.
+func TestTwoAxis_DebugScoringOptIn(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{
+		Path: "github.com/x/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+		IsTestOnly: testutil.BoolPtr(false),
+	})
+	input := twoAxisEmptyInput(graph)
+	input.Vulns["github.com/x/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("CVE-2024-1", "HIGH", "v1.0.1"),
+	}
+
+	t.Run("DebugMode off", func(t *testing.T) {
+		input.DebugMode = false
+		ps := ScoreAll(input)
+		if ps.DebugScoring != nil {
+			t.Errorf("DebugScoring should be nil when DebugMode is false")
+		}
+	})
+
+	t.Run("DebugMode on", func(t *testing.T) {
+		input.DebugMode = true
+		ps := ScoreAll(input)
+		if ps.DebugScoring == nil {
+			t.Fatal("DebugScoring should be populated when DebugMode is true")
+		}
+		if ps.DebugScoring.StepFunctionInputs.High != 1 {
+			t.Errorf("StepFunctionInputs.High = %d, want 1", ps.DebugScoring.StepFunctionInputs.High)
+		}
+		if len(ps.DebugScoring.EnrichedCVEs) != 1 {
+			t.Errorf("len(EnrichedCVEs) = %d, want 1", len(ps.DebugScoring.EnrichedCVEs))
+		}
+		if len(ps.DebugScoring.PerDepInputs) != 1 {
+			t.Errorf("len(PerDepInputs) = %d, want 1", len(ps.DebugScoring.PerDepInputs))
+		}
+	})
+}
+
+// TestTwoAxis_DiagnosticsPopulated verifies that the Diagnostics block carries
+// MaxDepRiskScore and P95DepRiskScore for non-empty graphs. The block is
+// non-normative — these tests guard the shape, not the policy.
+func TestTwoAxis_DiagnosticsPopulated(t *testing.T) {
+	t.Run("populated for non-empty graph", func(t *testing.T) {
+		graph := testutil.MakeGraph(testutil.DepSpec{
+			Path: "github.com/x/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+		})
+		ps := ScoreAll(twoAxisEmptyInput(graph))
+		if ps.Diagnostics == nil {
+			t.Fatal("Diagnostics should be populated for non-empty graph")
+		}
+	})
+
+	t.Run("nil for empty graph", func(t *testing.T) {
+		graph := testutil.MakeGraph()
+		ps := ScoreAll(twoAxisEmptyInput(graph))
+		if ps.Diagnostics != nil {
+			t.Errorf("Diagnostics should be nil for empty graph, got %+v", ps.Diagnostics)
+		}
+	})
 }

@@ -60,13 +60,25 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score.
+	// Overall score (two-axis headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
-	fmt.Fprintf(w, "OVERALL SUPPLY CHAIN RISK SCORE: %s\n",
+	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
 		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	if ps.HeadlineDriver != "" {
+		fmt.Fprintf(w, "  Driver: %s  (mean=%d, severity_adjusted=%d)\n",
+			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
+	}
+	if ps.WorstCVEID != "" {
+		fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
+	}
 	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
+
+	// Debug scoring block (--debug-scoring). NON-NORMATIVE.
+	if ps.DebugScoring != nil {
+		writeDebugScoring(w, c, ps.DebugScoring)
+	}
 
 	// Sort dependencies by risk score descending.
 	sorted := make([]*scorer.DependencyScore, len(ps.Dependencies))
@@ -564,4 +576,53 @@ func depExplanation(ds *scorer.DependencyScore) string {
 
 	// Join first two reasons for conciseness.
 	return reasons[0] + "; " + reasons[1]
+}
+
+// writeDebugScoring emits the --debug-scoring diagnostic block in text form.
+// NON-NORMATIVE: layout may change between releases; do not parse this block.
+func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.DebugScoring) {
+	fmt.Fprintf(w, "%s\n", c(colorDim, "── debug_scoring (non-normative) ─────────────────"))
+	fmt.Fprintf(w, "  mean=%d  severity_adjusted=%d  driver=%s\n",
+		d.MeanDepRiskScore, d.SeverityAdjustedVulnScore, d.HeadlineDriver)
+	fmt.Fprintf(w, "  step_function_inputs: CRITICAL=%d HIGH=%d MEDIUM=%d LOW=%d\n",
+		d.StepFunctionInputs.Critical, d.StepFunctionInputs.High,
+		d.StepFunctionInputs.Medium, d.StepFunctionInputs.Low)
+
+	if len(d.EnrichedCVEs) > 0 {
+		fmt.Fprintf(w, "  enriched_cves (%d):\n", len(d.EnrichedCVEs))
+		for _, cve := range d.EnrichedCVEs {
+			testOnly := "?"
+			if cve.TestOnly != nil {
+				if *cve.TestOnly {
+					testOnly = "test_only"
+				} else {
+					testOnly = "production"
+				}
+			}
+			downgrade := ""
+			if cve.DowngradedTier != "" {
+				downgrade = fmt.Sprintf(" → %s", cve.DowngradedTier)
+			}
+			enrich := ""
+			if cve.EnrichmentFailed {
+				enrich = " [enrichment_failed]"
+			}
+			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s\n",
+				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich)
+		}
+	}
+
+	if len(d.PerDepInputs) > 0 {
+		fmt.Fprintf(w, "  per_dep_inputs (%d):\n", len(d.PerDepInputs))
+		for _, p := range d.PerDepInputs {
+			amp := ""
+			if p.FixAgeAmplifier {
+				amp = " amp"
+			}
+			fmt.Fprintf(w, "    %s: worst=%s high+_count=%d floor=%d%s vuln_score=%d risk=%d/%s\n",
+				p.Module, p.WorstSeverity, p.HighOrAboveCount, p.FloorApplied, amp,
+				p.FinalVulnScore, p.FinalRiskScore, p.FinalRiskLevel)
+		}
+	}
+	fmt.Fprintf(w, "%s\n\n", c(colorDim, "──────────────────────────────────────────────────"))
 }

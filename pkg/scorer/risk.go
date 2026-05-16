@@ -4,6 +4,7 @@ package scorer
 import (
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -209,6 +210,10 @@ type ScoreInput struct {
 	Resilience  map[string]*scanner.ResilienceInfo
 	AIGenRisks  map[string]*scanner.AIGenRisk
 	TrustIndex  map[string]*scanner.TrustIndexEntry
+
+	// DebugMode populates ps.DebugScoring with diagnostic data when true.
+	// Wired to the --debug-scoring CLI flag.
+	DebugMode bool
 }
 
 // ScoreAll computes risk scores for all dependencies and the overall project.
@@ -270,8 +275,43 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		)
 	}
 
-	ps.OverallScore = computeOverallScore(ps.Dependencies)
+	// Two-axis headline (Task 10).
+	//
+	// MeanDepRiskScore is the legacy weighted-mean — answers "how risky is this
+	// portfolio on average?" SeverityAdjustedVulnScore is the CVE-driven step
+	// function — answers "how bad is the worst-case CVE pile-up?" The headline
+	// takes max so a single CRITICAL CVE cannot be diluted by hundreds of clean
+	// transitives.
+	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
+
+	sevResult := severityAdjustedVulnScore(ps.Dependencies)
+	ps.SeverityAdjustedVulnScore = sevResult.score
+	ps.WorstCVEID = sevResult.worstID
+	ps.WorstCVESeverity = sevResult.worstSeverity
+
+	if ps.SeverityAdjustedVulnScore > ps.MeanDepRiskScore {
+		ps.OverallScore = ps.SeverityAdjustedVulnScore
+		if len(ps.Dependencies) > 0 {
+			ps.HeadlineDriver = "severity_adjusted"
+		}
+	} else {
+		ps.OverallScore = ps.MeanDepRiskScore
+		if len(ps.Dependencies) > 0 {
+			ps.HeadlineDriver = "mean"
+		}
+	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
+
+	// Diagnostics retained for debugging only — NON-NORMATIVE. Suppressed when
+	// there are no deps (max/p95 over an empty set carries no information).
+	if len(ps.Dependencies) > 0 {
+		ps.Diagnostics = computeDiagnostics(ps.Dependencies)
+	}
+
+	// DebugScoring is populated only when the caller opts in via --debug-scoring.
+	if input.DebugMode {
+		ps.DebugScoring = buildDebugScoring(ps, sevResult)
+	}
 
 	return ps
 }
@@ -791,5 +831,263 @@ func riskLevelOrder(l RiskLevel) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+// severityAdjustedResult is the bundled output of severityAdjustedVulnScore.
+type severityAdjustedResult struct {
+	score         int
+	worstID       string
+	worstSeverity string
+	stepInputs    StepFunctionInputs
+	enrichedCVEs  []DebugCVE
+	perDepInputs  []DebugPerDepInput
+}
+
+// severityAdjustedVulnScore computes the CVE-driven step-function axis.
+//
+// Algorithm (Task 10):
+//
+//  1. For every CVE on every dep, determine its effective tier:
+//     - Severity is normalised to one of CRITICAL/HIGH/MEDIUM/LOW.
+//     - UNKNOWN severity (either enrichment failed or never attempted) is
+//     treated as MEDIUM. The user-facing renderer still shows "UNKNOWN" so
+//     data uncertainty stays visible; the step function treats it as MEDIUM
+//     because that is the conservative assumption.
+//  2. Apply the test-only discount: when the dep's IsTestOnly is &true,
+//     downgrade the tier by one notch (CRITICAL→HIGH, HIGH→MEDIUM,
+//     MEDIUM→LOW, LOW→dropped). IsTestOnly == nil means classification was
+//     unavailable — the discount MUST NOT apply (better to under-discount than
+//     to silently absolve a real risk).
+//  3. Count post-downgrade tiers across the whole graph.
+//  4. Run the step function:
+//     - any CRITICAL          → 95
+//     - 3+ HIGH               → 85
+//     - 1–2 HIGH              → 70
+//     - any MEDIUM (no HIGH+) → 40
+//     - LOW only              → 10
+//     - none                  → 0
+//
+// The most-severe post-downgrade CVE is returned as worst{ID,Severity}; ties
+// resolve in iteration order (deps first, then their vulns).
+//
+// These weights answer a different question than the per-dep severityWeight
+// table — never unify the two.
+func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
+	res := severityAdjustedResult{}
+
+	// Track the most-severe post-downgrade CVE so far.
+	worstRank := -1
+
+	for _, ds := range deps {
+		if len(ds.Vulns) == 0 {
+			continue
+		}
+
+		isTestOnlyConfirmed := ds.IsTestOnly != nil && *ds.IsTestOnly
+		// perDepWorstRaw and perDepHighOrAbove feed the debug payload.
+		perDepWorstRaw := ""
+		perDepHighOrAbove := 0
+
+		for _, v := range ds.Vulns {
+			rawTier := effectiveTier(v)
+			if rawTier == "" {
+				continue
+			}
+			finalTier := rawTier
+			if isTestOnlyConfirmed {
+				finalTier = downgradeTier(rawTier)
+			}
+
+			// Track raw worst severity on this dep (for debug only).
+			if tierRank(rawTier) > tierRank(perDepWorstRaw) {
+				perDepWorstRaw = rawTier
+			}
+			if rawTier == "CRITICAL" || rawTier == "HIGH" {
+				perDepHighOrAbove++
+			}
+
+			if finalTier == "" {
+				// Downgraded LOW drops out of the step function entirely.
+				res.enrichedCVEs = append(res.enrichedCVEs, DebugCVE{
+					ID:               v.ID,
+					Module:           ds.Module,
+					OriginalTier:     rawTier,
+					DowngradedTier:   "dropped",
+					TestOnly:         ds.IsTestOnly,
+					EnrichmentFailed: v.EnrichmentFailed,
+				})
+				continue
+			}
+
+			switch finalTier {
+			case "CRITICAL":
+				res.stepInputs.Critical++
+			case "HIGH":
+				res.stepInputs.High++
+			case "MEDIUM":
+				res.stepInputs.Medium++
+			case "LOW":
+				res.stepInputs.Low++
+			}
+
+			// Track worst CVE by post-downgrade tier (load-bearing finding for
+			// the headline).
+			if rank := tierRank(finalTier); rank > worstRank {
+				worstRank = rank
+				res.worstID = v.ID
+				res.worstSeverity = finalTier
+			}
+
+			dc := DebugCVE{
+				ID:               v.ID,
+				Module:           ds.Module,
+				OriginalTier:     rawTier,
+				TestOnly:         ds.IsTestOnly,
+				EnrichmentFailed: v.EnrichmentFailed,
+			}
+			if isTestOnlyConfirmed {
+				dc.DowngradedTier = finalTier
+			}
+			res.enrichedCVEs = append(res.enrichedCVEs, dc)
+		}
+
+		if perDepWorstRaw != "" {
+			floor, _ := severityFloor(ds.Vulns)
+			res.perDepInputs = append(res.perDepInputs, DebugPerDepInput{
+				Module:           ds.Module,
+				WorstSeverity:    perDepWorstRaw,
+				HighOrAboveCount: perDepHighOrAbove,
+				FloorApplied:     floor,
+				FixAgeAmplifier:  lowFixAgeFloor(ds.Vulns) > 0,
+				FinalVulnScore:   int(math.Round(ds.VulnScore)),
+				FinalRiskScore:   ds.RiskScore,
+				FinalRiskLevel:   string(ds.RiskLevel),
+			})
+		}
+	}
+
+	res.score = stepFunction(res.stepInputs)
+	return res
+}
+
+// stepFunction maps post-downgrade severity counts to the project-level score.
+func stepFunction(c StepFunctionInputs) int {
+	switch {
+	case c.Critical > 0:
+		return 95
+	case c.High >= 3:
+		return 85
+	case c.High >= 1:
+		return 70
+	case c.Medium > 0:
+		return 40
+	case c.Low > 0:
+		return 10
+	default:
+		return 0
+	}
+}
+
+// effectiveTier normalises a CVE's severity for the step function.
+//
+// UNKNOWN is treated as MEDIUM — conservative because the CVE could be HIGH
+// or CRITICAL underneath. The user-facing renderer keeps showing "UNKNOWN" so
+// data uncertainty stays visible. This collapses both the EnrichmentFailed and
+// "scanner never set a tier" cases into MEDIUM, matching the per-dep
+// severityFloor() conservative-floor logic.
+func effectiveTier(v scanner.Vulnerability) string {
+	switch strings.ToUpper(strings.TrimSpace(v.Severity)) {
+	case "CRITICAL":
+		return "CRITICAL"
+	case "HIGH":
+		return "HIGH"
+	case "MEDIUM":
+		return "MEDIUM"
+	case "LOW":
+		return "LOW"
+	case "":
+		return "MEDIUM"
+	default:
+		// UNKNOWN and anything not in the tier vocabulary.
+		return "MEDIUM"
+	}
+}
+
+// downgradeTier shifts a tier down by one notch. Used for test-only deps.
+// LOW returns "" — the CVE drops out of the step function entirely.
+func downgradeTier(t string) string {
+	switch t {
+	case "CRITICAL":
+		return "HIGH"
+	case "HIGH":
+		return "MEDIUM"
+	case "MEDIUM":
+		return "LOW"
+	case "LOW":
+		return ""
+	default:
+		return ""
+	}
+}
+
+// tierRank assigns a numeric ordinal for tier comparisons. Higher = worse.
+// Returns -1 for the empty string so "dropped" sorts below any real tier.
+func tierRank(t string) int {
+	switch t {
+	case "CRITICAL":
+		return 4
+	case "HIGH":
+		return 3
+	case "MEDIUM":
+		return 2
+	case "LOW":
+		return 1
+	default:
+		return -1
+	}
+}
+
+// computeDiagnostics returns tail aggregates that the headline intentionally
+// drops. NON-NORMATIVE — retained for debugging only.
+func computeDiagnostics(deps []*DependencyScore) *Diagnostics {
+	if len(deps) == 0 {
+		return nil
+	}
+
+	scores := make([]int, 0, len(deps))
+	maxScore := 0
+	for _, ds := range deps {
+		scores = append(scores, ds.RiskScore)
+		if ds.RiskScore > maxScore {
+			maxScore = ds.RiskScore
+		}
+	}
+
+	sort.Ints(scores)
+	// Nearest-rank p95: index = ceil(0.95 * N) - 1, clamped to [0, N-1].
+	idx := int(math.Ceil(0.95*float64(len(scores)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(scores) {
+		idx = len(scores) - 1
+	}
+
+	return &Diagnostics{
+		MaxDepRiskScore: maxScore,
+		P95DepRiskScore: scores[idx],
+	}
+}
+
+// buildDebugScoring assembles the --debug-scoring payload.
+func buildDebugScoring(ps *ProjectScore, sev severityAdjustedResult) *DebugScoring {
+	return &DebugScoring{
+		MeanDepRiskScore:          ps.MeanDepRiskScore,
+		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
+		HeadlineDriver:            ps.HeadlineDriver,
+		StepFunctionInputs:        sev.stepInputs,
+		EnrichedCVEs:              sev.enrichedCVEs,
+		PerDepInputs:              sev.perDepInputs,
 	}
 }

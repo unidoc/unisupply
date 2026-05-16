@@ -57,8 +57,8 @@ func TestWriteText_ContainsSummary(t *testing.T) {
 		t.Error("Output should contain overall level 'MEDIUM'")
 	}
 
-	if !strings.Contains(output, "OVERALL SUPPLY CHAIN RISK SCORE") {
-		t.Error("Output should contain 'OVERALL SUPPLY CHAIN RISK SCORE' header")
+	if !strings.Contains(output, "SUPPLY-CHAIN RISK:") {
+		t.Error("Output should contain 'SUPPLY-CHAIN RISK:' header")
 	}
 }
 
