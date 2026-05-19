@@ -215,15 +215,15 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	_ = c.Draw(findings)
 }
 
-// filterRiskBucket returns dependencies whose RiskScore is in [min, max).
-// A max of 0 means "no upper bound".
-func filterRiskBucket(deps []*scorer.DependencyScore, min, max int) []*scorer.DependencyScore {
+// filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).
+// A maxScore of 0 means "no upper bound".
+func filterRiskBucket(deps []*scorer.DependencyScore, minScore, maxScore int) []*scorer.DependencyScore {
 	var out []*scorer.DependencyScore
 	for _, ds := range deps {
-		if ds.RiskScore < min {
+		if ds.RiskScore < minScore {
 			continue
 		}
-		if max > 0 && ds.RiskScore >= max {
+		if maxScore > 0 && ds.RiskScore >= maxScore {
 			continue
 		}
 		out = append(out, ds)
