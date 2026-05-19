@@ -37,6 +37,7 @@ type JSONProject struct {
 
 // JSONSummary holds summary statistics.
 type JSONSummary struct {
+	CriticalRiskCount int `json:"critical_risk_count"`
 	HighRiskCount   int `json:"high_risk_count"`
 	MediumRiskCount int `json:"medium_risk_count"`
 	LowRiskCount    int `json:"low_risk_count"`
@@ -180,6 +181,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		OverallRisk:  ps.OverallScore,
 		OverallLevel: string(ps.OverallLevel),
 		Summary: JSONSummary{
+			CriticalRiskCount: ps.CriticalRiskCount,
 			HighRiskCount:   ps.HighRiskCount,
 			MediumRiskCount: ps.MediumRiskCount,
 			LowRiskCount:    ps.LowRiskCount,

@@ -59,6 +59,7 @@ type ProjectScore struct {
 	OverallScore    int                `json:"overall_risk_score"`
 	OverallLevel    RiskLevel          `json:"overall_risk_level"`
 	Dependencies    []*DependencyScore `json:"dependencies"`
+	CriticalRiskCount int              `json:"critical_risk_count"`
 	HighRiskCount   int                `json:"high_risk_count"`
 	MediumRiskCount int                `json:"medium_risk_count"`
 	LowRiskCount    int                `json:"low_risk_count"`
@@ -102,9 +103,9 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		// Count by risk level.
 		switch {
 		case ds.RiskScore >= 76:
-			ps.HighRiskCount++ // CRITICAL
+			ps.CriticalRiskCount++
 		case ds.RiskScore >= 51:
-			ps.HighRiskCount++ // HIGH
+			ps.HighRiskCount++
 		case ds.RiskScore >= 26:
 			ps.MediumRiskCount++
 		default:

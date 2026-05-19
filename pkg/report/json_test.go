@@ -329,3 +329,44 @@ func TestWriteJSON_VulnerabilitiesPopulated(t *testing.T) {
 		t.Errorf("Vuln.FixedVersion = %q, want %q", vuln.FixedVersion, "v1.1.0")
 	}
 }
+
+// TestWriteJSON_CriticalRiskCount asserts that the JSON summary distinguishes
+// CRITICAL (>=76) from HIGH (51-75) — the plan 39 split.
+func TestWriteJSON_CriticalRiskCount(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+		testutil.DepSpec{Path: "github.com/high/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 80,
+		OverallLevel: scorer.RiskCritical,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, RiskScore: 90, RiskLevel: scorer.RiskCritical},
+			{Module: "github.com/high/pkg", Version: "v1.0.0", Direct: true, RiskScore: 60, RiskLevel: scorer.RiskHigh},
+		},
+		CriticalRiskCount: 1,
+		HighRiskCount:     1,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	// Snapshot: the raw JSON must contain the new field key.
+	if !bytes.Contains(buf.Bytes(), []byte(`"critical_risk_count"`)) {
+		t.Errorf("JSON output missing critical_risk_count key, got:\n%s", buf.String())
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if report.Summary.CriticalRiskCount != 1 {
+		t.Errorf("Summary.CriticalRiskCount = %d, want 1", report.Summary.CriticalRiskCount)
+	}
+	if report.Summary.HighRiskCount != 1 {
+		t.Errorf("Summary.HighRiskCount = %d, want 1 (must not be conflated with critical)", report.Summary.HighRiskCount)
+	}
+}
