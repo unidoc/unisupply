@@ -38,12 +38,12 @@ type JSONProject struct {
 // JSONSummary holds summary statistics.
 type JSONSummary struct {
 	CriticalRiskCount int `json:"critical_risk_count"`
-	HighRiskCount   int `json:"high_risk_count"`
-	MediumRiskCount int `json:"medium_risk_count"`
-	LowRiskCount    int `json:"low_risk_count"`
-	TotalVulns      int `json:"total_vulnerabilities"`
-	Unmaintained2yr int `json:"unmaintained_2yr"`
-	Unmaintained1yr int `json:"unmaintained_1yr"`
+	HighRiskCount     int `json:"high_risk_count"`
+	MediumRiskCount   int `json:"medium_risk_count"`
+	LowRiskCount      int `json:"low_risk_count"`
+	TotalVulns        int `json:"total_vulnerabilities"`
+	Unmaintained2yr   int `json:"unmaintained_2yr"`
+	Unmaintained1yr   int `json:"unmaintained_1yr"`
 }
 
 // JSONDependency holds per-dependency info.
@@ -182,12 +182,12 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		OverallLevel: string(ps.OverallLevel),
 		Summary: JSONSummary{
 			CriticalRiskCount: ps.CriticalRiskCount,
-			HighRiskCount:   ps.HighRiskCount,
-			MediumRiskCount: ps.MediumRiskCount,
-			LowRiskCount:    ps.LowRiskCount,
-			TotalVulns:      ps.TotalVulns,
-			Unmaintained2yr: ps.Unmaintained2yr,
-			Unmaintained1yr: ps.Unmaintained1yr,
+			HighRiskCount:     ps.HighRiskCount,
+			MediumRiskCount:   ps.MediumRiskCount,
+			LowRiskCount:      ps.LowRiskCount,
+			TotalVulns:        ps.TotalVulns,
+			Unmaintained2yr:   ps.Unmaintained2yr,
+			Unmaintained1yr:   ps.Unmaintained1yr,
 		},
 	}
 
