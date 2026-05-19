@@ -57,7 +57,10 @@ func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) e
 	// === Page 2: Executive Summary ===
 	writeExecutiveSummary(c, graph, ps, opts, helvetica, helveticaBold)
 
-	// === Page 3+: High Risk Dependencies ===
+	// === Page 3+: Critical Risk Dependencies ===
+	writeCriticalRiskSection(c, ps, helvetica, helveticaBold)
+
+	// === High Risk Dependencies ===
 	writeHighRiskSection(c, ps, helvetica, helveticaBold)
 
 	// === Medium Risk Dependencies ===
@@ -194,8 +197,9 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	}
 
 	addTableHeader(c, distTable, []string{"Risk Level", "Count", "Percentage"}, bold)
-	addTableRow3(c, distTable, "High/Critical (76-100)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
-	addTableRow3(c, distTable, "Medium (26-75)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
+	addTableRow3(c, distTable, "Critical (76-100)", fmt.Sprintf("%d", ps.CriticalRiskCount), pctStr(ps.CriticalRiskCount, total), regular)
+	addTableRow3(c, distTable, "High (51-75)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
+	addTableRow3(c, distTable, "Medium (26-50)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
 	addTableRow3(c, distTable, "Low (0-25)", fmt.Sprintf("%d", ps.LowRiskCount), pctStr(ps.LowRiskCount, total), regular)
 	_ = c.Draw(distTable)
 
@@ -211,13 +215,39 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	_ = c.Draw(findings)
 }
 
-func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var highRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore >= 76 {
-			highRisk = append(highRisk, ds)
+// filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).
+// A maxScore of 0 means "no upper bound".
+func filterRiskBucket(deps []*scorer.DependencyScore, minScore, maxScore int) []*scorer.DependencyScore {
+	var out []*scorer.DependencyScore
+	for _, ds := range deps {
+		if ds.RiskScore < minScore {
+			continue
 		}
+		if maxScore > 0 && ds.RiskScore >= maxScore {
+			continue
+		}
+		out = append(out, ds)
 	}
+	return out
+}
+
+func writeCriticalRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	critRisk := filterRiskBucket(ps.Dependencies, 76, 0)
+
+	if len(critRisk) == 0 {
+		return
+	}
+
+	c.NewPage()
+	heading(c, fmt.Sprintf("Critical Risk Dependencies (%d)", len(critRisk)), bold)
+
+	for _, ds := range critRisk {
+		writeDependencyBlock(c, ds, regular, bold, true)
+	}
+}
+
+func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	highRisk := filterRiskBucket(ps.Dependencies, 51, 76)
 
 	if len(highRisk) == 0 {
 		return
@@ -232,12 +262,7 @@ func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, 
 }
 
 func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var medRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore >= 26 && ds.RiskScore < 76 {
-			medRisk = append(medRisk, ds)
-		}
-	}
+	medRisk := filterRiskBucket(ps.Dependencies, 26, 51)
 
 	if len(medRisk) == 0 {
 		return
@@ -268,12 +293,7 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 }
 
 func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var lowRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore < 26 {
-			lowRisk = append(lowRisk, ds)
-		}
-	}
+	lowRisk := filterRiskBucket(ps.Dependencies, 0, 26)
 
 	if len(lowRisk) == 0 {
 		return

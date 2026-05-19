@@ -1026,6 +1026,26 @@ func TestScoreAll_HighRiskCounting(t *testing.T) {
 	if ps.LowRiskCount == 0 {
 		t.Errorf("expected at least 1 low-risk dep")
 	}
+
+	// HIGH and CRITICAL must be tracked separately — a HIGH-band dep (51-75)
+	// must not be counted under CriticalRiskCount and vice versa.
+	for _, ds := range ps.Dependencies {
+		switch {
+		case ds.RiskScore >= 76:
+			if ps.CriticalRiskCount == 0 {
+				t.Errorf("dep %s scored %d (CRITICAL) but CriticalRiskCount is 0", ds.Module, ds.RiskScore)
+			}
+		case ds.RiskScore >= 51:
+			if ps.HighRiskCount == 0 {
+				t.Errorf("dep %s scored %d (HIGH) but HighRiskCount is 0", ds.Module, ds.RiskScore)
+			}
+		}
+	}
+
+	total := ps.CriticalRiskCount + ps.HighRiskCount + ps.MediumRiskCount + ps.LowRiskCount
+	if total != len(ps.Dependencies) {
+		t.Errorf("bucket counts sum to %d, want %d", total, len(ps.Dependencies))
+	}
 }
 
 // TestMaintainerRiskScore_ZeroContributors tests bus factor with zero contributors.
