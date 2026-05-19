@@ -56,16 +56,16 @@ type DependencyScore struct {
 
 // ProjectScore holds the overall project risk assessment.
 type ProjectScore struct {
-	OverallScore    int                `json:"overall_risk_score"`
-	OverallLevel    RiskLevel          `json:"overall_risk_level"`
-	Dependencies    []*DependencyScore `json:"dependencies"`
-	CriticalRiskCount int              `json:"critical_risk_count"`
-	HighRiskCount   int                `json:"high_risk_count"`
-	MediumRiskCount int                `json:"medium_risk_count"`
-	LowRiskCount    int                `json:"low_risk_count"`
-	TotalVulns      int                `json:"total_vulnerabilities"`
-	Unmaintained2yr int                `json:"unmaintained_2yr"`
-	Unmaintained1yr int                `json:"unmaintained_1yr"`
+	OverallScore      int                `json:"overall_risk_score"`
+	OverallLevel      RiskLevel          `json:"overall_risk_level"`
+	Dependencies      []*DependencyScore `json:"dependencies"`
+	CriticalRiskCount int                `json:"critical_risk_count"`
+	HighRiskCount     int                `json:"high_risk_count"`
+	MediumRiskCount   int                `json:"medium_risk_count"`
+	LowRiskCount      int                `json:"low_risk_count"`
+	TotalVulns        int                `json:"total_vulnerabilities"`
+	Unmaintained2yr   int                `json:"unmaintained_2yr"`
+	Unmaintained1yr   int                `json:"unmaintained_1yr"`
 }
 
 // ScoreInput bundles all scan results for scoring.
