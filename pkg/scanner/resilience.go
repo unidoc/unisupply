@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,8 +9,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -59,10 +62,14 @@ func NewResilienceScanner(timeout time.Duration) *ResilienceScanner {
 }
 
 // ScanAll computes resilience info for all dependencies.
-func (rs *ResilienceScanner) ScanAll(graph *resolver.Graph, maintainers map[string]*MaintainerInfo) map[string]*ResilienceInfo {
+func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph, maintainers map[string]*MaintainerInfo) map[string]*ResilienceInfo {
+	rep := progress.From(ctx)
+	total := len(graph.Dependencies)
+
 	results := make(map[string]*ResilienceInfo)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var done int64
 
 	sem := make(chan struct{}, 10)
 
@@ -73,6 +80,7 @@ func (rs *ResilienceScanner) ScanAll(graph *resolver.Graph, maintainers map[stri
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			rep.Step("%s", d.Module.Path)
 			info := rs.analyzeModule(d.Module.Path)
 
 			// Enrich with maintainer data if available.
@@ -81,6 +89,8 @@ func (rs *ResilienceScanner) ScanAll(graph *resolver.Graph, maintainers map[stri
 			}
 
 			info.Score = computeResilienceScore(info)
+			n := atomic.AddInt64(&done, 1)
+			rep.Progress(int(n), total)
 
 			mu.Lock()
 			results[d.Module.Path] = info

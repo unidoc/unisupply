@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/progress"
 )
 
 // CIRiskLevel categorizes CI/CD risk.
@@ -61,9 +63,11 @@ func NewCIScanner() *CIScanner {
 }
 
 // ScanWorkflows scans GitHub Actions workflow files.
-func (cs *CIScanner) ScanWorkflows(workflowDir string) (*CIReport, error) {
+func (cs *CIScanner) ScanWorkflows(ctx context.Context, workflowDir string) (*CIReport, error) {
+	rep := progress.From(ctx)
 	report := &CIReport{}
 
+	rep.Step("parsing workflows in %s", workflowDir)
 	workflows, err := parser.ParseAllWorkflows(workflowDir)
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflows: %w", err)
@@ -73,10 +77,11 @@ func (cs *CIScanner) ScanWorkflows(workflowDir string) (*CIReport, error) {
 		return report, nil
 	}
 
-	for _, wf := range workflows {
+	for i, wf := range workflows {
 		wr := cs.analyzeWorkflow(wf)
 		report.Workflows = append(report.Workflows, wr)
 		report.TotalFindings += len(wr.Findings)
+		rep.Progress(i+1, len(workflows))
 	}
 
 	// Count unpinned and third-party actions.
@@ -98,24 +103,28 @@ func (cs *CIScanner) ScanWorkflows(workflowDir string) (*CIReport, error) {
 }
 
 // ScanBuildFiles scans Dockerfiles, Makefiles, and build scripts.
-func (cs *CIScanner) ScanBuildFiles(projectDir string) []CIFinding {
+func (cs *CIScanner) ScanBuildFiles(ctx context.Context, projectDir string) []CIFinding {
+	rep := progress.From(ctx)
 	var findings []CIFinding
 
 	// Scan Dockerfiles.
 	dockerfiles := findFiles(projectDir, "Dockerfile*")
 	for _, df := range dockerfiles {
+		rep.Step("Dockerfile %s", filepath.Base(df))
 		findings = append(findings, cs.scanDockerfile(df)...)
 	}
 
 	// Scan Makefiles.
 	makefiles := findFiles(projectDir, "Makefile*")
 	for _, mf := range makefiles {
+		rep.Step("Makefile %s", filepath.Base(mf))
 		findings = append(findings, cs.scanMakefile(mf)...)
 	}
 
 	// Scan shell scripts.
 	scripts := findFiles(projectDir, "*.sh")
 	for _, s := range scripts {
+		rep.Step("shell script %s", filepath.Base(s))
 		findings = append(findings, cs.scanShellScript(s)...)
 	}
 

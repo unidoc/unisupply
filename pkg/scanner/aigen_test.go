@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -898,7 +899,7 @@ func TestAIGenScanner_ScanAll(t *testing.T) {
 		},
 	}
 
-	results := scanner.ScanAll(graph, maintainers, resilience)
+	results := scanner.ScanAll(context.Background(), graph, maintainers, resilience)
 
 	// Clean module should not be in results (score 0) since it's old with governance
 	if _, ok := results["github.com/clean/lib"]; ok {

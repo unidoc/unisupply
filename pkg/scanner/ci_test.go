@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -703,7 +704,7 @@ jobs:
 	}
 
 	cs := NewCIScanner()
-	report, err := cs.ScanWorkflows(workflowDir)
+	report, err := cs.ScanWorkflows(context.Background(), workflowDir)
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
@@ -727,7 +728,7 @@ func TestCIScanner_ScanBuildFiles_Integration(t *testing.T) {
 	}
 
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles(tempDir)
+	findings := cs.ScanBuildFiles(context.Background(), tempDir)
 
 	found := false
 	for _, f := range findings {
@@ -907,7 +908,7 @@ func TestComputeOverallCIScore(t *testing.T) {
 // TestCIScanner_ScanBuildFiles_NonExistentFile tests handling of missing files.
 func TestCIScanner_ScanBuildFiles_NonExistentDir(t *testing.T) {
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles("/nonexistent/path")
+	findings := cs.ScanBuildFiles(context.Background(), "/nonexistent/path")
 
 	// Should return empty slice, not error
 	if len(findings) != 0 {
@@ -968,7 +969,7 @@ jobs:
 	}
 
 	cs := NewCIScanner()
-	report, err := cs.ScanWorkflows(workflowDir)
+	report, err := cs.ScanWorkflows(context.Background(), workflowDir)
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
@@ -1074,7 +1075,7 @@ func TestCIScanner_FindFiles_MultipleDockerfiles(t *testing.T) {
 	}
 
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles(tempDir)
+	findings := cs.ScanBuildFiles(context.Background(), tempDir)
 
 	// Should find findings in all Dockerfile variants
 	if len(findings) < 3 {

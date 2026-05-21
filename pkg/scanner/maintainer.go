@@ -1,14 +1,17 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -104,33 +107,50 @@ type githubContributor struct {
 }
 
 // ScanAll analyzes maintainer info for all dependencies.
-func (ms *MaintainerScanner) ScanAll(graph *resolver.Graph) map[string]*MaintainerInfo {
+func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph) map[string]*MaintainerInfo {
+	rep := progress.From(ctx)
+
 	results := make(map[string]*MaintainerInfo)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
 	sem := make(chan struct{}, 5)
 
+	// Pre-count GitHub-resolvable modules so Progress totals are accurate.
+	var ghDeps []*resolver.Dependency
+	type ownerRepo struct{ owner, repo string }
+	repos := make(map[*resolver.Dependency]ownerRepo)
 	for _, dep := range graph.Dependencies {
 		owner, repo := parseGitHubPath(dep.Module.Path)
 		if owner == "" || repo == "" {
 			continue
 		}
+		ghDeps = append(ghDeps, dep)
+		repos[dep] = ownerRepo{owner, repo}
+	}
+	total := len(ghDeps)
 
+	var done int64
+
+	for _, dep := range ghDeps {
+		or := repos[dep]
 		wg.Add(1)
 		go func(d *resolver.Dependency, owner, repo string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			rep.Step("%s", d.Module.Path)
 			info := ms.analyzeRepo(owner, repo)
+			n := atomic.AddInt64(&done, 1)
+			rep.Progress(int(n), total)
 			if info != nil {
 				info.SubDependencies = d.TransitiveDeps
 				mu.Lock()
 				results[d.Module.Path] = info
 				mu.Unlock()
 			}
-		}(dep, owner, repo)
+		}(dep, or.owner, or.repo)
 	}
 
 	wg.Wait()

@@ -1,8 +1,10 @@
 package scanner
 
 import (
+	"context"
 	"strings"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -83,13 +85,18 @@ func NewTyposquatScanner() *TyposquatScanner {
 }
 
 // ScanAll checks all dependencies for typosquatting indicators.
-func (ts *TyposquatScanner) ScanAll(graph *resolver.Graph) map[string]*TyposquatResult {
+func (ts *TyposquatScanner) ScanAll(ctx context.Context, graph *resolver.Graph) map[string]*TyposquatResult {
+	rep := progress.From(ctx)
+	total := len(graph.Dependencies)
 	results := make(map[string]*TyposquatResult)
 
+	i := 0
 	for _, dep := range graph.Dependencies {
+		i++
 		if result := ts.checkModule(dep.Module.Path); result != nil {
 			results[dep.Module.Path] = result
 		}
+		rep.Progress(i, total)
 	}
 
 	return results

@@ -3,12 +3,14 @@ package resolver
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/progress"
 )
 
 // Dependency represents a resolved dependency with graph info.
@@ -30,7 +32,9 @@ type Graph struct {
 
 // Resolve resolves the full dependency graph. It tries `go mod graph` first,
 // falling back to parsing go.mod/go.sum if the Go toolchain is unavailable.
-func Resolve(gomodPath string, directOnly bool) (*Graph, []string, error) {
+func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []string, error) {
+	rep := progress.From(ctx)
+	rep.Step("reading %s", gomodPath)
 	gomod, err := parser.ParseGoMod(gomodPath)
 	if err != nil {
 		return nil, nil, err
@@ -69,6 +73,7 @@ func Resolve(gomodPath string, directOnly bool) (*Graph, []string, error) {
 	}
 
 	// Try `go mod graph` for full transitive resolution.
+	rep.Step("running go mod graph")
 	err = resolveWithGoModGraph(gomodPath, graph, gomod, directPaths)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))

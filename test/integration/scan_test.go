@@ -2,6 +2,7 @@
 package integration_test
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ var (
 func loadCIReport(t *testing.T) *scanner.CIReport {
 	t.Helper()
 	ciReportOnce.Do(func() {
-		ciReport, ciReportErr = scanner.NewCIScanner().ScanWorkflows(testdataPath("workflows"))
+		ciReport, ciReportErr = scanner.NewCIScanner().ScanWorkflows(context.Background(), testdataPath("workflows"))
 	})
 	if ciReportErr != nil {
 		t.Fatalf("ScanWorkflows failed: %v", ciReportErr)
@@ -81,7 +82,7 @@ func emptyScoreInput(g *resolver.Graph) scorer.ScoreInput {
 func TestFullPipeline_Simple(t *testing.T) {
 	gomodPath := testdataPath("gomod", "simple.mod")
 
-	graph, _, err := resolver.Resolve(gomodPath, directOnly)
+	graph, _, err := resolver.Resolve(context.Background(), gomodPath, directOnly)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestFullPipeline_Simple(t *testing.T) {
 		t.Fatalf("expected at least 1 direct dependency, got 0")
 	}
 
-	typosquatResults := scanner.NewTyposquatScanner().ScanAll(graph)
+	typosquatResults := scanner.NewTyposquatScanner().ScanAll(context.Background(), graph)
 
 	// pflag and testify are themselves in the well-known module list — the
 	// scanner must not flag them as typosquats.
@@ -100,6 +101,7 @@ func TestFullPipeline_Simple(t *testing.T) {
 	}
 
 	aiGenResults := scanner.NewAIGenScanner().ScanAll(
+		context.Background(),
 		graph,
 		map[string]*scanner.MaintainerInfo{},
 		map[string]*scanner.ResilienceInfo{},
@@ -137,7 +139,7 @@ func TestFullPipeline_Empty(t *testing.T) {
 		t.Errorf("expected empty.mod to have no requirements, got %d", len(gomod.Requirements))
 	}
 
-	graph, _, err := resolver.Resolve(gomodPath, directOnly)
+	graph, _, err := resolver.Resolve(context.Background(), gomodPath, directOnly)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -164,13 +166,14 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 
 	runOnce := func(t *testing.T) *scorer.ProjectScore {
 		t.Helper()
-		graph, _, err := resolver.Resolve(gomodPath, directOnly)
+		graph, _, err := resolver.Resolve(context.Background(), gomodPath, directOnly)
 		if err != nil {
 			t.Fatalf("Resolve failed: %v", err)
 		}
 		input := emptyScoreInput(graph)
-		input.Typosquats = scanner.NewTyposquatScanner().ScanAll(graph)
+		input.Typosquats = scanner.NewTyposquatScanner().ScanAll(context.Background(), graph)
 		input.AIGenRisks = scanner.NewAIGenScanner().ScanAll(
+			context.Background(),
 			graph,
 			map[string]*scanner.MaintainerInfo{},
 			map[string]*scanner.ResilienceInfo{},
@@ -257,7 +260,7 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		graph, _, err := resolver.Resolve(gomodPath, directOnly)
+		graph, _, err := resolver.Resolve(context.Background(), gomodPath, directOnly)
 		if err != nil {
 			b.Fatalf("Resolve failed: %v", err)
 		}
@@ -266,9 +269,9 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 			Vulns:       emptyVulns,
 			Maintenance: emptyMaintenance,
 			Maintainers: emptyMaintainers,
-			Typosquats:  typosquatScanner.ScanAll(graph),
+			Typosquats:  typosquatScanner.ScanAll(context.Background(), graph),
 			Resilience:  emptyResilience,
-			AIGenRisks:  aiGenScanner.ScanAll(graph, emptyMaintainers, emptyResilience),
+			AIGenRisks:  aiGenScanner.ScanAll(context.Background(), graph, emptyMaintainers, emptyResilience),
 			TrustIndex:  emptyTrustIndex,
 		}
 		_ = scorer.ScoreAll(input)

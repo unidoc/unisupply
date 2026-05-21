@@ -1,9 +1,11 @@
 package scanner
 
 import (
+	"context"
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -25,17 +27,23 @@ func NewAIGenScanner() *AIGenScanner {
 
 // ScanAll checks all dependencies for AI-generated attack indicators.
 func (s *AIGenScanner) ScanAll(
+	ctx context.Context,
 	graph *resolver.Graph,
 	maintainers map[string]*MaintainerInfo,
 	resilience map[string]*ResilienceInfo,
 ) map[string]*AIGenRisk {
+	rep := progress.From(ctx)
+	total := len(graph.Dependencies)
 	results := make(map[string]*AIGenRisk)
 
+	i := 0
 	for _, dep := range graph.Dependencies {
+		i++
 		risk := s.analyzeModule(dep, maintainers[dep.Module.Path], resilience[dep.Module.Path])
 		if risk.Score > 0 {
 			results[dep.Module.Path] = risk
 		}
+		rep.Progress(i, total)
 	}
 
 	return results

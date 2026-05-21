@@ -1,6 +1,7 @@
 package report
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/unidoc/unipdf/v3/model"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -25,7 +27,9 @@ type PDFOptions struct {
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
-func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) error {
+func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) error {
+	rep := progress.From(ctx)
+
 	// Set UniPDF license (metered/API key from env, or unlicensed for open source).
 	if err := initLicense(); err != nil {
 		// Continue without license — will have watermark.
@@ -52,34 +56,43 @@ func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) e
 	})
 
 	// === Page 1: Cover Page ===
+	rep.Step("cover page")
 	writeCoverPage(c, graph, ps, helvetica, helveticaBold)
 
 	// === Page 2: Executive Summary ===
+	rep.Step("executive summary")
 	writeExecutiveSummary(c, graph, ps, opts, helvetica, helveticaBold)
 
 	// === Page 3+: Critical Risk Dependencies ===
+	rep.Step("critical risk section")
 	writeCriticalRiskSection(c, ps, helvetica, helveticaBold)
 
 	// === High Risk Dependencies ===
+	rep.Step("high risk section")
 	writeHighRiskSection(c, ps, helvetica, helveticaBold)
 
 	// === Medium Risk Dependencies ===
+	rep.Step("medium risk section")
 	writeMediumRiskSection(c, ps, helvetica, helveticaBold)
 
 	// === Low Risk Dependencies ===
+	rep.Step("low risk section")
 	writeLowRiskSection(c, ps, helvetica, helveticaBold)
 
 	// === CI/CD Risk Assessment (if available) ===
 	if opts.CIReport != nil && len(opts.CIReport.Workflows) > 0 {
+		rep.Step("CI/CD section")
 		writeCISection(c, opts.CIReport, helvetica, helveticaBold)
 	}
 
 	// === Takeover Candidates (if any) ===
 	if len(opts.Takeovers) > 0 {
+		rep.Step("takeover candidates section")
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
 	// === Methodology ===
+	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
 
 	outputPath := opts.OutputPath
@@ -87,6 +100,7 @@ func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) e
 		outputPath = "unisupply-report.pdf"
 	}
 
+	rep.Step("writing %s", outputPath)
 	return c.WriteToFile(outputPath)
 }
 

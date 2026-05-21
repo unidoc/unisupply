@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -627,7 +628,7 @@ func TestResilienceScanner_ScanAll(t *testing.T) {
 		"github.com/test/module2": {BusFactor: 2},
 	}
 
-	results := scanner.ScanAll(graph, maintainers)
+	results := scanner.ScanAll(context.Background(), graph, maintainers)
 
 	if len(results) != 2 {
 		t.Errorf("expected 2 results, got %d", len(results))
@@ -660,7 +661,7 @@ func TestResilienceScanner_EmptyGraph(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results := scanner.ScanAll(graph, make(map[string]*MaintainerInfo))
+	results := scanner.ScanAll(context.Background(), graph, make(map[string]*MaintainerInfo))
 
 	if len(results) != 0 {
 		t.Errorf("expected empty results for empty graph, got %d", len(results))

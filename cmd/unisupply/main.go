@@ -13,6 +13,7 @@ import (
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -42,6 +43,7 @@ func main() {
 		policyFile    string
 		policyPreset  string
 		trustIndexURL string
+		progressMode  string
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -60,6 +62,7 @@ func main() {
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
+	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
 
 	flag.Parse()
 
@@ -103,6 +106,7 @@ func main() {
 		policyFile:    policyFile,
 		policyPreset:  policyPreset,
 		trustIndexURL: trustIndexURL,
+		progressMode:  progressMode,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -131,81 +135,105 @@ type runConfig struct {
 	policyFile    string
 	policyPreset  string
 	trustIndexURL string
+	progressMode  string
 }
 
 func run(cfg *runConfig) error {
+	mode, err := progress.ParseMode(cfg.progressMode)
+	if err != nil {
+		return err
+	}
+	rep := progress.New(mode)
+	ctx := progress.WithReporter(context.Background(), rep)
+
 	// 1. Find go.mod.
+	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(cfg.path)
 	if err != nil {
 		return err
 	}
-
 	gomod, err := parser.ParseGoMod(gomodPath)
 	if err != nil {
 		return err
 	}
-
 	projectDir := filepath.Dir(gomodPath)
+	rep.Done("%s", gomodPath)
 
 	// 2. Resolve dependency graph.
-	graph, warnings, err := resolver.Resolve(gomodPath, cfg.directOnly)
+	rep.Stage("Resolving dependency graph")
+	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
 	if err != nil {
 		return fmt.Errorf("resolving dependencies: %w", err)
 	}
-
 	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		rep.Warn("%s", w)
 	}
+	rep.Done("%d modules", len(graph.Dependencies))
 
 	if len(graph.Dependencies) == 0 {
-		fmt.Println("No dependencies found.")
+		fmt.Fprintln(os.Stderr, "No dependencies found.")
 		return nil
 	}
 
 	// 3. Vulnerability scan (via govulncheck).
-	vulns, vulnWarnings, err := scanner.ScanVulns(context.Background(), projectDir)
+	rep.Stage("Scanning vulnerabilities (govulncheck)")
+	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Vulnerability scan failed: %v\n", err)
+		rep.Warn("Vulnerability scan failed: %v", err)
 	}
 	for _, w := range vulnWarnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		rep.Warn("%s", w)
 	}
+	rep.Done("%d affected modules", len(vulns))
 
 	// 4. Maintenance health check.
+	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
-	maintenance, err := maintScanner.ScanAll(graph)
+	maintenance, err := maintScanner.ScanAll(ctx, graph)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Some maintenance checks failed: %v\n", err)
+		rep.Warn("Some maintenance checks failed: %v", err)
 	}
+	rep.Done("")
 
 	// 5. Maintainer analysis (GitHub API).
+	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
-	maintainers := maintainerScanner.ScanAll(graph)
+	maintainers := maintainerScanner.ScanAll(ctx, graph)
+	rep.Done("")
 
 	// 6. Typosquatting detection.
+	rep.Stage("Detecting typosquats")
 	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquats := typosquatScanner.ScanAll(graph)
+	typosquats := typosquatScanner.ScanAll(ctx, graph)
+	rep.Done("%d suspicious", len(typosquats))
 
 	// 7. Resilience scoring (release cadence, governance).
+	rep.Stage("Scoring resilience")
 	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
-	resilience := resilienceScanner.ScanAll(graph, maintainers)
+	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
+	rep.Done("")
 
 	// 8. AI-generated code risk detection.
+	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenRisks := aiGenScanner.ScanAll(graph, maintainers, resilience)
+	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	rep.Done("%d flagged", len(aiGenRisks))
 
 	// 9. Trust Index lookup (if unitrust API is configured).
 	var trustIndex map[string]*scanner.TrustIndexEntry
 	trustClient := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout)
 	if trustClient != nil {
+		rep.Stage("Querying Trust Index")
 		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(graph)
+		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
 		if tiErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Trust Index lookup failed: %v\n", tiErr)
+			rep.Warn("Trust Index lookup failed: %v", tiErr)
 		}
+		rep.Done("%d entries", len(trustIndex))
 	}
 
 	// 10. Score everything.
+	rep.Stage("Computing risk scores")
 	projectScore := scorer.ScoreAll(scorer.ScoreInput{
 		Graph:       graph,
 		Vulns:       vulns,
@@ -216,10 +244,12 @@ func run(cfg *runConfig) error {
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
 	})
+	rep.Done("")
 
 	// 8. CI/CD scanning (if enabled).
 	var ciReport *scanner.CIReport
 	if cfg.scanWorkflows || cfg.scanCI {
+		rep.Stage("Auditing CI/CD pipelines")
 		ciScanner := scanner.NewCIScanner()
 
 		wfPath := cfg.workflowPath
@@ -227,16 +257,17 @@ func run(cfg *runConfig) error {
 			wfPath = filepath.Join(projectDir, wfPath)
 		}
 
-		ciReport, err = ciScanner.ScanWorkflows(wfPath)
+		ciReport, err = ciScanner.ScanWorkflows(ctx, wfPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Workflow scanning failed: %v\n", err)
+			rep.Warn("Workflow scanning failed: %v", err)
 		}
 
 		if cfg.scanCI && ciReport != nil {
-			buildFindings := ciScanner.ScanBuildFiles(projectDir)
+			buildFindings := ciScanner.ScanBuildFiles(ctx, projectDir)
 			ciReport.BuildFindings = buildFindings
 			ciReport.TotalFindings += len(buildFindings)
 		}
+		rep.Done("")
 	}
 
 	// 9. Collect takeover candidates.
@@ -269,6 +300,14 @@ func run(cfg *runConfig) error {
 
 	sbomOpts := report.SBOMOptions{GoVersion: gomod.GoVersion}
 
+	// Only open a progress stage when the report writer targets a file (or
+	// is the PDF writer, which writes to its own file). Streaming text/json/
+	// sbom to stdout shares the terminal with the spinner line on stderr —
+	// keeping the stage open visibly collides the two streams.
+	stageReport := cfg.output != "" || cfg.format == "pdf"
+	if stageReport {
+		rep.Stage(fmt.Sprintf("Generating %s report", cfg.format))
+	}
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
@@ -287,7 +326,7 @@ func run(cfg *runConfig) error {
 			Takeovers: takeovers,
 		}, writer)
 	case "pdf":
-		err = report.WritePDF(graph, projectScore, report.PDFOptions{
+		err = report.WritePDF(ctx, graph, projectScore, report.PDFOptions{
 			OutputPath: cfg.output,
 			GoVersion:  gomod.GoVersion,
 			CIReport:   ciReport,
@@ -304,9 +343,17 @@ func run(cfg *runConfig) error {
 	if err != nil {
 		return err
 	}
+	if stageReport {
+		if cfg.output != "" {
+			rep.Done("%s", cfg.output)
+		} else {
+			rep.Done("")
+		}
+	}
 
 	// 11. Policy evaluation (if enabled).
 	if cfg.policyFile != "" || cfg.policyPreset != "" {
+		rep.Stage("Evaluating policy")
 		var pol *policy.Policy
 
 		if cfg.policyFile != "" {
@@ -332,6 +379,11 @@ func run(cfg *runConfig) error {
 			CIReport:     ciReport,
 		})
 
+		if result.Pass {
+			rep.Done("pass")
+		} else {
+			rep.Done("fail")
+		}
 		fmt.Fprint(os.Stderr, result.FormatText(cfg.noColor))
 
 		if !result.Pass {
@@ -361,6 +413,8 @@ func printUsage() {
 	fmt.Println("  unisupply --scan-ci                         # Full CI/CD pipeline scan")
 	fmt.Println("  unisupply --policy policy.json              # Evaluate against policy file")
 	fmt.Println("  unisupply --policy-preset strict            # Use strict built-in policy")
+	fmt.Println("  unisupply --progress plain                  # Plain log-style progress on stderr")
+	fmt.Println("  unisupply --progress none -f json           # Silent run; JSON to stdout")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

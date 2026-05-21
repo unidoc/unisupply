@@ -1,14 +1,17 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -53,7 +56,10 @@ type proxyVersionInfo struct {
 }
 
 // ScanAll checks maintenance health for all dependencies.
-func (ms *MaintenanceScanner) ScanAll(graph *resolver.Graph) (map[string]*MaintenanceInfo, error) {
+func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph) (map[string]*MaintenanceInfo, error) {
+	rep := progress.From(ctx)
+	total := len(graph.Dependencies)
+
 	results := make(map[string]*MaintenanceInfo)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -62,6 +68,7 @@ func (ms *MaintenanceScanner) ScanAll(graph *resolver.Graph) (map[string]*Mainte
 
 	var firstErr error
 	var errOnce sync.Once
+	var done int64
 
 	for _, dep := range graph.Dependencies {
 		wg.Add(1)
@@ -70,7 +77,10 @@ func (ms *MaintenanceScanner) ScanAll(graph *resolver.Graph) (map[string]*Mainte
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			rep.Step("%s", d.Module.Path)
 			info, err := ms.checkModule(d.Module.Path, d.Module.Version)
+			n := atomic.AddInt64(&done, 1)
+			rep.Progress(int(n), total)
 			if err != nil {
 				errOnce.Do(func() {
 					firstErr = fmt.Errorf("checking maintenance for %s: %w", d.Module.Path, err)

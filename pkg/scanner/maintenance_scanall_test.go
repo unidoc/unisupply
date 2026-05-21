@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestMaintenanceScanner_ScanAll(t *testing.T) {
 		},
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Fatalf("ScanAll failed: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestMaintenanceScanner_ScanAll_Empty(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Fatalf("ScanAll failed: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestMaintenanceScanner_ScanAll_ErrorHandling(t *testing.T) {
 		},
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 
 	// First error is captured
 	if err != nil {
@@ -208,7 +209,7 @@ func TestMaintenanceScanner_ScanAll_Concurrency(t *testing.T) {
 	}
 
 	// ScanAll uses a semaphore with 10 concurrent workers
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Logf("ScanAll returned error (first error captured): %v", err)
 	}
