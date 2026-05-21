@@ -75,7 +75,12 @@ func (c *TrustIndexClient) LookupAll(ctx context.Context, graph *resolver.Graph)
 
 	url := fmt.Sprintf("%s/api/v1/lookup", c.baseURL)
 	rep.Step("POST %s (%d modules)", url, len(modules))
-	resp, err := c.client.Post(url, "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("trust index lookup: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("trust index lookup: %w", err)
 	}

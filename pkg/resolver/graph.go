@@ -74,7 +74,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 
 	// Try `go mod graph` for full transitive resolution.
 	rep.Step("running go mod graph")
-	err = resolveWithGoModGraph(gomodPath, graph, gomod, directPaths)
+	err = resolveWithGoModGraph(ctx, gomodPath, graph, gomod, directPaths)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))
 		// Fall back: add everything from go.mod.
@@ -105,9 +105,9 @@ func depthFromIndirect(indirect bool) int {
 	return 0
 }
 
-func resolveWithGoModGraph(gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
+func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
 	dir := filepath.Dir(gomodPath)
-	cmd := exec.Command("go", "mod", "graph")
+	cmd := exec.CommandContext(ctx, "go", "mod", "graph")
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
