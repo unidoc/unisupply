@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,7 +73,7 @@ func TestTrustIndexClient_LookupAll_NilClient(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if results != nil {
 		t.Error("expected nil results for nil client")
@@ -91,7 +92,7 @@ func TestTrustIndexClient_LookupAll_EmptyGraph(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if results != nil {
 		t.Error("expected nil results for empty graph")
@@ -183,7 +184,7 @@ func TestTrustIndexClient_LookupAll_Success(t *testing.T) {
 		},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -251,7 +252,7 @@ func TestTrustIndexClient_LookupAll_ServerError_500(t *testing.T) {
 		},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err == nil {
 		t.Fatal("expected non-nil error for server error")
@@ -283,7 +284,7 @@ func TestTrustIndexClient_LookupAll_ServerError_503(t *testing.T) {
 		},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err == nil {
 		t.Fatal("expected non-nil error for server error")
@@ -312,7 +313,7 @@ func TestTrustIndexClient_LookupAll_BadJSON(t *testing.T) {
 		},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response")
@@ -336,7 +337,7 @@ func TestTrustIndexClient_LookupAll_ConnectionError(t *testing.T) {
 		},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err == nil {
 		t.Fatal("expected error for connection failure")
@@ -387,7 +388,7 @@ func TestTrustIndexClient_LookupAll_MultipleModules(t *testing.T) {
 		tiDepSpec{path: "github.com/foo/e", ver: "v1.0.0", direct: false, depth: 2},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -428,7 +429,7 @@ func TestTrustIndexClient_LookupAll_PartialResults(t *testing.T) {
 		tiDepSpec{path: "github.com/baz/qux", ver: "v1.0.0", direct: true, depth: 0},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -465,7 +466,7 @@ func TestTrustIndexClient_LookupAll_EmptyResults(t *testing.T) {
 		tiDepSpec{path: "github.com/foo/bar", ver: "v1.0.0", direct: true, depth: 0},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -513,7 +514,7 @@ func TestTrustIndexClient_LookupAll_AllFields(t *testing.T) {
 		tiDepSpec{path: "github.com/test/full", ver: "v1.0.0", direct: true, depth: 0},
 	)
 
-	results, err := client.LookupAll(graph)
+	results, err := client.LookupAll(context.Background(), graph)
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)

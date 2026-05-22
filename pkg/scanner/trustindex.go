@@ -2,12 +2,14 @@ package scanner
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -49,10 +51,11 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration) *TrustIndexClien
 }
 
 // LookupAll fetches Trust Index data for all dependencies in one bulk request.
-func (c *TrustIndexClient) LookupAll(graph *resolver.Graph) (map[string]*TrustIndexEntry, error) {
+func (c *TrustIndexClient) LookupAll(ctx context.Context, graph *resolver.Graph) (map[string]*TrustIndexEntry, error) {
 	if c == nil {
 		return nil, nil
 	}
+	rep := progress.From(ctx)
 
 	// Collect all module paths.
 	var modules []string
@@ -71,7 +74,13 @@ func (c *TrustIndexClient) LookupAll(graph *resolver.Graph) (map[string]*TrustIn
 	}
 
 	url := fmt.Sprintf("%s/api/v1/lookup", c.baseURL)
-	resp, err := c.client.Post(url, "application/json", bytes.NewReader(reqBody))
+	rep.Step("POST %s (%d modules)", url, len(modules))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("trust index lookup: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("trust index lookup: %w", err)
 	}

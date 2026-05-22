@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -542,7 +543,7 @@ func TestTyposquatScanner_ScanAll_Clean(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll on clean graph = %v, want empty map", results)
@@ -558,7 +559,7 @@ func TestTyposquatScanner_ScanAll_Suspicious(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Fatalf("ScanAll detected %d results, want 1", len(results))
@@ -585,7 +586,7 @@ func TestTyposquatScanner_ScanAll_MultipleIndicators(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Fatalf("ScanAll detected %d results, want 1", len(results))
@@ -611,7 +612,7 @@ func TestTyposquatScanner_BestMatch(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result, ok := results["github.com/fake-org/client_golang"]
 	if !ok {
@@ -628,7 +629,7 @@ func TestTyposquatScanner_EmptyGraph(t *testing.T) {
 	graph := makeGraph()
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll on empty graph = %v, want empty map", results)
@@ -643,7 +644,7 @@ func TestTyposquatScanner_HomoglyphDetection(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Fatalf("ScanAll detected %d results, want 1", len(results))
@@ -674,7 +675,7 @@ func TestTyposquatScanner_SwappedCharDetection(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result := results["github.com/prometheus/clinet_golang"]
 	if result == nil {
@@ -701,7 +702,7 @@ func TestTyposquatScanner_ExtraCharDetection(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result := results["github.com/prometheus/cclient_golang"]
 	if result == nil {
@@ -728,7 +729,7 @@ func TestTyposquatScanner_MissingDashDetection(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result := results["github.com/redis/goredis"]
 	if result == nil {
@@ -755,7 +756,7 @@ func TestTyposquatScanner_LowConfidenceFiltered(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll filtered %d results, want 0 (all below threshold)", len(results))
@@ -770,7 +771,7 @@ func TestTyposquatScanner_Result_Fields(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result := results["github.com/prometheus/clien_golang"]
 	if result == nil {
@@ -803,7 +804,7 @@ func TestTyposquatScanner_LongModulePath(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Fatalf("ScanAll detected %d results, want 1. Keys: %v", len(results), mapKeys(results))

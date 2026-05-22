@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1075,7 +1076,7 @@ func TestMaintainerScanner_ScanAll_NonGitHub(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll returned %d results for non-GitHub modules, want 0", len(results))
@@ -1101,7 +1102,7 @@ func TestMaintainerScanner_ScanAll_WithGitHub(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Errorf("ScanAll returned %d results, want 1", len(results))
@@ -1140,7 +1141,7 @@ func TestMaintainerScanner_ScanAll_TransitiveDeps(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(g)
+	results := ms.ScanAll(context.Background(), g)
 
 	result := results["github.com/golang/go"]
 	if result == nil {
@@ -1315,7 +1316,7 @@ func TestMaintainerScanner_EmptyGraph(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll on empty graph = %d results, want 0", len(results))
@@ -1349,7 +1350,7 @@ func TestMaintainerScanner_MixedDependencies(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 2 {
 		t.Errorf("ScanAll returned %d GitHub results, want 2", len(results))
