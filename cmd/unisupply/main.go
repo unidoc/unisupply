@@ -146,7 +146,6 @@ func run(cfg *runConfig) error {
 	rep := progress.New(mode)
 	ctx := progress.WithReporter(context.Background(), rep)
 
-	// 1. Find go.mod.
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(cfg.path)
 	if err != nil {
@@ -159,7 +158,6 @@ func run(cfg *runConfig) error {
 	projectDir := filepath.Dir(gomodPath)
 	rep.Done("%s", gomodPath)
 
-	// 2. Resolve dependency graph.
 	rep.Stage("Resolving dependency graph")
 	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
 	if err != nil {
@@ -175,7 +173,6 @@ func run(cfg *runConfig) error {
 		return nil
 	}
 
-	// 3. Vulnerability scan (via govulncheck).
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir)
 	if err != nil {
@@ -186,7 +183,6 @@ func run(cfg *runConfig) error {
 	}
 	rep.Done("%d affected modules", len(vulns))
 
-	// 4. Maintenance health check.
 	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
@@ -195,31 +191,26 @@ func run(cfg *runConfig) error {
 	}
 	rep.Done("")
 
-	// 5. Maintainer analysis (GitHub API).
 	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
-	// 6. Typosquatting detection.
 	rep.Stage("Detecting typosquats")
 	typosquatScanner := scanner.NewTyposquatScanner()
 	typosquats := typosquatScanner.ScanAll(ctx, graph)
 	rep.Done("%d suspicious", len(typosquats))
 
-	// 7. Resilience scoring (release cadence, governance).
 	rep.Stage("Scoring resilience")
 	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
 	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
 	rep.Done("")
 
-	// 8. AI-generated code risk detection.
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
 	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
 	rep.Done("%d flagged", len(aiGenRisks))
 
-	// 9. Trust Index lookup (if unitrust API is configured).
 	var trustIndex map[string]*scanner.TrustIndexEntry
 	trustClient := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout)
 	if trustClient != nil {
@@ -232,7 +223,6 @@ func run(cfg *runConfig) error {
 		rep.Done("%d entries", len(trustIndex))
 	}
 
-	// 10. Score everything.
 	rep.Stage("Computing risk scores")
 	projectScore := scorer.ScoreAll(scorer.ScoreInput{
 		Graph:       graph,
@@ -246,7 +236,6 @@ func run(cfg *runConfig) error {
 	})
 	rep.Done("")
 
-	// 8. CI/CD scanning (if enabled).
 	var ciReport *scanner.CIReport
 	if cfg.scanWorkflows || cfg.scanCI {
 		rep.Stage("Auditing CI/CD pipelines")
@@ -270,7 +259,7 @@ func run(cfg *runConfig) error {
 		rep.Done("")
 	}
 
-	// 9. Collect takeover candidates.
+	// Collect takeover candidates.
 	var takeovers []*scanner.MaintainerInfo
 	for _, mi := range maintainers {
 		if mi.TakeoverCandidate {
@@ -285,7 +274,7 @@ func run(cfg *runConfig) error {
 		delete(vulns, "stdlib")
 	}
 
-	// 10. Generate output.
+	// Generate output.
 	writer := os.Stdout
 	if cfg.output != "" {
 		f, err := os.Create(cfg.output)
@@ -351,7 +340,6 @@ func run(cfg *runConfig) error {
 		}
 	}
 
-	// 11. Policy evaluation (if enabled).
 	if cfg.policyFile != "" || cfg.policyPreset != "" {
 		rep.Stage("Evaluating policy")
 		var pol *policy.Policy

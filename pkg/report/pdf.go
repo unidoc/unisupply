@@ -55,43 +55,34 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 		_ = block.Draw(p)
 	})
 
-	// === Page 1: Cover Page ===
 	rep.Step("cover page")
 	writeCoverPage(c, graph, ps, helvetica, helveticaBold)
 
-	// === Page 2: Executive Summary ===
 	rep.Step("executive summary")
 	writeExecutiveSummary(c, graph, ps, opts, helvetica, helveticaBold)
 
-	// === Page 3+: Critical Risk Dependencies ===
 	rep.Step("critical risk section")
 	writeCriticalRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === High Risk Dependencies ===
 	rep.Step("high risk section")
 	writeHighRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === Medium Risk Dependencies ===
 	rep.Step("medium risk section")
 	writeMediumRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === Low Risk Dependencies ===
 	rep.Step("low risk section")
 	writeLowRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === CI/CD Risk Assessment (if available) ===
 	if opts.CIReport != nil && len(opts.CIReport.Workflows) > 0 {
 		rep.Step("CI/CD section")
 		writeCISection(c, opts.CIReport, helvetica, helveticaBold)
 	}
 
-	// === Takeover Candidates (if any) ===
 	if len(opts.Takeovers) > 0 {
 		rep.Step("takeover candidates section")
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
-	// === Methodology ===
 	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
 
