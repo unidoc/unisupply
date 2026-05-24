@@ -18,8 +18,8 @@ const (
 	enrichMaxBytes    = 512 * 1024 // 512 KB per spec
 	cacheSubDir       = "unisupply/vuln"
 	cacheTTL          = 24 * time.Hour
-	cacheFileMode     = 0600
-	cacheDirMode      = 0700
+	cacheFileMode     = 0o600
+	cacheDirMode      = 0o700
 	cacheFallbackBase = "unisupply-vuln-cache"
 )
 
@@ -231,7 +231,7 @@ type osvResponse struct {
 // fetchOSV queries https://api.osv.dev/v1/vulns/{id} and returns an
 // enrichResult. It returns (nil, warnings) on any non-2xx or parse failure
 // without hard-erroring — the caller falls back to GHSA.
-func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (*enrichResult, []string) {
+func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichResult, warnings []string) {
 	url := "https://api.osv.dev/v1/vulns/" + id
 	body, resp, err := e.client.Get(ctx, url, GetOptions{
 		Host:     osvHost,
@@ -239,7 +239,6 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (*enrichResult, 
 		Accept:   "application/json",
 	})
 
-	var warnings []string
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: OSV fetch error for %s: %v", id, err))
 		return nil, warnings
@@ -255,7 +254,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (*enrichResult, 
 		return nil, warnings
 	}
 
-	result := &enrichResult{}
+	result = &enrichResult{}
 
 	// Prefer database_specific.severity (Go vuln DB convention).
 	if osv.DatabaseSpecific != nil && osv.DatabaseSpecific.Severity != "" {
@@ -300,7 +299,7 @@ type ghsaResponse struct {
 // fetchGHSA queries https://api.github.com/advisories/{ghsa_id} and returns an
 // enrichResult. The GitHub token is injected by the httpclient RoundTripper
 // after host-pin validation — not passed in the URL.
-func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (*enrichResult, []string) {
+func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (result *enrichResult, warnings []string) {
 	url := "https://api.github.com/advisories/" + ghsaID
 
 	authHeader := ""
@@ -315,7 +314,6 @@ func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (*enrichRes
 		Accept:     "application/vnd.github+json",
 	})
 
-	var warnings []string
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GHSA fetch error for %s: %v", ghsaID, err))
 		return nil, warnings
@@ -331,7 +329,7 @@ func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (*enrichRes
 		return nil, warnings
 	}
 
-	result := &enrichResult{}
+	result = &enrichResult{}
 
 	// Prefer numeric CVSS score for precision.
 	if ghsa.CVSSV3 != nil && ghsa.CVSSV3.Score > 0 {

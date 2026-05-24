@@ -12,21 +12,6 @@ import (
 	"time"
 )
 
-// countingTransport wraps an http.RoundTripper and records every request made.
-type countingTransport struct {
-	inner    http.RoundTripper
-	calls    int
-	lastHost string
-	lastAuth string
-}
-
-func (ct *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	ct.calls++
-	ct.lastHost = req.URL.Host
-	ct.lastAuth = req.Header.Get("Authorization")
-	return ct.inner.RoundTrip(req)
-}
-
 // staticTransport returns a fixed response body and status for all requests.
 type staticTransport struct {
 	body       string

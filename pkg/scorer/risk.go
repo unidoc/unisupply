@@ -310,7 +310,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 
 	// DebugScoring is populated only when the caller opts in via --debug-scoring.
 	if input.DebugMode {
-		ps.DebugScoring = buildDebugScoring(ps, sevResult)
+		ps.DebugScoring = buildDebugScoring(ps, &sevResult)
 	}
 
 	return ps
@@ -625,7 +625,7 @@ func lowFixAgeFloor(vulns []scanner.Vulnerability) int {
 
 	for _, v := range vulns {
 		// Only apply amplifier to LOW-severity CVEs.
-		if strings.ToUpper(v.Severity) != "LOW" {
+		if !strings.EqualFold(v.Severity, "LOW") {
 			continue
 		}
 
@@ -889,7 +889,8 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 		perDepWorstRaw := ""
 		perDepHighOrAbove := 0
 
-		for _, v := range ds.Vulns {
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
 			rawTier := effectiveTier(v)
 			if rawTier == "" {
 				continue
@@ -996,7 +997,7 @@ func stepFunction(c StepFunctionInputs) int {
 // data uncertainty stays visible. This collapses both the EnrichmentFailed and
 // "scanner never set a tier" cases into MEDIUM, matching the per-dep
 // severityFloor() conservative-floor logic.
-func effectiveTier(v scanner.Vulnerability) string {
+func effectiveTier(v *scanner.Vulnerability) string {
 	switch strings.ToUpper(strings.TrimSpace(v.Severity)) {
 	case "CRITICAL":
 		return "CRITICAL"
@@ -1081,7 +1082,7 @@ func computeDiagnostics(deps []*DependencyScore) *Diagnostics {
 }
 
 // buildDebugScoring assembles the --debug-scoring payload.
-func buildDebugScoring(ps *ProjectScore, sev severityAdjustedResult) *DebugScoring {
+func buildDebugScoring(ps *ProjectScore, sev *severityAdjustedResult) *DebugScoring {
 	return &DebugScoring{
 		MeanDepRiskScore:          ps.MeanDepRiskScore,
 		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,

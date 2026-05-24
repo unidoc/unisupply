@@ -89,7 +89,7 @@ type gvcFinding struct {
 // UNKNOWN-severity vulnerabilities via OSV.dev and the GitHub Advisory API.
 // githubToken may be empty; enrichment proceeds unauthenticated in that case
 // (OSV does not require authentication; GHSA fallback works but is rate-limited).
-func ScanVulns(ctx context.Context, projectDir string, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
+func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
 	var stdout bytes.Buffer
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
