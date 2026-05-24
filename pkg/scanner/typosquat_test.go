@@ -847,7 +847,7 @@ func TestTyposquatScanner_ConfidenceFloor_CloudStorage(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll for cloud.google.com/go/storage = %d results, want 0 (below 0.7 floor)", len(results))
@@ -862,7 +862,7 @@ func TestTyposquatScanner_ConfidenceFloor_GolangX(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll for golang.org/x/net = %d results, want 0 (well-known module)", len(results))
@@ -877,7 +877,7 @@ func TestTyposquatScanner_ConfidenceFloor_GenProto(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll for google.golang.org/genproto/googleapis/api = %d results, want 0 (below 0.7 floor)", len(results))
@@ -894,7 +894,7 @@ func TestTyposquatScanner_HighConfidence_LogursVsLogrus(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result, ok := results["github.com/sirupsen/logurs"]
 	if !ok {
@@ -923,7 +923,7 @@ func TestTyposquatScanner_SuspectMatches_Populated(t *testing.T) {
 	)
 
 	scanner := NewTyposquatScanner()
-	results := scanner.ScanAll(graph)
+	results := scanner.ScanAll(context.Background(), graph)
 
 	result, ok := results["github.com/sirupsen/logurs"]
 	if !ok {

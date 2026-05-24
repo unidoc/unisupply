@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -55,7 +56,7 @@ func TestJSON_BuildFileFindings_Dockerfile(t *testing.T) {
 
 	// Run the build-file scanner directly to produce findings.
 	cs := scanner.NewCIScanner()
-	buildFindings := cs.ScanBuildFiles(dir)
+	buildFindings := cs.ScanBuildFiles(context.Background(), dir)
 	if len(buildFindings) == 0 {
 		t.Fatal("expected at least one build finding for FROM ubuntu:latest, got none")
 	}

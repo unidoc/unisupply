@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -147,7 +148,7 @@ require (
 	// without a module cache) and fall back to go.mod parsing. The subsequent
 	// classifyTestOnlyDeps call will also fail (no module cache) and leave
 	// IsTestOnly as nil.
-	graph, warnings, err := Resolve(gomodPath, false)
+	graph, warnings, err := Resolve(context.Background(), gomodPath, false)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}
@@ -193,7 +194,7 @@ require (
 		t.Fatalf("failed to write go.mod: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, true) // directOnly=true
+	graph, _, err := Resolve(context.Background(), gomodPath, true) // directOnly=true
 	if err != nil {
 		t.Fatalf("Resolve(directOnly=true) failed: %v", err)
 	}
