@@ -220,11 +220,28 @@ type ScoreInput struct {
 	// DebugMode populates ps.DebugScoring with diagnostic data when true.
 	// Wired to the --debug-scoring CLI flag.
 	DebugMode bool
+
+	// Now is the scan-start clock reference used by the fix-age amplifier in
+	// lowFixAgeFloor. It MUST match the quantized scan-start time the scanners
+	// receive (cmd/unisupply/main.go sets all five from a single value), so
+	// that two scans on the same UTC day produce identical floor decisions at
+	// the 30/180/365-day boundaries. A zero value falls back to time.Now() —
+	// use only in tests where deterministic day-boundary behavior is not
+	// being asserted.
+	Now time.Time
 }
 
 // ScoreAll computes risk scores for all dependencies and the overall project.
 func ScoreAll(input ScoreInput) *ProjectScore {
 	ps := &ProjectScore{}
+
+	// Resolve the clock reference once. A zero input.Now falls back to
+	// time.Now() so direct test callers that don't care about day-boundary
+	// determinism keep working without modification.
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	// Count modules whose maintainer data was unavailable. Used to build a
 	// top-level warning so consumers understand the scoring gap.
@@ -252,6 +269,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 			input.Resilience[dep.Module.Path],
 			input.AIGenRisks[dep.Module.Path],
 			input.TrustIndex[dep.Module.Path],
+			now,
 		)
 		ps.Dependencies = append(ps.Dependencies, ds)
 
@@ -302,21 +320,23 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// transitives.
 	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
 
-	sevResult := severityAdjustedVulnScore(ps.Dependencies)
+	sevResult := severityAdjustedVulnScore(now, ps.Dependencies)
 	ps.SeverityAdjustedVulnScore = sevResult.score
 	ps.WorstCVEID = sevResult.worstID
 	ps.WorstCVESeverity = sevResult.worstSeverity
 
 	if ps.SeverityAdjustedVulnScore > ps.MeanDepRiskScore {
 		ps.OverallScore = ps.SeverityAdjustedVulnScore
-		if len(ps.Dependencies) > 0 {
-			ps.HeadlineDriver = "severity_adjusted"
-		}
+		ps.HeadlineDriver = "severity_adjusted"
 	} else {
 		ps.OverallScore = ps.MeanDepRiskScore
-		if len(ps.Dependencies) > 0 {
-			ps.HeadlineDriver = "mean"
-		}
+		ps.HeadlineDriver = "mean"
+	}
+	// HeadlineDriver is meaningless when there are no dependencies (both axes
+	// are 0). Clear it once, after the comparison, so the json:omitempty tag
+	// produces a clean empty-graph report.
+	if len(ps.Dependencies) == 0 {
+		ps.HeadlineDriver = ""
 	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
 
@@ -334,6 +354,12 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	return ps
 }
 
+// scoreDependency computes the per-dep RiskScore and RiskLevel. The `now`
+// argument is the clock reference for the LOW-CVE fix-age amplifier in
+// lowFixAgeFloor; it should be the same quantized scan-start the scanners
+// received (see ScoreInput.Now). A zero `now` falls back to time.Now() at
+// the leaf (lowFixAgeFloor), preserving the pre-clock-injection test
+// signatures.
 func scoreDependency(
 	dep *resolver.Dependency,
 	vulns []scanner.Vulnerability,
@@ -343,6 +369,7 @@ func scoreDependency(
 	resilience *scanner.ResilienceInfo,
 	aiGenRisk *scanner.AIGenRisk,
 	trustIndex *scanner.TrustIndexEntry,
+	now time.Time,
 ) *DependencyScore {
 	ds := &DependencyScore{
 		Module:         dep.Module.Path,
@@ -474,7 +501,7 @@ func scoreDependency(
 	//   project-level     = "worst-case CVE-driven floor for the whole project?" (Task 10)
 	// Never call one from the other.
 	if len(vulns) > 0 {
-		floor, promotedLevel := severityFloor(vulns)
+		floor, promotedLevel := severityFloor(now, vulns)
 		if ds.RiskScore < floor {
 			ds.RiskScore = floor
 		}
@@ -587,7 +614,11 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 //	MEDIUM           → 26 (MEDIUM band)
 //	LOW              → 0  (no floor; amplifier below may still raise it)
 //	UNKNOWN with enrichment failure → 26 (conservative MEDIUM)
-func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel) {
+//
+// The `now` argument is forwarded to lowFixAgeFloor in the LOW-only branch.
+// Pass the scan-start clock reference (see ScoreInput.Now) for day-quantized
+// determinism; a zero value falls back to time.Now() at the leaf.
+func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, promoted RiskLevel) {
 	// Track the worst severity seen to determine the floor.
 	// Only "called", "imported", and "" CVEs contribute to the floor.
 	// "required" CVEs are excluded: their code never links into the build, so
@@ -634,7 +665,7 @@ func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel
 	default:
 		// Only LOW CVEs present (or only required CVEs, which are excluded above);
 		// apply fix-age amplifier.
-		floor = lowFixAgeFloor(vulns)
+		floor = lowFixAgeFloor(now, vulns)
 		return floor, RiskLow
 	}
 }
@@ -650,8 +681,16 @@ func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel
 //	fix_available && days_since_fix_published >= 30  → no floor
 //	!fix_available && days_since_disclosure >= 365   → 20
 //	otherwise                                        → no floor
-func lowFixAgeFloor(vulns []scanner.Vulnerability) int {
-	now := time.Now()
+//
+// The `now` argument is the scan-start clock reference (see ScoreInput.Now).
+// Pass a quantized scan-start so two scans on the same UTC day produce
+// identical 30/180/365-day boundary decisions for the same CVE. A zero
+// `now` falls back to time.Now() — used only by legacy test callers that
+// do not exercise day-boundary behavior.
+func lowFixAgeFloor(now time.Time, vulns []scanner.Vulnerability) int {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	floor := 0
 
 	for _, v := range vulns {
@@ -904,7 +943,10 @@ type severityAdjustedResult struct {
 //
 // These weights answer a different question than the per-dep severityWeight
 // table — never unify the two.
-func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
+//
+// The `now` argument is forwarded to severityFloor and lowFixAgeFloor when
+// building the per-dep debug payload. See ScoreInput.Now.
+func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityAdjustedResult {
 	res := severityAdjustedResult{}
 
 	// Track the most-severe post-downgrade CVE so far.
@@ -1003,13 +1045,13 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 		}
 
 		if perDepWorstRaw != "" {
-			floor, _ := severityFloor(ds.Vulns)
+			floor, _ := severityFloor(now, ds.Vulns)
 			res.perDepInputs = append(res.perDepInputs, DebugPerDepInput{
 				Module:           ds.Module,
 				WorstSeverity:    perDepWorstRaw,
 				HighOrAboveCount: perDepHighOrAbove,
 				FloorApplied:     floor,
-				FixAgeAmplifier:  lowFixAgeFloor(ds.Vulns) > 0,
+				FixAgeAmplifier:  lowFixAgeFloor(now, ds.Vulns) > 0,
 				FinalVulnScore:   int(math.Round(ds.VulnScore)),
 				FinalRiskScore:   ds.RiskScore,
 				FinalRiskLevel:   string(ds.RiskLevel),

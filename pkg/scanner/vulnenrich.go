@@ -190,10 +190,16 @@ func (e *VulnEnricher) applyEnrichResult(v *Vulnerability, r *enrichResult) {
 	if r.PublishedAt != nil && v.PublishedAt == nil {
 		v.PublishedAt = r.PublishedAt
 	}
-	// DaysUnpatched: if we have a published time and a FixedVersion,
-	// use the published-at as proxy for when the fix shipped.
-	// A more precise FixPublishedAt would require a separate API call;
-	// this is a conservative approximation used by Task 08.
+	// FixPublishedAt is approximated from the advisory's publication date
+	// (OSV/GHSA `published`), NOT the actual fix release timestamp. The OSV
+	// schema records the fixed version (`affected[].ranges[].events[fixed]`)
+	// but not when that version shipped; deriving the real fix-publication
+	// time would require a separate module-proxy `@v/<ver>.info` lookup per
+	// CVE. For most CVEs the advisory is published close to the fix release,
+	// so the proxy is within days — acceptable for the day-quantized
+	// thresholds in lowFixAgeFloor (30/180/365). Renaming the field would
+	// break downstream JSON consumers; the misnomer is preserved with this
+	// docstring acting as the authoritative caveat.
 	if v.FixedVersion != "" && r.PublishedAt != nil && v.FixPublishedAt == nil {
 		v.FixPublishedAt = r.PublishedAt
 		days := int(e.now().Sub(*r.PublishedAt).Hours() / 24)
@@ -388,21 +394,26 @@ func cvssScoreToTier(score float64) string {
 	}
 }
 
-// parseCVSSScore extracts the numeric base score from a CVSS vector string.
-// OSV stores CVSS as either a plain number ("7.5") or a full vector string
-// ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"). We try a direct parse
-// first, then look for the /S: prefix that indicates a vector.
+// parseCVSSScore extracts a numeric CVSS base score from the string OSV
+// stores under severity[].score. OSV permits two shapes:
+//
+//   - A bare base score ("7.5") — handled here.
+//   - A full CVSS vector ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") —
+//     NOT handled here. The base score is not encoded in the vector; it must
+//     be computed from the impact and exploitability sub-metrics using the
+//     CVSS v3.1 formula (https://www.first.org/cvss/v3.1/specification-document).
+//     Implementing that formula requires either a CVSS library (none currently
+//     vendored) or ~80 lines of math we have deliberately not added.
+//
+// When the input is a vector, parseCVSSScore returns (0, false). The caller
+// falls back to OSV's database_specific.severity (text tier) or to the GHSA
+// advisory's numeric CVSS score, both of which already carry the same
+// information for nearly all Go-ecosystem advisories.
 func parseCVSSScore(s string) (float64, bool) {
 	// Direct numeric value (some OSV entries use just the score).
 	if score, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
 		return score, true
 	}
-	// CVSS vector: the base score is embedded after "CVSS:3.x/" as a
-	// separate element in some serializations, but OSV stores the full
-	// vector and the caller must parse the score from severity[].score.
-	// The actual numeric score for a full CVSS vector requires a CVSS
-	// library; since we don't have one, return false and let the caller
-	// fall back to database_specific or text tier.
 	return 0, false
 }
 

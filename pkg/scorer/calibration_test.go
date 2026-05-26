@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -255,7 +256,7 @@ func buildDeps(in []fixtureDep) []*DependencyScore {
 // half of ScoreAll in pkg/scorer/risk.go.
 func rerunHeadline(deps []*DependencyScore) (mean, sevAdj, overall int, level RiskLevel, driver, worstID, worstSev string) {
 	mean = computeOverallScore(deps)
-	sev := severityAdjustedVulnScore(deps)
+	sev := severityAdjustedVulnScore(time.Now(), deps)
 	sevAdj = sev.score
 	worstID = sev.worstID
 	worstSev = sev.worstSeverity

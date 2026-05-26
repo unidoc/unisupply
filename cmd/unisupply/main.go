@@ -268,6 +268,7 @@ func run(cfg *runConfig) error {
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
 		DebugMode:   cfg.debugScoring,
+		Now:         scanStart,
 	})
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	rep.Done("")

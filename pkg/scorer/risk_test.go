@@ -3,6 +3,7 @@ package scorer
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -485,7 +486,7 @@ func TestIsTrustedNamespace(t *testing.T) {
 func TestScoreDependency_NoRisk(t *testing.T) {
 	dep := testutil.MakeDep("golang.org/x/text", "v1.0.0", true, 0)
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil)
+	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, time.Now())
 
 	// Using trusted namespace should result in minimal risk
 	if ds.RiskScore > 15 {
@@ -506,7 +507,7 @@ func TestScoreDependency_WithVuln(t *testing.T) {
 		testutil.MakeVuln("CVE-2024-1234", "CRITICAL", "v1.1.0"),
 	}
 
-	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil)
+	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil, time.Now())
 
 	if ds.RiskScore < 51 {
 		t.Errorf("expected RiskScore >= 51 (HIGH floor), got %d", ds.RiskScore)
@@ -526,7 +527,7 @@ func TestScoreDependency_TyposquatBonus(t *testing.T) {
 		Confidence: 1.0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil)
+	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil, time.Now())
 
 	// Score should be 0 base + 20 bonus = 20, gets rounded and adjusted
 	// Due to rounding, can be slightly higher
@@ -559,7 +560,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: true,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, time.Now())
 
 		// Score should be 0 base + (100 * 0.15) = 15 bonus.
 		if ds.RiskScore < 15 || ds.RiskScore > 26 {
@@ -585,7 +586,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: false,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, time.Now())
 
 		// Bonus still applied.
 		if ds.RiskScore < 15 {
@@ -606,7 +607,7 @@ func TestScoreDependency_ResilienceBonus(t *testing.T) {
 		Score: 0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil)
+	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, time.Now())
 
 	// Score should be 0 base + (30-0)*0.2 = 6 bonus, can be slightly higher due to rounding
 	if ds.RiskScore < 6 || ds.RiskScore > 17 {
@@ -637,7 +638,7 @@ func TestScoreDependency_CappedAt100(t *testing.T) {
 	aiGen := &scanner.AIGenRisk{Score: 100}
 	resilience := &scanner.ResilienceInfo{Score: 0}
 
-	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil)
+	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil, time.Now())
 
 	if ds.RiskScore > 100 {
 		t.Errorf("expected RiskScore <= 100, got %d", ds.RiskScore)
@@ -653,7 +654,7 @@ func TestScoreDependency_RiskFactors(t *testing.T) {
 	maint := testutil.MakeMaintenanceInfo(36, true, true)
 	maintainer := testutil.MakeMaintainerInfo(1, 5, false)
 
-	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil)
+	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil, time.Now())
 
 	expectedFactors := map[string]bool{
 		"archived":          true,
@@ -927,7 +928,7 @@ func TestScoreDependency_InactiveFlag(t *testing.T) {
 		ActivityPattern:  "inactive",
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil)
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -951,7 +952,7 @@ func TestScoreDependency_TakeoverCandidate(t *testing.T) {
 		TakeoverCandidate: true,
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil)
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -1140,8 +1141,8 @@ func TestScoreDependency_MaintainerDataUnavailable(t *testing.T) {
 		DataAvailable: false,
 	}
 
-	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil)
-	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil)
+	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil, time.Now())
+	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil, time.Now())
 
 	// nil maintainer: 5-weight denominator, unknown penalty included → 26
 	expectedNil := 26
@@ -1278,7 +1279,7 @@ func TestSeverityFloor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
-			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil)
+			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil, time.Now())
 
 			if tt.wantMinScore > 0 && ds.RiskScore < tt.wantMinScore {
 				t.Errorf("RiskScore = %d, want >= %d", ds.RiskScore, tt.wantMinScore)
@@ -1300,7 +1301,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 400 days ago → RiskScore >= 26", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 500, 400, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
 
 		if ds.RiskScore < 26 {
 			t.Errorf("RiskScore = %d, want >= 26 (fix available 400 days ago)", ds.RiskScore)
@@ -1310,7 +1311,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 10 days ago → no amplifier floor", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 30, 10, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
 
 		// 10 days is below the 30-day threshold: amplifier must NOT raise to 26.
 		if ds.RiskScore >= 26 {
@@ -1325,7 +1326,7 @@ func TestUnknownSeverityFloor(t *testing.T) {
 	dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 	vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "UNKNOWN", 90, 0, true)
 	// EnrichmentFailed = true, so the scorer must apply the conservative MEDIUM floor.
-	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil)
+	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
 
 	if ds.RiskScore < 26 {
 		t.Errorf("RiskScore = %d, want >= 26 (conservative floor for enrichment-failed UNKNOWN)", ds.RiskScore)
@@ -2077,5 +2078,68 @@ func TestSeverityFloor_RequiredCritical_NoFloor(t *testing.T) {
 	if ds.RiskLevel == RiskHigh || ds.RiskLevel == RiskCritical {
 		t.Errorf("RiskLevel = %s, want LOW or MEDIUM (required CRITICAL must not promote per-dep level to HIGH/CRITICAL)",
 			ds.RiskLevel)
+	}
+}
+
+// TestRequiredOnly_PerDepBandDrivenByLevelFromScore pins the contract that a
+// dep whose only CVEs are "required" is never floor-promoted by severityFloor:
+// its final RiskLevel is whatever levelFromScore(RiskScore) returns. This
+// triple-checks the three invariants that compose to make that true, so a
+// future tweak to any one of them surfaces here rather than silently shifting
+// the band:
+//
+//  1. severityFloor returns (0, RiskLow) when every CVE is "required" —
+//     regardless of original severity. The required-skip in severityFloor is
+//     load-bearing for the "code never links → don't promote the band" design.
+//  2. vulnScore caps at severityWeight(worst) × 0.3 because the pile-up gate
+//     is w >= 56 and a "required" CRITICAL weighs 30. Adding more required
+//     CRITICALs does NOT raise vulnScore — pinned because the gate constant
+//     would silently re-enable accumulation if reachabilityFactor("required")
+//     is ever retuned upward.
+//  3. End-to-end through scoreDependency: ds.RiskLevel == levelFromScore(ds.RiskScore).
+//     If a future change adds a floor-promotion path for required CVEs, the
+//     equality breaks even when the band happens to coincide.
+func TestRequiredOnly_PerDepBandDrivenByLevelFromScore(t *testing.T) {
+	requiredVulns := []scanner.Vulnerability{
+		makeVulnWithReachability("CVE-2024-RO01", "CRITICAL", "required"),
+		makeVulnWithReachability("CVE-2024-RO02", "CRITICAL", "required"),
+		makeVulnWithReachability("CVE-2024-RO03", "HIGH", "required"),
+	}
+
+	// (1) severityFloor returns (0, RiskLow) for required-only vulns.
+	floor, promoted := severityFloor(time.Now(), requiredVulns)
+	if floor != 0 {
+		t.Errorf("severityFloor(required-only) floor = %d, want 0 (required CVEs must not set a floor)", floor)
+	}
+	if promoted != RiskLow {
+		t.Errorf("severityFloor(required-only) promoted = %s, want %s", promoted, RiskLow)
+	}
+
+	// (2) vulnScore caps at the worst single required weight; pile-up does not fire.
+	// Worst is CRITICAL: 100 × 0.3 = 30. Three required CVEs must produce the same
+	// vulnScore as one — the highOrAboveCount gate (w >= 56) excludes them.
+	single := vulnScore(requiredVulns[:1])
+	all := vulnScore(requiredVulns)
+	if single != 30 {
+		t.Errorf("vulnScore([required CRITICAL]) = %v, want 30 (100 × 0.3)", single)
+	}
+	if all != single {
+		t.Errorf("vulnScore(3× required) = %v, want %v (pile-up must not engage when w < 56)", all, single)
+	}
+
+	// (3) End-to-end: the per-dep RiskLevel equals levelFromScore(RiskScore).
+	// Use a non-trusted namespace so the maturity-trusted shortcut doesn't mask
+	// the assertion, and depth 0 / direct so other components are deterministic.
+	dep := testutil.MakeDep("github.com/required-only/pkg", "v1.0.0", true, 0)
+	ds := scoreDependency(dep, requiredVulns, nil, nil, nil, nil, nil, nil, time.Now())
+
+	wantLevel := levelFromScore(ds.RiskScore)
+	if ds.RiskLevel != wantLevel {
+		t.Errorf("ds.RiskLevel = %s, want %s (= levelFromScore(%d)); required-only CVEs must not floor-promote",
+			ds.RiskLevel, wantLevel, ds.RiskScore)
+	}
+	// Cross-check the design intent: a required-only dep must not surface as HIGH/CRITICAL.
+	if ds.RiskLevel == RiskHigh || ds.RiskLevel == RiskCritical {
+		t.Errorf("ds.RiskLevel = %s, want LOW or MEDIUM for required-only CVEs", ds.RiskLevel)
 	}
 }

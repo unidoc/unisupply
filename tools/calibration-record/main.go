@@ -70,10 +70,8 @@ func main() {
 	// and "_" (0x5F) sorts before any ASCII letter, so _meta is rendered as the
 	// first field of the object without any byte-level splicing. This avoids
 	// the prior assumption that MarshalIndent always emits a "{\n" prefix.
-	if _, exists := body["_meta"]; exists {
-		fmt.Fprintln(os.Stderr, "internal: body already contains _meta after canonicalization")
-		os.Exit(2)
-	}
+	// The earlier _meta-absence check (above the canonicalization) is the
+	// authoritative one; nothing between there and here mutates `body`.
 	body["_meta"] = meta
 
 	fixture, err := json.MarshalIndent(body, "", "  ")

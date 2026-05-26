@@ -32,6 +32,8 @@ linters-settings:
     settings:
       rangeValCopy:
         sizeThreshold: 192
+      hugeParam:
+        sizeThreshold: 192
 
 issues:
   exclude-rules:
