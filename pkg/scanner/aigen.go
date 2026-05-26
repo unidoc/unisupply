@@ -31,11 +31,19 @@ type AIGenRisk struct {
 }
 
 // AIGenScanner detects patterns common in AI-generated supply chain attacks.
-type AIGenScanner struct{}
+type AIGenScanner struct {
+	// ScanStart is the reference time used for age-band calculations.
+	// Truncated to the start of a UTC day so that two scans on the same calendar
+	// day produce identical ageMonths values for the same module. Defaults to
+	// time.Now().UTC().Truncate(24*time.Hour) at construction time.
+	ScanStart time.Time
+}
 
 // NewAIGenScanner creates a new AI-generated code risk scanner.
 func NewAIGenScanner() *AIGenScanner {
-	return &AIGenScanner{}
+	return &AIGenScanner{
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
+	}
 }
 
 // ScanAll checks all dependencies for AI-generated attack indicators.
@@ -99,8 +107,8 @@ func (s *AIGenScanner) analyzeModule(
 	)
 
 	// 1. Recently created module (< 6 months) with a name mimicking established packages.
-	ageMonths := monthsSince(time.Now(), ri.FirstReleaseDate)
-	ageDays := int(time.Since(ri.FirstReleaseDate).Hours() / 24)
+	ageMonths := monthsSince(s.ScanStart, ri.FirstReleaseDate)
+	ageDays := int(s.ScanStart.Sub(ri.FirstReleaseDate).Hours() / 24)
 
 	if ageMonths < 12 {
 		ageMonthsUnder12 = true

@@ -40,14 +40,21 @@ type MaintenanceScanner struct {
 	proxyURL string
 	cache    map[string]*MaintenanceInfo
 	mu       sync.Mutex
+
+	// ScanStart is the reference time used for MonthsSinceRelease calculations.
+	// Truncated to the start of a UTC day so that two scans on the same calendar
+	// day produce identical band results. Defaults to
+	// time.Now().UTC().Truncate(24*time.Hour) at construction time.
+	ScanStart time.Time
 }
 
 // NewMaintenanceScanner creates a new maintenance health scanner.
 func NewMaintenanceScanner(timeout time.Duration) *MaintenanceScanner {
 	return &MaintenanceScanner{
-		client:   NewClient(ClientOptions{Timeout: timeout}),
-		proxyURL: "https://proxy.golang.org",
-		cache:    make(map[string]*MaintenanceInfo),
+		client:    NewClient(ClientOptions{Timeout: timeout}),
+		proxyURL:  "https://proxy.golang.org",
+		cache:     make(map[string]*MaintenanceInfo),
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
 	}
 }
 
@@ -120,7 +127,7 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 	versionInfo, err := ms.fetchVersionInfo(modPath, version)
 	if err == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
-		info.MonthsSinceRelease = monthsSince(time.Now(), versionInfo.Time)
+		info.MonthsSinceRelease = monthsSince(ms.ScanStart, versionInfo.Time)
 	}
 
 	// Check latest version to see if there's a newer release.
@@ -129,7 +136,7 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 		info.LatestVersion = latestVersion
 		if !latestTime.IsZero() {
 			info.LastRelease = latestTime
-			info.MonthsSinceRelease = monthsSince(time.Now(), latestTime)
+			info.MonthsSinceRelease = monthsSince(ms.ScanStart, latestTime)
 		}
 	}
 

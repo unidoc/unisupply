@@ -450,7 +450,8 @@ func TestParseGitHubPath(t *testing.T) {
 
 // TestClassifyActivity verifies activity classification based on last commit time.
 func TestClassifyActivity(t *testing.T) {
-	now := time.Now()
+	// Use a fixed, day-truncated scan-start for deterministic tests.
+	now := time.Now().UTC().Truncate(24 * time.Hour)
 
 	tests := []struct {
 		name             string
@@ -518,12 +519,64 @@ func TestClassifyActivity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyActivity(tt.lastCommit)
+			got := classifyActivity(now, tt.lastCommit)
 			if got != tt.expectedClassify {
 				t.Errorf("classifyActivity(%v) = %q, want %q", tt.lastCommit, got, tt.expectedClassify)
 			}
 		})
 	}
+}
+
+// TestClassifyActivity_StableAcrossClockJitter verifies that band classifications
+// are identical across 100 calls when scanStart is jittered by ±5 minutes within
+// the same UTC day. This is the core determinism guarantee: two scans on the same
+// calendar day must see identical classifications for the same lastCommit.
+func TestClassifyActivity_StableAcrossClockJitter(t *testing.T) {
+	// Use a fixed base day far from clock edges.
+	baseDay := time.Date(2025, time.March, 15, 0, 0, 0, 0, time.UTC)
+	const jitterIterations = 100
+	const maxJitter = 5 * time.Minute
+
+	t.Run("12_month_boundary", func(t *testing.T) {
+		// lastCommit is exactly 12 months minus 1 minute before the start of baseDay.
+		// After truncation all jittered scanStart values equal baseDay, so
+		// monthsSince(baseDay, lastCommit) == 11 → classification must be "sporadic".
+		lastCommit := baseDay.Add(-(12*30*24*time.Hour - time.Minute))
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			// Jitter within ±5 minutes but stay on the same UTC day.
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter // range: [-5m, +5m)
+			jitteredNow := baseDay.Add(jitter)
+			// Truncating to a day must collapse back to baseDay.
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
+
+	t.Run("3_month_boundary", func(t *testing.T) {
+		// lastCommit is exactly 3 months minus 1 minute before the start of baseDay.
+		// monthsSince(baseDay, lastCommit) == 2 → classification must be "active".
+		lastCommit := baseDay.Add(-(3*30*24*time.Hour - time.Minute))
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter
+			jitteredNow := baseDay.Add(jitter)
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
 }
 
 // ============================================================================

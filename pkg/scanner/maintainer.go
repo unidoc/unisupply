@@ -58,16 +58,29 @@ type MaintainerScanner struct {
 	token     string
 	cache     map[string]*MaintainerInfo
 	userCache map[string]*githubUser
+	diskCache *maintainerCache
 	mu        sync.Mutex
+
+	// ScanStart is the reference time used for all age/activity classifications.
+	// It is truncated to the start of a UTC day so that two scans on the same
+	// calendar day produce identical band results for the same lastCommit.
+	// Defaults to time.Now().UTC().Truncate(24*time.Hour) when the scanner is
+	// constructed. Override in tests or from the CLI entry point.
+	ScanStart time.Time
 }
 
-// NewMaintainerScanner creates a new maintainer scanner.
+// NewMaintainerScanner creates a new maintainer scanner with a disk-backed
+// response cache rooted at the OS user cache directory. Consecutive same-day
+// scans will serve GitHub API responses from disk, eliminating per-scan drift
+// caused by GitHub edge-cache variance.
 func NewMaintainerScanner(timeout time.Duration, githubToken string) *MaintainerScanner {
 	return &MaintainerScanner{
 		client:    NewClient(ClientOptions{Timeout: timeout}),
 		token:     githubToken,
 		cache:     make(map[string]*MaintainerInfo),
 		userCache: make(map[string]*githubUser),
+		diskCache: newMaintainerCache("", 0), // defaults: OS cache dir, 24h TTL
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
 	}
 }
 
@@ -212,7 +225,7 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 		}
 	}
 
-	info.ActivityPattern = classifyActivity(info.LastCommitDate)
+	info.ActivityPattern = classifyActivity(ms.ScanStart, info.LastCommitDate)
 
 	// Fetch owner profile (user or org).
 	user := ms.fetchUser(owner)
@@ -304,7 +317,18 @@ func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContr
 	return contributors
 }
 
+// githubGet fetches url from the disk cache when a fresh entry exists (within
+// the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
+// response body on HTTP 200, and returns the body. Non-200 responses are not
+// cached — the error is returned directly to the caller as before.
 func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
+	// Consult the disk cache first.
+	if ms.diskCache != nil {
+		if cached, hit, err := ms.diskCache.Get(url); err == nil && hit {
+			return cached, nil
+		}
+	}
+
 	auth := ""
 	if ms.token != "" {
 		auth = "Bearer " + ms.token
@@ -321,14 +345,24 @@ func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
+
+	// Persist only on success; non-200 responses are never cached.
+	if ms.diskCache != nil {
+		_ = ms.diskCache.Put(url, body) // ignore cache-write errors — not fatal
+	}
+
 	return body, nil
 }
 
-func classifyActivity(lastCommit time.Time) string {
+// classifyActivity returns "active", "sporadic", "inactive", or "unknown"
+// based on the elapsed months between now and lastCommit. now should be the
+// scan-start time (truncated to a UTC day) so that two scans on the same
+// calendar day yield identical classifications for the same lastCommit.
+func classifyActivity(now, lastCommit time.Time) string {
 	if lastCommit.IsZero() {
 		return "unknown"
 	}
-	months := monthsSince(time.Now(), lastCommit)
+	months := monthsSince(now, lastCommit)
 	switch {
 	case months < 3:
 		return "active"

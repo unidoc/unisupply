@@ -53,14 +53,21 @@ type ResilienceScanner struct {
 	proxyURL string
 	cache    map[string]*ResilienceInfo
 	mu       sync.Mutex
+
+	// ScanStart is the reference time used for cadence and age calculations.
+	// Truncated to the start of a UTC day so that two scans on the same calendar
+	// day produce identical classifications. Defaults to
+	// time.Now().UTC().Truncate(24*time.Hour) at construction time.
+	ScanStart time.Time
 }
 
 // NewResilienceScanner creates a new resilience scanner.
 func NewResilienceScanner(timeout time.Duration) *ResilienceScanner {
 	return &ResilienceScanner{
-		client:   NewClient(ClientOptions{Timeout: timeout}),
-		proxyURL: "https://proxy.golang.org",
-		cache:    make(map[string]*ResilienceInfo),
+		client:    NewClient(ClientOptions{Timeout: timeout}),
+		proxyURL:  "https://proxy.golang.org",
+		cache:     make(map[string]*ResilienceInfo),
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
 	}
 }
 
@@ -174,7 +181,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 
 		info.FirstReleaseDate = timestamps[0]
 		info.LastReleaseDate = timestamps[len(timestamps)-1]
-		info.ProjectAgeDays = int(time.Since(info.FirstReleaseDate).Hours() / 24)
+		info.ProjectAgeDays = int(rs.ScanStart.Sub(info.FirstReleaseDate).Hours() / 24)
 
 		if len(timestamps) > 1 {
 			totalDays := info.LastReleaseDate.Sub(info.FirstReleaseDate).Hours() / 24
@@ -183,7 +190,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	}
 
 	// Classify cadence.
-	info.ReleaseCadence = classifyCadence(time.Now(), info)
+	info.ReleaseCadence = classifyCadence(rs.ScanStart, info)
 
 	// Classify version scheme.
 	info.VersionScheme = classifyVersionScheme(versions)

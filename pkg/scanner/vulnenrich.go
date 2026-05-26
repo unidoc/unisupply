@@ -405,8 +405,8 @@ func parseCVSSScore(s string) (float64, bool) {
 
 // --- On-disk 24h cache ---
 
-// cacheEntry is what gets written to / read from each cache file.
-type cacheEntry struct {
+// vulnCacheEntry is what gets written to / read from each vulnerability cache file.
+type vulnCacheEntry struct {
 	FetchedAt time.Time     `json:"fetched_at"`
 	Result    *enrichResult `json:"result"`
 }
@@ -432,7 +432,7 @@ func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 		return nil, false
 	}
 
-	var entry cacheEntry
+	var entry vulnCacheEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return nil, false
 	}
@@ -450,7 +450,7 @@ func (e *VulnEnricher) saveCache(id string, result *enrichResult) {
 		return
 	}
 
-	entry := cacheEntry{
+	entry := vulnCacheEntry{
 		FetchedAt: e.now(),
 		Result:    result,
 	}

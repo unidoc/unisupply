@@ -164,6 +164,11 @@ type runConfig struct {
 }
 
 func run(cfg *runConfig) error {
+	// Compute scan-start time once and floor it to the start of the UTC day.
+	// All scanner age/activity classifications use this value so that two runs
+	// on the same calendar day yield identical band results for the same module.
+	scanStart := time.Now().UTC().Truncate(24 * time.Hour)
+
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
@@ -210,6 +215,7 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
+	maintScanner.ScanStart = scanStart
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
 	if err != nil {
 		rep.Warn("Some maintenance checks failed: %v", err)
@@ -218,6 +224,7 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
+	maintainerScanner.ScanStart = scanStart
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
@@ -228,11 +235,13 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Scoring resilience")
 	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
+	resilienceScanner.ScanStart = scanStart
 	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
 	rep.Done("")
 
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
+	aiGenScanner.ScanStart = scanStart
 	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
 	rep.Done("%d flagged", len(aiGenRisks))
 
