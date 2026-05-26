@@ -91,7 +91,7 @@ func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph,
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := rs.analyzeModule(d.Module.Path)
+			info := rs.analyzeModule(ctx, d.Module.Path)
 
 			// Enrich with maintainer data if available.
 			if mi, ok := maintainers[d.Module.Path]; ok {
@@ -112,7 +112,7 @@ func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph,
 	return results
 }
 
-func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
+func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) *ResilienceInfo {
 	rs.mu.Lock()
 	if cached, ok := rs.cache[modPath]; ok {
 		rs.mu.Unlock()
@@ -125,7 +125,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	// Fetch version list from Go proxy. An empty list means the proxy was
 	// unreachable or returned an error: leave DataAvailable false so callers
 	// know zero-values are not real.
-	versions := rs.fetchVersionList(modPath)
+	versions := rs.fetchVersionList(ctx, modPath)
 	if len(versions) == 0 {
 		rs.mu.Lock()
 		rs.cache[modPath] = info
@@ -143,7 +143,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	majorVersions := make(map[string]bool)
 
 	for _, ver := range versions {
-		t := rs.fetchVersionTime(modPath, ver)
+		t := rs.fetchVersionTime(ctx, modPath, ver)
 		if !t.IsZero() {
 			timestamps = append(timestamps, t)
 		}
@@ -198,7 +198,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	// Check for governance files (if GitHub).
 	owner, repo := parseGitHubPath(modPath)
 	if owner != "" && repo != "" {
-		rs.checkGovernanceFiles(owner, repo, info)
+		rs.checkGovernanceFiles(ctx, owner, repo, info)
 	}
 
 	rs.mu.Lock()
@@ -208,11 +208,11 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	return info
 }
 
-func (rs *ResilienceScanner) fetchVersionList(modPath string) []string {
+func (rs *ResilienceScanner) fetchVersionList(ctx context.Context, modPath string) []string {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/list", rs.proxyURL, escapedPath)
 
-	body, resp, err := rs.client.Get(context.Background(), url, GetOptions{
+	body, resp, err := rs.client.Get(ctx, url, GetOptions{
 		Host: proxyHost(rs.proxyURL),
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -229,11 +229,11 @@ func (rs *ResilienceScanner) fetchVersionList(modPath string) []string {
 	return versions
 }
 
-func (rs *ResilienceScanner) fetchVersionTime(modPath, version string) time.Time {
+func (rs *ResilienceScanner) fetchVersionTime(ctx context.Context, modPath, version string) time.Time {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/%s.info", rs.proxyURL, escapedPath, version)
 
-	body, resp, err := rs.client.Get(context.Background(), url, GetOptions{
+	body, resp, err := rs.client.Get(ctx, url, GetOptions{
 		Host: proxyHost(rs.proxyURL),
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -249,7 +249,7 @@ func (rs *ResilienceScanner) fetchVersionTime(modPath, version string) time.Time
 	return info.Time
 }
 
-func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *ResilienceInfo) {
+func (rs *ResilienceScanner) checkGovernanceFiles(ctx context.Context, owner, repo string, info *ResilienceInfo) {
 	// Check for SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md via GitHub API.
 	files := []struct {
 		path string
@@ -262,7 +262,7 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 
 	for _, f := range files {
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, f.path)
-		resp, err := rs.client.Head(context.Background(), url, GetOptions{
+		resp, err := rs.client.Head(ctx, url, GetOptions{
 			Host: "api.github.com",
 		})
 		if err == nil && resp.StatusCode == http.StatusOK {

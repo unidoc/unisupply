@@ -459,7 +459,7 @@ func TestResilienceScanner_AnalyzeModule_MockProxy(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/testmodule")
+	info := scanner.analyzeModule(context.Background(), "example.com/testmodule")
 
 	if info.TotalReleases != 3 {
 		t.Errorf("expected 3 releases, got %d", info.TotalReleases)
@@ -573,11 +573,11 @@ func TestResilienceScanner_Cache(t *testing.T) {
 	modPath := "example.com/cached"
 
 	// First call should hit the proxy
-	info1 := scanner.analyzeModule(modPath)
+	info1 := scanner.analyzeModule(context.Background(), modPath)
 	firstCallCount := callCount
 
 	// Second call should use cache
-	info2 := scanner.analyzeModule(modPath)
+	info2 := scanner.analyzeModule(context.Background(), modPath)
 	secondCallCount := callCount
 
 	// Should not have made additional proxy calls on second invocation
@@ -680,7 +680,7 @@ func TestResilienceScanner_ProxyError(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/failed")
+	info := scanner.analyzeModule(context.Background(), "example.com/failed")
 
 	// Should return empty info without panicking
 	if info == nil {
@@ -707,7 +707,7 @@ func TestResilienceScanner_DataAvailable_FalseOnNetworkError(t *testing.T) {
 	sc := NewResilienceScanner(5 * time.Second)
 	sc.proxyURL = srv.URL
 
-	info := sc.analyzeModule("example.com/network-fail")
+	info := sc.analyzeModule(context.Background(), "example.com/network-fail")
 
 	if info == nil {
 		t.Fatal("analyzeModule returned nil")
@@ -742,7 +742,7 @@ func TestResilienceScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
 	sc := NewResilienceScanner(5 * time.Second)
 	sc.proxyURL = proxyServer.URL
 
-	info := sc.analyzeModule("example.com/success")
+	info := sc.analyzeModule(context.Background(), "example.com/success")
 
 	if info == nil {
 		t.Fatal("analyzeModule returned nil")
@@ -769,7 +769,7 @@ func TestResilienceScanner_NoVersions(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/noversions")
+	info := scanner.analyzeModule(context.Background(), "example.com/noversions")
 
 	if info.TotalReleases != 0 {
 		t.Errorf("expected 0 releases, got %d", info.TotalReleases)
@@ -818,7 +818,7 @@ func TestResilienceInfo_StableReleaseDetection(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/stable")
+	info := scanner.analyzeModule(context.Background(), "example.com/stable")
 
 	if !info.HasStableRelease {
 		t.Error("expected HasStableRelease to be true for v1.2.3")
@@ -846,7 +846,7 @@ func TestResilienceInfo_MajorVersionCount(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/multiversion")
+	info := scanner.analyzeModule(context.Background(), "example.com/multiversion")
 
 	if info.MajorVersions != 3 {
 		t.Errorf("expected 3 major versions, got %d", info.MajorVersions)
@@ -875,7 +875,7 @@ func TestResilienceInfo_VersionSchemeDetection(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/mixedversions")
+	info := scanner.analyzeModule(context.Background(), "example.com/mixedversions")
 
 	if info.VersionScheme != "mixed" {
 		t.Errorf("expected mixed version scheme, got %s", info.VersionScheme)

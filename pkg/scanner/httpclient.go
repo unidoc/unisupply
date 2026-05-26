@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -119,9 +120,25 @@ func (t *hostPinTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func hostMatches(actual, expected string) bool {
-	a := strings.ToLower(strings.SplitN(actual, ":", 2)[0])
-	e := strings.ToLower(strings.SplitN(expected, ":", 2)[0])
-	return a == e
+	return strings.EqualFold(stripPort(actual), stripPort(expected))
+}
+
+// stripPort returns host without the port, correctly handling IPv6 literals.
+// For "[::1]:8080" → "::1"; for "api.example.com:443" → "api.example.com";
+// for hosts without a port the input is returned unchanged (with brackets
+// stripped if the host is a bare bracketed IPv6 literal like "[::1]").
+func stripPort(host string) string {
+	if host == "" {
+		return host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	// No port present: strip brackets if the input is a bracketed IPv6 literal.
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 // Get issues a GET request with timeout, host pinning, redirect blocking,

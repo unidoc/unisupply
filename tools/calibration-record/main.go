@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,23 +66,25 @@ func main() {
 		"content_sha256":    contentHash,
 	}
 
-	metaJSON, err := json.MarshalIndent(meta, "  ", "  ")
-	must(err)
-	bodyJSON := canon
-
-	if len(bodyJSON) < 2 || bodyJSON[0] != '{' {
-		fmt.Fprintln(os.Stderr, "body is not a JSON object")
+	// Add _meta to the body. json.MarshalIndent sorts map keys lexicographically,
+	// and "_" (0x5F) sorts before any ASCII letter, so _meta is rendered as the
+	// first field of the object without any byte-level splicing. This avoids
+	// the prior assumption that MarshalIndent always emits a "{\n" prefix.
+	if _, exists := body["_meta"]; exists {
+		fmt.Fprintln(os.Stderr, "internal: body already contains _meta after canonicalization")
 		os.Exit(2)
 	}
+	body["_meta"] = meta
 
-	// Compose: {"_meta": <meta>, ...<body fields>}
-	// canon starts with "{\n"; strip those two bytes and splice meta in front.
-	var fixture []byte
-	fixture = append(fixture, '{', '\n')
-	fixture = append(fixture, []byte("  \"_meta\": ")...)
-	fixture = append(fixture, metaJSON...)
-	fixture = append(fixture, ',', '\n')
-	fixture = append(fixture, bodyJSON[2:]...)
+	fixture, err := json.MarshalIndent(body, "", "  ")
+	must(err)
+
+	// Sanity check: _meta must end up as the first field (defends against any
+	// future change in stdlib map-key sort ordering).
+	if !bytes.HasPrefix(fixture, []byte("{\n  \"_meta\":")) {
+		fmt.Fprintln(os.Stderr, "internal: _meta is not the first field in serialized fixture")
+		os.Exit(2)
+	}
 
 	must(os.WriteFile(*out, fixture, 0o600))
 	fmt.Printf("wrote %s (%d bytes, sha256=%s)\n", *out, len(fixture), contentHash)

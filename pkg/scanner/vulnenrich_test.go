@@ -385,6 +385,39 @@ func TestVulnEnrich_LargeResponseCapped(t *testing.T) {
 	// Pass: no panic; warnings may or may not be present depending on parse result.
 }
 
+// TestVulnEnrich_DaysUnpatched_UsesInjectedClock asserts that DaysUnpatched is
+// computed off the enricher's injected clockFn, not wall-clock time.Now. This
+// pins the determinism fix from the PR-30 review: a bare time.Since here
+// breaks the scan-start determinism invariant (commit a5bcce1).
+func TestVulnEnrich_DaysUnpatched_UsesInjectedClock(t *testing.T) {
+	// Fixture: published 2024-01-01. Injected "now" = 2024-04-10 → 100 days.
+	fixture := loadFixture(t, "osv-CVE-2024-23653.json")
+	st := &staticTransport{statusCode: 200, body: string(fixture)}
+
+	frozen := time.Date(2024, 4, 10, 0, 0, 0, 0, time.UTC)
+	clockFn := func() time.Time { return frozen }
+	e := newEnricherWithTransport(t, st, "", clockFn)
+
+	published := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	v := &Vulnerability{
+		ID:           "CVE-2024-23653",
+		Severity:     "UNKNOWN",
+		FixedVersion: "v25.0.2",
+		PublishedAt:  &published,
+	}
+	// Drive the enrichment path that populates DaysUnpatched via
+	// applyEnrichResult. The OSV fixture supplies its own PublishedAt; we
+	// pass the same date so the diff is deterministic.
+	r := &enrichResult{Severity: "HIGH", PublishedAt: &published}
+	e.applyEnrichResult(v, r)
+
+	want := 100
+	if v.DaysUnpatched != want {
+		t.Errorf("DaysUnpatched = %d (using clockFn=%v, published=%v); want %d",
+			v.DaysUnpatched, frozen, published, want)
+	}
+}
+
 // --- Validate ID: boundary case exactly 100 chars should pass ---
 
 func TestValidateVulnID_BoundaryLength(t *testing.T) {

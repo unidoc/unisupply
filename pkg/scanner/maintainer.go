@@ -158,7 +158,7 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := ms.analyzeRepo(owner, repo)
+			info := ms.analyzeRepo(ctx, owner, repo)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
@@ -174,7 +174,7 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	return results
 }
 
-func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
+func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string) *MaintainerInfo {
 	cacheKey := owner + "/" + repo
 	ms.mu.Lock()
 	if cached, ok := ms.cache[cacheKey]; ok {
@@ -190,7 +190,7 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 
 	// Fetch repo info. On any failure (network error, 403, 404, etc.) we
 	// leave DataAvailable as false so callers know zero-values are not real.
-	repoData, err := ms.fetchRepo(owner, repo)
+	repoData, err := ms.fetchRepo(ctx, owner, repo)
 	if err != nil {
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
@@ -228,7 +228,7 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 	info.ActivityPattern = classifyActivity(ms.ScanStart, info.LastCommitDate)
 
 	// Fetch owner profile (user or org).
-	user := ms.fetchUser(owner)
+	user := ms.fetchUser(ctx, owner)
 	if user != nil {
 		info.OwnerName = user.Name
 		if info.OwnerName == "" {
@@ -244,7 +244,7 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 	info.BusinessModel = classifyBusinessModel(info, repoData)
 
 	// Fetch contributors for bus factor analysis.
-	contributors := ms.fetchContributors(owner, repo)
+	contributors := ms.fetchContributors(ctx, owner, repo)
 	info.ContributorCount = len(contributors)
 	info.BusFactor = computeBusFactor(contributors)
 
@@ -266,9 +266,9 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 	return info
 }
 
-func (ms *MaintainerScanner) fetchRepo(owner, repo string) (*githubRepo, error) {
+func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) (*githubRepo, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (ms *MaintainerScanner) fetchRepo(owner, repo string) (*githubRepo, error) 
 	return &result, nil
 }
 
-func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
+func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githubUser {
 	ms.mu.Lock()
 	if cached, ok := ms.userCache[login]; ok {
 		ms.mu.Unlock()
@@ -288,7 +288,7 @@ func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
 	ms.mu.Unlock()
 
 	url := fmt.Sprintf("https://api.github.com/users/%s", login)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil
 	}
@@ -304,9 +304,9 @@ func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
 	return &user
 }
 
-func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContributor {
+func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo string) []githubContributor {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contributors?per_page=100", owner, repo)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil
 	}
@@ -321,7 +321,7 @@ func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContr
 // the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
 // response body on HTTP 200, and returns the body. Non-200 responses are not
 // cached — the error is returned directly to the caller as before.
-func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
+func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte, error) {
 	// Consult the disk cache first.
 	if ms.diskCache != nil {
 		if cached, hit, err := ms.diskCache.Get(url); err == nil && hit {
@@ -333,7 +333,7 @@ func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
 	if ms.token != "" {
 		auth = "Bearer " + ms.token
 	}
-	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+	body, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host:       "api.github.com",
 		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
 		AuthHeader: auth,

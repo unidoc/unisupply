@@ -93,7 +93,7 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info, err := ms.checkModule(d.Module.Path, d.Module.Version)
+			info, err := ms.checkModule(ctx, d.Module.Path, d.Module.Version)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if err != nil {
@@ -113,7 +113,7 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 	return results, firstErr
 }
 
-func (ms *MaintenanceScanner) checkModule(modPath, version string) (*MaintenanceInfo, error) {
+func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version string) (*MaintenanceInfo, error) {
 	ms.mu.Lock()
 	if cached, ok := ms.cache[modPath]; ok {
 		ms.mu.Unlock()
@@ -124,14 +124,14 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 	info := &MaintenanceInfo{}
 
 	// Get version info for the specific version used.
-	versionInfo, err := ms.fetchVersionInfo(modPath, version)
+	versionInfo, err := ms.fetchVersionInfo(ctx, modPath, version)
 	if err == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
 		info.MonthsSinceRelease = monthsSince(ms.ScanStart, versionInfo.Time)
 	}
 
 	// Check latest version to see if there's a newer release.
-	latestVersion, latestTime := ms.fetchLatestVersion(modPath)
+	latestVersion, latestTime := ms.fetchLatestVersion(ctx, modPath)
 	if latestVersion != "" {
 		info.LatestVersion = latestVersion
 		if !latestTime.IsZero() {
@@ -141,7 +141,7 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 	}
 
 	// Check for deprecation via the @latest endpoint.
-	ms.checkDeprecation(modPath, info)
+	ms.checkDeprecation(ctx, modPath, info)
 
 	ms.mu.Lock()
 	ms.cache[modPath] = info
@@ -150,11 +150,11 @@ func (ms *MaintenanceScanner) checkModule(modPath, version string) (*Maintenance
 	return info, nil
 }
 
-func (ms *MaintenanceScanner) fetchVersionInfo(modPath, version string) (*proxyVersionInfo, error) {
+func (ms *MaintenanceScanner) fetchVersionInfo(ctx context.Context, modPath, version string) (*proxyVersionInfo, error) {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, escapedPath, version)
 
-	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+	body, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host: proxyHost(ms.proxyURL),
 	})
 	if err != nil {
@@ -172,11 +172,11 @@ func (ms *MaintenanceScanner) fetchVersionInfo(modPath, version string) (*proxyV
 	return &info, nil
 }
 
-func (ms *MaintenanceScanner) fetchLatestVersion(modPath string) (string, time.Time) {
+func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath string) (string, time.Time) {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@latest", ms.proxyURL, escapedPath)
 
-	body, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+	body, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host: proxyHost(ms.proxyURL),
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
@@ -191,14 +191,14 @@ func (ms *MaintenanceScanner) fetchLatestVersion(modPath string) (string, time.T
 	return info.Version, info.Time
 }
 
-func (ms *MaintenanceScanner) checkDeprecation(modPath string, info *MaintenanceInfo) {
+func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath string, info *MaintenanceInfo) {
 	// The Go module proxy @latest endpoint may include deprecation info
 	// in the response headers or body. For MVP, we check if the module
 	// returns a 410 Gone status, which indicates it's been retracted.
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/list", ms.proxyURL, escapedPath)
 
-	_, resp, err := ms.client.Get(context.Background(), url, GetOptions{
+	_, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host: proxyHost(ms.proxyURL),
 	})
 	if err != nil {

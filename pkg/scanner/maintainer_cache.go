@@ -98,7 +98,10 @@ func (c *maintainerCache) ensureDir() bool {
 	if c.disabled {
 		return false
 	}
-	if err := os.MkdirAll(c.dir, 0o750); err != nil {
+	// 0o700 matches the file mode used for cache entries (and the vulnenrich
+	// cache) — cached GitHub API bodies can contain non-public metadata, so
+	// the directory must not be group/world-readable.
+	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		log.Printf("maintainer cache: cannot create directory %q: %v — caching disabled for this scan", c.dir, err)
 		c.disabled = true
 		return false
@@ -173,12 +176,34 @@ func (c *maintainerCache) Put(url string, body []byte) error {
 		return fmt.Errorf("maintainer cache: marshaling entry for %s: %w", url, err)
 	}
 
-	// Write to a per-key temp file, then rename atomically.
+	// Write to a per-key temp file, then rename. We use os.CreateTemp in the
+	// same directory so the rename stays on the same filesystem (atomic on
+	// POSIX). On Windows, os.Rename across an existing destination is best-
+	// effort: we remove the target first to avoid platforms / filesystems that
+	// reject rename-over-existing. The Remove error is intentionally ignored —
+	// a missing target is the common case.
 	final := c.cacheFilePath(url)
-	tmp := final + ".tmp." + fmt.Sprintf("%d", c.now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tmpFile, err := os.CreateTemp(c.dir, cacheKey(url)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("maintainer cache: creating temp file: %w", err)
+	}
+	tmp := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
 		return fmt.Errorf("maintainer cache: writing temp file: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("maintainer cache: closing temp file: %w", err)
+	}
+	// os.CreateTemp uses 0o600 on Unix; tighten explicitly for any platform
+	// where the default differs.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("maintainer cache: chmod temp file: %w", err)
+	}
+	_ = os.Remove(final) // best-effort; safe to ignore "not exists"
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp) // best-effort cleanup
 		return fmt.Errorf("maintainer cache: renaming cache file: %w", err)

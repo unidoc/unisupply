@@ -130,7 +130,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	// Try cache first.
 	if cached, ok := e.loadCache(v.ID); ok {
-		applyEnrichResult(v, cached)
+		e.applyEnrichResult(v, cached)
 		return warnings
 	}
 
@@ -140,7 +140,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	if osvResult != nil && osvResult.Severity != "" {
 		e.saveCache(v.ID, osvResult)
-		applyEnrichResult(v, osvResult)
+		e.applyEnrichResult(v, osvResult)
 		return warnings
 	}
 
@@ -159,7 +159,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 		if ghsaResult != nil && ghsaResult.Severity != "" {
 			e.saveCache(v.ID, ghsaResult)
-			applyEnrichResult(v, ghsaResult)
+			e.applyEnrichResult(v, ghsaResult)
 			return warnings
 		}
 	}
@@ -179,8 +179,11 @@ type enrichResult struct {
 	ModifiedAt  *time.Time `json:"modified_at,omitempty"`
 }
 
-// applyEnrichResult copies enrichResult fields into v.
-func applyEnrichResult(v *Vulnerability, r *enrichResult) {
+// applyEnrichResult copies enrichResult fields into v. DaysUnpatched is
+// computed from e.now() rather than time.Now so it uses the same clock as the
+// cache TTL check (deterministic under injected fakes — required by the
+// scan-start determinism invariant in commit a5bcce1).
+func (e *VulnEnricher) applyEnrichResult(v *Vulnerability, r *enrichResult) {
 	if r.Severity != "" {
 		v.Severity = r.Severity
 	}
@@ -193,7 +196,7 @@ func applyEnrichResult(v *Vulnerability, r *enrichResult) {
 	// this is a conservative approximation used by Task 08.
 	if v.FixedVersion != "" && r.PublishedAt != nil && v.FixPublishedAt == nil {
 		v.FixPublishedAt = r.PublishedAt
-		days := int(time.Since(*r.PublishedAt).Hours() / 24)
+		days := int(e.now().Sub(*r.PublishedAt).Hours() / 24)
 		if days < 0 {
 			days = 0
 		}

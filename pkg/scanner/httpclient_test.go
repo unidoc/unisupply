@@ -173,6 +173,19 @@ func TestHTTPClient_HostMatchesIgnoresPort(t *testing.T) {
 	if hostMatches("evil.com", "good.com") {
 		t.Error("different hosts must not match")
 	}
+	// IPv6 literals must round-trip through net.SplitHostPort and bracket-strip.
+	if !hostMatches("[::1]:8080", "[::1]") {
+		t.Error("IPv6 host-with-port should match bracketed IPv6 without port")
+	}
+	if !hostMatches("[::1]:8080", "::1") {
+		t.Error("IPv6 host-with-port should match unbracketed IPv6 without port")
+	}
+	if !hostMatches("[2001:db8::1]:443", "2001:db8::1") {
+		t.Error("IPv6 host-with-port should match canonical IPv6 host")
+	}
+	if hostMatches("[::1]:80", "[::2]") {
+		t.Error("different IPv6 hosts must not match")
+	}
 }
 
 func mustHost(t *testing.T, raw string) string {

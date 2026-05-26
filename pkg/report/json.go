@@ -379,14 +379,16 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		report.Deps = append(report.Deps, jd)
 	}
 
-	// Initialize top-level finding arrays to empty slices (never omitted, even when
-	// the CI scanner was not run). This allows consumers to distinguish "scanner ran,
-	// no findings" from "scanner was not invoked".
-	report.CIFindings = []JSONFlatFinding{}
-	report.BuildFileFindings = []JSONFlatFinding{}
+	// CI/CD assessment. When the scanner ran (opts.CIReport != nil) we emit the
+	// assessment object and the top-level flat-finding arrays — even with zero
+	// findings, so consumers see counts/scores of 0 and empty `[]` arrays. When
+	// the scanner did not run, ci_cd_assessment is omitted and the flat arrays
+	// stay nil (serialize as null/absent), so "scanner ran with no findings" is
+	// distinguishable from "scanner was not invoked".
+	if opts.CIReport != nil {
+		report.CIFindings = []JSONFlatFinding{}
+		report.BuildFileFindings = []JSONFlatFinding{}
 
-	// CI/CD assessment.
-	if opts.CIReport != nil && (len(opts.CIReport.Workflows) > 0 || len(opts.CIReport.BuildFindings) > 0) {
 		ciJSON := &JSONCIReport{
 			OverallScore:      opts.CIReport.OverallScore,
 			OverallLevel:      string(opts.CIReport.OverallLevel),
