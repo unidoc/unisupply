@@ -137,6 +137,42 @@ Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL**
 | CycloneDX SBOM        | `--format sbom-cyclonedx`  | Standard CycloneDX 1.5 software bill of materials   |
 | SPDX SBOM             | `--format sbom-spdx`       | SPDX 2.3 software bill of materials                 |
 
+The JSON output includes per-CVE reachability information. Each vulnerability
+entry carries a `reachability` field (`"called"`, `"imported"`, or
+`"required"`) that reflects how deeply the vulnerable symbol is reachable in
+your build's call graph — see
+[docs/scanners.md § Vulnerability reachability](docs/scanners.md#vulnerability-reachability)
+for the exact definitions and scoring effect.
+
+```json
+{
+  "module": "golang.org/x/net",
+  "version": "v0.35.0",
+  "risk_score": 72,
+  "risk_level": "HIGH",
+  "vulnerabilities": [
+    {
+      "id": "GO-2025-0001",
+      "aliases": ["CVE-2025-12345"],
+      "summary": "HTTP/2 request smuggling in golang.org/x/net/http2",
+      "severity": "HIGH",
+      "fixed_version": "v0.36.0",
+      "reachability": "called"
+    },
+    {
+      "id": "GO-2025-0002",
+      "aliases": ["CVE-2025-67890"],
+      "summary": "DoS in unused websocket handler",
+      "severity": "MEDIUM",
+      "fixed_version": "v0.36.0",
+      "reachability": "imported"
+    }
+  ]
+}
+```
+
+Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
+
 ## Policy engine
 
 `unisupply` ships two presets and accepts a custom JSON policy file. Policy
