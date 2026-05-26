@@ -79,10 +79,12 @@ func main() {
 	fixture, err := json.MarshalIndent(body, "", "  ")
 	must(err)
 
-	// Sanity check: _meta must end up as the first field (defends against any
-	// future change in stdlib map-key sort ordering).
-	if !bytes.HasPrefix(fixture, []byte("{\n  \"_meta\":")) {
-		fmt.Fprintln(os.Stderr, "internal: _meta is not the first field in serialized fixture")
+	// Sanity check: _meta must end up as the first field. Decode the first two
+	// tokens (a '{' delimiter, then the first key) rather than matching exact
+	// byte prefixes — that way cosmetic stdlib indentation tweaks don't trip
+	// the check.
+	if err := requireFirstKey(fixture, "_meta"); err != nil {
+		fmt.Fprintln(os.Stderr, "internal: ", err)
 		os.Exit(2)
 	}
 
@@ -95,4 +97,30 @@ func must(err error) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// requireFirstKey verifies that the JSON object encoded in data has want as
+// its very first key. Token-based so future MarshalIndent format tweaks
+// (different whitespace, newline conventions) do not break the check.
+func requireFirstKey(data []byte, want string) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	openTok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("decoding fixture: %w", err)
+	}
+	if d, ok := openTok.(json.Delim); !ok || d != '{' {
+		return fmt.Errorf("fixture root is not a JSON object (got %v)", openTok)
+	}
+	keyTok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("reading first key: %w", err)
+	}
+	got, ok := keyTok.(string)
+	if !ok {
+		return fmt.Errorf("first token after '{' is not a string key (got %v)", keyTok)
+	}
+	if got != want {
+		return fmt.Errorf("first key = %q, want %q", got, want)
+	}
+	return nil
 }

@@ -81,7 +81,7 @@ func TestClassifyTestOnlyDeps_GoListFailure(t *testing.T) {
 		},
 	}
 
-	warn := classifyTestOnlyDeps(dir, graph)
+	warn := classifyTestOnlyDeps(context.Background(), dir, graph)
 
 	// A warning must be emitted when go list fails.
 	if warn == "" {
@@ -114,7 +114,7 @@ func TestClassifyTestOnlyDeps_NilOnUnknownModules(t *testing.T) {
 	}
 
 	// go list will fail in the empty dir, so IsTestOnly stays nil.
-	_ = classifyTestOnlyDeps(dir, graph)
+	_ = classifyTestOnlyDeps(context.Background(), dir, graph)
 	if dep.IsTestOnly != nil {
 		t.Errorf("IsTestOnly = %v, want nil for dep not reached by go list", dep.IsTestOnly)
 	}

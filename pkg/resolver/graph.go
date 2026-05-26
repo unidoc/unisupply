@@ -112,7 +112,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 	// best-effort enrichment: if it fails (air-gapped CI, vendor-only mode,
 	// network issue), IsTestOnly stays nil on all deps and a warning is
 	// appended so the caller knows the discount cannot be applied.
-	if listWarn := classifyTestOnlyDeps(filepath.Dir(gomodPath), graph); listWarn != "" {
+	if listWarn := classifyTestOnlyDeps(ctx, filepath.Dir(gomodPath), graph); listWarn != "" {
 		warnings = append(warnings, listWarn)
 	}
 
@@ -264,15 +264,15 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 // dep's IsTestOnly remains nil — the scorer (Task 10) must not apply a
 // test-only discount when the field is nil (unknown). Under-discounting is
 // safer than a silent wrong discount on an unverified classification.
-func classifyTestOnlyDeps(dir string, graph *Graph) string {
+func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string {
 	// Collect production (non-test) module paths.
-	prodMods, err := listModulePaths(dir, false)
+	prodMods, err := listModulePaths(ctx, dir, false)
 	if err != nil {
 		return fmt.Sprintf("go list (production) failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
 	}
 
 	// Collect module paths including test imports.
-	allMods, err := listModulePaths(dir, true)
+	allMods, err := listModulePaths(ctx, dir, true)
 	if err != nil {
 		return fmt.Sprintf("go list -test failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
 	}
@@ -312,14 +312,14 @@ func classifyTestOnlyDeps(dir string, graph *Graph) string {
 // in dir (with -test if withTest is true) and returns the unique set of module
 // paths referenced by the package graph. An error is returned when go list
 // fails (non-zero exit, unavailable Go toolchain, network timeout, etc.).
-func listModulePaths(dir string, withTest bool) (map[string]struct{}, error) {
+func listModulePaths(ctx context.Context, dir string, withTest bool) (map[string]struct{}, error) {
 	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}"}
 	if withTest {
 		args = append(args, "-test")
 	}
 	args = append(args, "all")
 
-	cmd := exec.Command("go", args...)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
 
 	out, err := cmd.Output()

@@ -60,8 +60,10 @@ func newMaintainerCache(dir string, ttl time.Duration) *maintainerCache {
 		base, err := os.UserCacheDir()
 		if err != nil {
 			// os.UserCacheDir returning an error is rare (HOME not set, etc.).
-			// Fall back to a temp-based path so the scan can still proceed.
-			base = filepath.Join(os.TempDir(), "unisupply")
+			// Fall back to TempDir so the scan can still proceed. The single
+			// filepath.Join below appends "unisupply/maintainer" exactly once,
+			// regardless of which branch produced `base`.
+			base = os.TempDir()
 		}
 		dir = filepath.Join(base, "unisupply", "maintainer")
 	}

@@ -141,6 +141,15 @@ var reachabilityRank = map[string]int{
 //   - "called"   when trace[0].Function is set or any frame has Position set.
 //   - "imported" when trace[0].Package is set but Function is empty.
 //   - "required" when only trace[0].Module is set.
+//
+// The rule structure follows govulncheck's emitted JSON shape: a frame with
+// `position` set means the analyzer resolved a static call site, `package`
+// without `function` means import-only, `module` alone means the vulnerable
+// module is required but no package from it is reached by the build. If
+// govulncheck's frame schema changes in a future release, revisit this
+// classifier — the current rules are coupled to that representation. See
+// the `Finding.Trace[]` schema documented in the govulncheck source
+// (golang.org/x/vuln/internal/govulncheck) for the authoritative shape.
 func classifyReachability(trace []traceEntry) string {
 	if len(trace) == 0 {
 		return "required"
