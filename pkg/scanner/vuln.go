@@ -13,12 +13,43 @@ import (
 )
 
 // Vulnerability represents a known vulnerability for a module.
+//
+// # Reachability semantics
+//
+// The Reachability field classifies how close the vulnerable code is to the
+// call sites in the scanned project. Allowed values, in descending severity:
+//
+//   - "called"   — a vulnerable function is directly called somewhere in the
+//     project; govulncheck resolved a full call path ending at the vulnerable
+//     symbol (trace[0].Function is non-empty or a Position was recorded).
+//   - "imported" — the vulnerable package is imported by the project but the
+//     vulnerable function itself is not reachable in the static call graph
+//     (trace[0].Package is set, Function is empty).
+//   - "required" — the module is present in the module graph but no package
+//     from it is imported (trace contains only a Module entry).
+//   - ""         — reachability was not determined; the vulnerability was
+//     sourced from a mechanism other than govulncheck (e.g. a future enrichment
+//     pass or a manually injected record). The scorer treats an empty value as
+//     "called" for backward compatibility, giving it the highest weight.
+//
+// Static-analysis caveat: "not called" does not mean "not exploitable".
+// govulncheck performs whole-program analysis on the static call graph, which
+// cannot account for dynamic dispatch via reflection, plugin loading,
+// build-tag-gated code paths, generated code, or opaque-interface receivers
+// resolved only at runtime. Any of these patterns can hide a genuine call that
+// govulncheck classifies as "imported" or "required". Treat those levels as a
+// lower-confidence signal, not as evidence the vulnerability is unexploitable.
+// See https://go.dev/blog/govulncheck for govulncheck's stated precision limits.
 type Vulnerability struct {
 	ID           string   `json:"id"`
 	Aliases      []string `json:"aliases"`
 	Summary      string   `json:"summary"`
 	Severity     string   `json:"severity"`
 	FixedVersion string   `json:"fixed_version,omitempty"`
+
+	// Reachability is one of "called", "imported", "required", or "".
+	// See the type-level doc comment for full semantics and caveats.
+	Reachability string `json:"reachability,omitempty"`
 
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
 
@@ -75,20 +106,70 @@ type gvcOSV struct {
 	} `json:"affected"`
 }
 
+// traceEntry is one frame in a govulncheck call-trace path.
+type traceEntry struct {
+	Module   string `json:"module,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Package  string `json:"package,omitempty"`
+	Function string `json:"function,omitempty"`
+	Position *struct {
+		Filename string `json:"filename"`
+		Line     int    `json:"line"`
+		Column   int    `json:"column"`
+	} `json:"position,omitempty"`
+}
+
 type gvcFinding struct {
-	OSV   string `json:"osv"`
-	Trace []struct {
-		Module  string `json:"module,omitempty"`
-		Version string `json:"version,omitempty"`
-		Package string `json:"package,omitempty"`
-	} `json:"trace"`
-	FixedVersion string `json:"fixed_version,omitempty"`
+	OSV          string       `json:"osv"`
+	Trace        []traceEntry `json:"trace"`
+	FixedVersion string       `json:"fixed_version,omitempty"`
+}
+
+// reachabilityRank maps reachability levels to a numeric rank for comparison.
+// Higher rank = higher severity of reachability.
+var reachabilityRank = map[string]int{
+	"required": 1,
+	"imported": 2,
+	"called":   3,
+}
+
+// classifyReachability inspects the trace from govulncheck and returns one of
+// "called", "imported", or "required" to describe how close the vulnerable code
+// is to the caller.
+//
+// Rules (trace[0] is the deepest/innermost frame):
+//   - "called"   when trace[0].Function is set or any frame has Position set.
+//   - "imported" when trace[0].Package is set but Function is empty.
+//   - "required" when only trace[0].Module is set.
+func classifyReachability(trace []traceEntry) string {
+	if len(trace) == 0 {
+		return "required"
+	}
+
+	// Any frame with a resolved call site means the function was called.
+	for _, t := range trace {
+		if t.Position != nil {
+			return "called"
+		}
+	}
+
+	if trace[0].Function != "" {
+		return "called"
+	}
+	if trace[0].Package != "" {
+		return "imported"
+	}
+	return "required"
 }
 
 // ScanVulns runs govulncheck on the project directory, then enriches any
 // UNKNOWN-severity vulnerabilities via OSV.dev and the GitHub Advisory API.
 // githubToken may be empty; enrichment proceeds unauthenticated in that case
 // (OSV does not require authentication; GHSA fallback works but is rate-limited).
+//
+// The default govulncheck invocation (-json ./...) already emits all three
+// reachability levels (called, imported, required) in the JSON stream — no
+// additional CLI flag is needed to enable reachability data.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
 	var stdout bytes.Buffer
 
@@ -157,7 +238,10 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 
 	// Build results: for each finding, look up the OSV and extract module info.
 	results := make(map[string][]Vulnerability)
-	seen := make(map[string]bool) // "module@osvID" dedup
+	// seenIdx maps "module@osvID" to the index of its entry in results[modPath],
+	// allowing dedup to upgrade reachability when a higher-rank duplicate appears
+	// (called > imported > required — keep the most severe signal).
+	seenIdx := make(map[string]int)
 
 	for _, f := range findings {
 		osv, ok := osvs[f.OSV]
@@ -192,11 +276,16 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			}
 		}
 
+		reach := classifyReachability(f.Trace)
 		key := modPath + "@" + osv.ID
-		if seen[key] {
+
+		if idx, exists := seenIdx[key]; exists {
+			// Duplicate finding: upgrade reachability if this occurrence ranks higher.
+			if reachabilityRank[reach] > reachabilityRank[results[modPath][idx].Reachability] {
+				results[modPath][idx].Reachability = reach
+			}
 			continue
 		}
-		seen[key] = true
 
 		severity := severityFromOSV(osv, modPath)
 		fixedVersion := f.FixedVersion
@@ -210,6 +299,7 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			Summary:      osv.Summary,
 			Severity:     severity,
 			FixedVersion: fixedVersion,
+			Reachability: reach,
 		}
 
 		// Capture the publication timestamp from the govulncheck OSV record.
@@ -219,6 +309,7 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			}
 		}
 
+		seenIdx[key] = len(results[modPath])
 		results[modPath] = append(results[modPath], vuln)
 	}
 

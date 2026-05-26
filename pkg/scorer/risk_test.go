@@ -1720,3 +1720,362 @@ func TestTwoAxis_DiagnosticsPopulated(t *testing.T) {
 		}
 	})
 }
+
+// TestScoreAll_DeterministicWorstCVE verifies that ScoreAll produces identical
+// output across consecutive invocations on the same input, even when two
+// dependencies each carry a disjoint CRITICAL CVE (forcing the tie-breaker in
+// severityAdjustedVulnScore to operate). The test guards against regressions to
+// the non-deterministic map-iteration behavior that was present before the
+// sorted-keys fix in ScoreAll.
+func TestScoreAll_DeterministicWorstCVE(t *testing.T) {
+	// Two deps with distinct CRITICAL CVE IDs on disjoint OSV IDs. The
+	// tie-breaker must always choose the CVE from the lexicographically earlier
+	// module ("github.com/alpha/pkg" < "github.com/zeta/pkg").
+	depAlpha := testutil.DepSpec{
+		Path:       "github.com/alpha/pkg",
+		Version:    "v1.0.0",
+		Direct:     true,
+		Depth:      0,
+		IsTestOnly: testutil.BoolPtr(false),
+	}
+	depZeta := testutil.DepSpec{
+		Path:       "github.com/zeta/pkg",
+		Version:    "v2.0.0",
+		Direct:     true,
+		Depth:      0,
+		IsTestOnly: testutil.BoolPtr(false),
+	}
+	graph := testutil.MakeGraph(depAlpha, depZeta)
+
+	input := ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	}
+	// Each dep has exactly one CRITICAL CVE with a disjoint OSV ID so the
+	// tie-breaker cannot fall through to a lower severity.
+	input.Vulns["github.com/alpha/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("GO-2024-0001", "CRITICAL", "v1.0.1"),
+	}
+	input.Vulns["github.com/zeta/pkg"] = []scanner.Vulnerability{
+		testutil.MakeVuln("GO-2024-9999", "CRITICAL", "v2.0.1"),
+	}
+
+	// Run ScoreAll ten times and assert that all results are identical.
+	const runs = 10
+	first := ScoreAll(input)
+
+	for i := 1; i < runs; i++ {
+		got := ScoreAll(input)
+
+		if got.WorstCVEID != first.WorstCVEID {
+			t.Errorf("run %d: WorstCVEID = %q, want %q (non-deterministic tie-breaker)",
+				i+1, got.WorstCVEID, first.WorstCVEID)
+		}
+
+		if len(got.Dependencies) != len(first.Dependencies) {
+			t.Fatalf("run %d: len(Dependencies) = %d, want %d",
+				i+1, len(got.Dependencies), len(first.Dependencies))
+		}
+		for j, ds := range got.Dependencies {
+			if ds.Module != first.Dependencies[j].Module {
+				t.Errorf("run %d: Dependencies[%d].Module = %q, want %q (non-deterministic order)",
+					i+1, j, ds.Module, first.Dependencies[j].Module)
+			}
+		}
+	}
+
+	// The tie-breaker must consistently pick the CVE from the
+	// lexicographically earlier module path.
+	if first.WorstCVEID != "GO-2024-0001" {
+		t.Errorf("WorstCVEID = %q, want GO-2024-0001 (alpha < zeta)", first.WorstCVEID)
+	}
+
+	// Dependencies must be in sorted module-path order.
+	if len(first.Dependencies) != 2 {
+		t.Fatalf("len(Dependencies) = %d, want 2", len(first.Dependencies))
+	}
+	if first.Dependencies[0].Module != "github.com/alpha/pkg" {
+		t.Errorf("Dependencies[0].Module = %q, want github.com/alpha/pkg", first.Dependencies[0].Module)
+	}
+	if first.Dependencies[1].Module != "github.com/zeta/pkg" {
+		t.Errorf("Dependencies[1].Module = %q, want github.com/zeta/pkg", first.Dependencies[1].Module)
+	}
+}
+
+// makeVulnWithReachability constructs a scanner.Vulnerability with the given
+// id, severity, and reachability tier. All other fields are left at zero
+// values.
+func makeVulnWithReachability(id, severity, reachability string) scanner.Vulnerability {
+	return scanner.Vulnerability{
+		ID:           id,
+		Severity:     severity,
+		Reachability: reachability,
+	}
+}
+
+// reachabilityScoreInput builds a ScoreInput containing a single dep at the
+// given module path with the provided vulns. It uses 0 clean background deps
+// so the step function is driven only by the supplied CVEs.
+func reachabilityScoreInput(modPath string, isTestOnly *bool, vulns []scanner.Vulnerability) ScoreInput {
+	spec := testutil.DepSpec{
+		Path:       modPath,
+		Version:    "v1.0.0",
+		Direct:     true,
+		Depth:      0,
+		IsTestOnly: isTestOnly,
+	}
+	graph := testutil.MakeGraph(spec)
+	input := ScoreInput{
+		Graph:       graph,
+		Vulns:       map[string][]scanner.Vulnerability{modPath: vulns},
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	}
+	return input
+}
+
+// ---------------------------------------------------------------------------
+// Step-function tests: reachability downgrade in severityAdjustedVulnScore
+// ---------------------------------------------------------------------------
+
+// TestSeverityAdjusted_SingleCalledCritical_StaysAt95 verifies that a called
+// (or empty-Reachability) CRITICAL CVE passes through the step function
+// unchanged and produces severity_adjusted == 95.
+func TestSeverityAdjusted_SingleCalledCritical_StaysAt95(t *testing.T) {
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-0001", "CRITICAL", "called"),
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 95 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 95 (called CRITICAL → no downgrade → step CRITICAL → 95)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// TestSeverityAdjusted_SingleImportedCritical_Becomes70 verifies that a
+// CRITICAL CVE with reachability "imported" is downgraded one tier to HIGH and
+// produces severity_adjusted == 70 (1–2 HIGH → 70 in the step function).
+func TestSeverityAdjusted_SingleImportedCritical_Becomes70(t *testing.T) {
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-0002", "CRITICAL", "imported"),
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 70 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 70 (imported CRITICAL → HIGH → step 1–2 HIGH → 70)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// TestSeverityAdjusted_SingleRequiredCritical_Becomes40 verifies that a
+// CRITICAL CVE with reachability "required" is downgraded two tiers to MEDIUM
+// and produces severity_adjusted == 40 (any MEDIUM, no HIGH+ → 40).
+func TestSeverityAdjusted_SingleRequiredCritical_Becomes40(t *testing.T) {
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-0003", "CRITICAL", "required"),
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 40 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 40 (required CRITICAL → MEDIUM → step any MEDIUM → 40)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// TestSeverityAdjusted_ImportedAndTestOnlyCritical_Becomes40 verifies the
+// composed double-downgrade: imported CRITICAL → HIGH (reachability), then
+// HIGH → MEDIUM (test-only). The step function produces 40.
+func TestSeverityAdjusted_ImportedAndTestOnlyCritical_Becomes40(t *testing.T) {
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(true), // confirmed test-only dep
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-0004", "CRITICAL", "imported"),
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 40 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 40 (imported CRITICAL → HIGH, test-only HIGH → MEDIUM → step 40)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// TestSeverityAdjusted_RequiredAndTestOnlyCritical_Becomes10 verifies the
+// composed triple-downgrade: required CRITICAL → MEDIUM (reachability), then
+// MEDIUM → LOW (test-only). The step function produces 10.
+func TestSeverityAdjusted_RequiredAndTestOnlyCritical_Becomes10(t *testing.T) {
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(true), // confirmed test-only dep
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-0005", "CRITICAL", "required"),
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 10 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 10 (required CRITICAL → MEDIUM, test-only MEDIUM → LOW → step 10)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// TestSeverityAdjusted_MixedCalledHighAndImportedHigh_Becomes70 verifies that
+// a called HIGH (unchanged) combined with an imported HIGH (downgraded to
+// MEDIUM) results in StepFunctionInputs{High:1, Medium:1}. The step function
+// fires "1–2 HIGH → 70".
+func TestSeverityAdjusted_MixedCalledHighAndImportedHigh_Becomes70(t *testing.T) {
+	// Two deps so each CVE lands on a separate dep. We need both to have
+	// IsTestOnly=false so neither dep triggers the test-only downgrade.
+	const modA = "github.com/alpha/pkg"
+	const modB = "github.com/beta/pkg"
+
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: modA, Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+		testutil.DepSpec{Path: modB, Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	input := ScoreInput{
+		Graph: graph,
+		Vulns: map[string][]scanner.Vulnerability{
+			modA: {makeVulnWithReachability("CVE-2024-A001", "HIGH", "called")},
+			modB: {makeVulnWithReachability("CVE-2024-B001", "HIGH", "imported")},
+		},
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+		DebugMode:   true,
+	}
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 70 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 70 (called HIGH + imported HIGH→MEDIUM → 1 HIGH → step 70)",
+			ps.SeverityAdjustedVulnScore)
+	}
+	// Verify the step function saw exactly 1 HIGH and 1 MEDIUM.
+	if ps.DebugScoring == nil {
+		t.Fatal("DebugScoring must be populated in DebugMode")
+	}
+	if ps.DebugScoring.StepFunctionInputs.High != 1 {
+		t.Errorf("StepFunctionInputs.High = %d, want 1", ps.DebugScoring.StepFunctionInputs.High)
+	}
+	if ps.DebugScoring.StepFunctionInputs.Medium != 1 {
+		t.Errorf("StepFunctionInputs.Medium = %d, want 1", ps.DebugScoring.StepFunctionInputs.Medium)
+	}
+}
+
+// TestSeverityAdjusted_UnisupplySelfRequiredOnly_BecomesZero is the
+// load-bearing release gate for v0.5.0. It mirrors the canonical unisupply
+// self-scan result: golang.org/x/crypto has a CVE with reachability "required"
+// and severity UNKNOWN (mapped to MEDIUM by effectiveTier). Two-tier downgrade:
+// MEDIUM → LOW → dropped. The step function sees zero CVEs → 0.
+//
+// Pre-fix severity_adjusted was 40; post-fix it must be 0.
+func TestSeverityAdjusted_UnisupplySelfRequiredOnly_BecomesZero(t *testing.T) {
+	// Build an equivalent slim ScoreInput inline rather than loading the
+	// govulncheck fixture (parseGovulncheckJSON is unexported from pkg/scanner).
+	// The fixture has a single required CVE with UNKNOWN severity on
+	// golang.org/x/crypto. That's the exact shape we need.
+	const modPath = "golang.org/x/crypto"
+	input := reachabilityScoreInput(
+		modPath,
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{
+			// UNKNOWN severity → effectiveTier → MEDIUM.
+			// required reachability → two-tier downgrade: MEDIUM → LOW → dropped.
+			{
+				ID:           "GO-2026-5005",
+				Severity:     "UNKNOWN",
+				Reachability: "required",
+			},
+		},
+	)
+	ps := ScoreAll(input)
+	if ps.SeverityAdjustedVulnScore != 0 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 0 (required UNKNOWN/MEDIUM → dropped by two-tier downgrade)",
+			ps.SeverityAdjustedVulnScore)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Per-dep weight tests: vulnScore reachability factor
+// ---------------------------------------------------------------------------
+
+// TestVulnScore_ImportedCritical_Weights70 verifies that a single CRITICAL CVE
+// with reachability "imported" contributes 70 to vulnScore (100 × 0.7), not
+// the base 100.
+func TestVulnScore_ImportedCritical_Weights70(t *testing.T) {
+	vulns := []scanner.Vulnerability{
+		makeVulnWithReachability("CVE-2024-IMP1", "CRITICAL", "imported"),
+	}
+	got := vulnScore(vulns)
+	if got != 70 {
+		t.Errorf("vulnScore([imported CRITICAL]) = %v, want 70 (100 × 0.7)", got)
+	}
+}
+
+// TestVulnScore_RequiredHigh_Weights24 verifies that a single HIGH CVE with
+// reachability "required" contributes 24 to vulnScore (80 × 0.3), not the
+// base 80.
+func TestVulnScore_RequiredHigh_Weights24(t *testing.T) {
+	vulns := []scanner.Vulnerability{
+		makeVulnWithReachability("CVE-2024-REQ1", "HIGH", "required"),
+	}
+	got := vulnScore(vulns)
+	if got != 24 {
+		t.Errorf("vulnScore([required HIGH]) = %v, want 24 (80 × 0.3)", got)
+	}
+}
+
+// TestSeverityFloor_RequiredCritical_NoFloor verifies that a dep whose only
+// CVE is a required CRITICAL is NOT promoted to the HIGH band by severityFloor.
+// Its per-dep RiskLevel must stay at whatever the non-vuln components dictate
+// (typically LOW for a dep with no maintenance/maintainer signals).
+func TestSeverityFloor_RequiredCritical_NoFloor(t *testing.T) {
+	const modPath = "github.com/required-only/pkg"
+	input := reachabilityScoreInput(
+		modPath,
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{
+			makeVulnWithReachability("CVE-2024-RF01", "CRITICAL", "required"),
+		},
+	)
+	ps := ScoreAll(input)
+
+	// Find the dependency score for the tested module.
+	var ds *DependencyScore
+	for _, d := range ps.Dependencies {
+		if d.Module == modPath {
+			ds = d
+			break
+		}
+	}
+	if ds == nil {
+		t.Fatalf("dependency %q not found in scored output", modPath)
+	}
+
+	// A required-only CRITICAL must not promote the dep to HIGH or CRITICAL band.
+	if ds.RiskLevel == RiskHigh || ds.RiskLevel == RiskCritical {
+		t.Errorf("RiskLevel = %s, want LOW or MEDIUM (required CRITICAL must not promote per-dep level to HIGH/CRITICAL)",
+			ds.RiskLevel)
+	}
+}

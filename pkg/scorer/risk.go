@@ -186,6 +186,12 @@ type DebugCVE struct {
 	// EnrichmentFailed mirrors scanner.Vulnerability.EnrichmentFailed so the
 	// reader can tell why an UNKNOWN was treated as MEDIUM in the step function.
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
+	// Reachability is the govulncheck reachability tier: "called", "imported",
+	// "required", or "" (empty means backward-compat, treated as "called").
+	Reachability string `json:"reachability,omitempty"`
+	// ReachabilityDowngrade describes the tier shift applied due to reachability
+	// (e.g. "CRITICAL→HIGH (imported)"). Empty when no downgrade was applied.
+	ReachabilityDowngrade string `json:"reachability_downgrade,omitempty"`
 }
 
 // DebugPerDepInput records the inputs to vulnScore for one dependency.
@@ -224,7 +230,19 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// top-level warning so consumers understand the scoring gap.
 	maintainerUnavailable := 0
 
-	for _, dep := range input.Graph.Dependencies {
+	// Sort dependency keys so that ScoreAll produces a deterministic
+	// ps.Dependencies slice regardless of Go's map iteration order. This is
+	// load-bearing: severityAdjustedVulnScore iterates the resulting slice and
+	// uses a first-wins tie-breaker, so stable key order is required for
+	// reproducible WorstCVEID values.
+	depKeys := make([]string, 0, len(input.Graph.Dependencies))
+	for k := range input.Graph.Dependencies {
+		depKeys = append(depKeys, k)
+	}
+	sort.Strings(depKeys)
+
+	for _, k := range depKeys {
+		dep := input.Graph.Dependencies[k]
 		ds := scoreDependency(
 			dep,
 			input.Vulns[dep.Module.Path],
@@ -531,12 +549,16 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 	highOrAboveCount := 0
 
 	for _, v := range vulns {
-		w := severityWeight(v.Severity)
+		// Apply the reachability factor before comparing and accumulating.
+		// "called"/""→×1.0, "imported"→×0.7, "required"→×0.3.
+		w := severityWeight(v.Severity) * reachabilityFactor(v.Reachability)
 		if w > maxWeight {
 			maxWeight = w
 		}
-		sev := strings.ToUpper(v.Severity)
-		if sev == "CRITICAL" || sev == "HIGH" {
+		// Count HIGH-or-above using the reachability-adjusted weight so that a
+		// required CRITICAL (30 pts) is not treated equivalently to a called
+		// CRITICAL (100 pts) in the pile-up bonus.
+		if w >= 56 { // ×0.7 of HIGH(80) = 56; called/imported HIGH-or-above
 			highOrAboveCount++
 		}
 	}
@@ -567,12 +589,20 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 //	UNKNOWN with enrichment failure → 26 (conservative MEDIUM)
 func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel) {
 	// Track the worst severity seen to determine the floor.
+	// Only "called", "imported", and "" CVEs contribute to the floor.
+	// "required" CVEs are excluded: their code never links into the build, so
+	// they must not promote the per-dep risk level. They still contribute to
+	// vulnScore via reachabilityFactor (×0.3) but do not set a severity floor.
 	hasCritical := false
 	hasHigh := false
 	hasMedium := false
 	hasUnknownFailed := false
 
 	for _, v := range vulns {
+		// Skip required-only CVEs — they do not contribute to the floor.
+		if v.Reachability == "required" {
+			continue
+		}
 		switch strings.ToUpper(v.Severity) {
 		case "CRITICAL":
 			hasCritical = true
@@ -602,7 +632,8 @@ func severityFloor(vulns []scanner.Vulnerability) (floor int, promoted RiskLevel
 		// Conservative floor: MEDIUM, because the CVE could be HIGH.
 		return 26, RiskMedium
 	default:
-		// Only LOW CVEs present; apply fix-age amplifier.
+		// Only LOW CVEs present (or only required CVEs, which are excluded above);
+		// apply fix-age amplifier.
 		floor = lowFixAgeFloor(vulns)
 		return floor, RiskLow
 	}
@@ -895,9 +926,15 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 			if rawTier == "" {
 				continue
 			}
-			finalTier := rawTier
-			if isTestOnlyConfirmed {
-				finalTier = downgradeTier(rawTier)
+
+			// Step 1: apply reachability downgrade (rawTier → reachabilityTier).
+			// Empty Reachability is treated as "called" (backward compat).
+			reachabilityTier, reachDesc := reachabilityDowngrade(rawTier, v.Reachability)
+
+			// Step 2: apply test-only downgrade on top of the reachability tier.
+			finalTier := reachabilityTier
+			if isTestOnlyConfirmed && finalTier != "" {
+				finalTier = downgradeTier(reachabilityTier)
 			}
 
 			// Track raw worst severity on this dep (for debug only).
@@ -909,15 +946,19 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 			}
 
 			if finalTier == "" {
-				// Downgraded LOW drops out of the step function entirely.
-				res.enrichedCVEs = append(res.enrichedCVEs, DebugCVE{
-					ID:               v.ID,
-					Module:           ds.Module,
-					OriginalTier:     rawTier,
-					DowngradedTier:   "dropped",
-					TestOnly:         ds.IsTestOnly,
-					EnrichmentFailed: v.EnrichmentFailed,
-				})
+				// Downgraded (by reachability or test-only) tier drops out of the
+				// step function entirely.
+				dc := DebugCVE{
+					ID:                    v.ID,
+					Module:                ds.Module,
+					OriginalTier:          rawTier,
+					DowngradedTier:        "dropped",
+					TestOnly:              ds.IsTestOnly,
+					EnrichmentFailed:      v.EnrichmentFailed,
+					Reachability:          v.Reachability,
+					ReachabilityDowngrade: reachDesc,
+				}
+				res.enrichedCVEs = append(res.enrichedCVEs, dc)
 				continue
 			}
 
@@ -932,8 +973,12 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 				res.stepInputs.Low++
 			}
 
-			// Track worst CVE by post-downgrade tier (load-bearing finding for
-			// the headline).
+			// Track the worst CVE by post-downgrade tier. This is the
+			// load-bearing finding surfaced in WorstCVEID. Tie-breaking
+			// within a tier is deterministic: ScoreAll populates
+			// ps.Dependencies in lexicographic module-path order, so among
+			// same-tier CVEs the one from the alphabetically earliest module
+			// (and earliest in that module's Vulns slice) is chosen.
 			if rank := tierRank(finalTier); rank > worstRank {
 				worstRank = rank
 				res.worstID = v.ID
@@ -941,13 +986,17 @@ func severityAdjustedVulnScore(deps []*DependencyScore) severityAdjustedResult {
 			}
 
 			dc := DebugCVE{
-				ID:               v.ID,
-				Module:           ds.Module,
-				OriginalTier:     rawTier,
-				TestOnly:         ds.IsTestOnly,
-				EnrichmentFailed: v.EnrichmentFailed,
+				ID:                    v.ID,
+				Module:                ds.Module,
+				OriginalTier:          rawTier,
+				TestOnly:              ds.IsTestOnly,
+				EnrichmentFailed:      v.EnrichmentFailed,
+				Reachability:          v.Reachability,
+				ReachabilityDowngrade: reachDesc,
 			}
-			if isTestOnlyConfirmed {
+			// Populate DowngradedTier when any downgrade (reachability or test-only)
+			// changed the effective tier from the raw tier.
+			if finalTier != rawTier {
 				dc.DowngradedTier = finalTier
 			}
 			res.enrichedCVEs = append(res.enrichedCVEs, dc)
@@ -1029,6 +1078,69 @@ func downgradeTier(t string) string {
 		return ""
 	default:
 		return ""
+	}
+}
+
+// reachabilityDowngrade returns the post-downgrade tier for a CVE based on how
+// deeply its vulnerable code is reachable in the build graph.
+//
+// Downgrade table:
+//
+//	"called" or "" (backward compat) — no change; return tier as-is.
+//	"imported"                        — one-tier downgrade (CRITICAL→HIGH, HIGH→MEDIUM, MEDIUM→LOW, LOW→dropped).
+//	"required"                        — two-tier downgrade (CRITICAL→MEDIUM, HIGH→LOW, MEDIUM→dropped, LOW→dropped).
+//
+// Returns "" when the CVE should be dropped from the step function entirely.
+// The second return value is a human-readable description of the downgrade
+// applied (e.g. "CRITICAL→HIGH (imported)"), or "" when no downgrade occurs.
+// This description populates DebugCVE.ReachabilityDowngrade for task-07.
+func reachabilityDowngrade(tier, reachability string) (downgradedTier, description string) {
+	switch reachability {
+	case "imported":
+		d := downgradeTier(tier)
+		if d != tier {
+			if d == "" {
+				return "", tier + "→dropped (imported)"
+			}
+			return d, tier + "→" + d + " (imported)"
+		}
+		return tier, ""
+	case "required":
+		// Two-tier downgrade: apply downgradeTier twice.
+		d := downgradeTier(downgradeTier(tier))
+		if d != tier {
+			if d == "" {
+				return "", tier + "→dropped (required)"
+			}
+			return d, tier + "→" + d + " (required)"
+		}
+		return tier, ""
+	default:
+		// "called" and "" are treated as called — no downgrade.
+		return tier, ""
+	}
+}
+
+// reachabilityFactor returns the per-CVE weight multiplier for the vulnScore
+// function based on how deeply the vulnerable code is reachable in the build.
+//
+//	"called" or "" (backward compat) → 1.0
+//	"imported"                        → 0.7
+//	"required"                        → 0.3
+//
+// Rationale: govulncheck's "required" tier means no package from the module is
+// linked into the build at all. Endor Labs research indicates <9.5 % of
+// vulnerabilities are actually reachable; ×0.3 keeps the signal visible without
+// inflating CI-gate noise.
+func reachabilityFactor(reachability string) float64 {
+	switch reachability {
+	case "imported":
+		return 0.7
+	case "required":
+		return 0.3
+	default:
+		// "called" and "" treated as called.
+		return 1.0
 	}
 }
 
