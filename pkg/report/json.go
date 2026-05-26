@@ -118,6 +118,8 @@ type JSONDependency struct {
 }
 
 // JSONVuln is a vulnerability entry.
+// Reachability reflects the govulncheck reachability tier: "called",
+// "imported", "required", or absent (absent means backward-compat "called").
 type JSONVuln struct {
 	ID                  string     `json:"id"`
 	Aliases             []string   `json:"aliases"`
@@ -129,6 +131,7 @@ type JSONVuln struct {
 	PublishedAt         *time.Time `json:"published_at,omitempty"`
 	FixPublishedAt      *time.Time `json:"fix_published_at,omitempty"`
 	DaysUnpatched       int        `json:"days_unpatched,omitempty"`
+	Reachability        string     `json:"reachability,omitempty"`
 }
 
 // JSONMaintenance is maintenance health info.
@@ -302,6 +305,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				PublishedAt:         v.PublishedAt,
 				FixPublishedAt:      v.FixPublishedAt,
 				DaysUnpatched:       v.DaysUnpatched,
+				Reachability:        v.Reachability,
 			})
 		}
 

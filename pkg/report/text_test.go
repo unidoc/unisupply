@@ -428,3 +428,158 @@ func TestWriteText_SummaryStatistics(t *testing.T) {
 		t.Error("Output should contain unmaintained count in summary")
 	}
 }
+
+// TestReachabilityTag confirms the helper returns the correct bracket tags and
+// suppresses the tag for the common cases ("called" and "").
+func TestReachabilityTag(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"called", ""},
+		{"", ""},
+		{"imported", " [imported]"},
+		{"required", " [required]"},
+	}
+	for _, tc := range tests {
+		got := reachabilityTag(tc.input)
+		if got != tc.want {
+			t.Errorf("reachabilityTag(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestVulnReachabilityCountHeader confirms the combined count phrase format.
+func TestVulnReachabilityCountHeader(t *testing.T) {
+	tests := []struct {
+		called, imported, required int
+		want                       string
+	}{
+		{3, 0, 0, "3 called"},
+		{0, 2, 0, "2 imported"},
+		{0, 0, 1, "1 required"},
+		{2, 1, 1, "2 called, 1 imported, 1 required"},
+		{0, 2, 3, "2 imported, 3 required"},
+		{1, 0, 1, "1 called, 1 required"},
+	}
+	for _, tc := range tests {
+		got := vulnReachabilityCountHeader(tc.called, tc.imported, tc.required)
+		if got != tc.want {
+			t.Errorf("vulnReachabilityCountHeader(%d,%d,%d) = %q, want %q",
+				tc.called, tc.imported, tc.required, got, tc.want)
+		}
+	}
+}
+
+// TestWriteText_ReachabilityTags verifies the text renderer emits [imported]
+// and [required] tags on the appropriate CVE lines, and the combined count
+// header when reachability is mixed.
+func TestWriteText_ReachabilityTags(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "github.com/example/reach-pkg",
+			Version: "v1.0.0",
+			Direct:  true,
+			Depth:   0,
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 70,
+		OverallLevel: scorer.RiskHigh,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "github.com/example/reach-pkg",
+				Version:   "v1.0.0",
+				Direct:    true,
+				RiskScore: 70,
+				RiskLevel: scorer.RiskHigh,
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-CALLED", Severity: "CRITICAL", Reachability: "called"},
+					{ID: "CVE-2024-IMPORTED", Severity: "HIGH", Reachability: "imported"},
+					{ID: "CVE-2024-REQUIRED", Severity: "MEDIUM", Reachability: "required"},
+				},
+			},
+		},
+		HighRiskCount: 1,
+		TotalVulns:    3,
+	}
+
+	var buf bytes.Buffer
+	opts := &TextOptions{
+		NoColor: true,
+		Writer:  &buf,
+	}
+	if err := WriteText(graph, ps, opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+
+	out := buf.String()
+
+	// Per-CVE reachability tags.
+	// Format is: "⚠ <ID> (<SEVERITY>) [<tag>] — <aliases>"
+	if strings.Contains(out, "[called]") {
+		t.Error("called CVE must NOT have a [called] tag — suppress the common case")
+	}
+	if !strings.Contains(out, "CVE-2024-IMPORTED (HIGH) [imported]") {
+		t.Errorf("expected [imported] tag on CVE-2024-IMPORTED; output:\n%s", out)
+	}
+	if !strings.Contains(out, "CVE-2024-REQUIRED (MEDIUM) [required]") {
+		t.Errorf("expected [required] tag on CVE-2024-REQUIRED; output:\n%s", out)
+	}
+
+	// Combined count header should appear (mix of called/imported/required).
+	if !strings.Contains(out, "1 called, 1 imported, 1 required") {
+		t.Errorf("expected combined count phrase in output; got:\n%s", out)
+	}
+}
+
+// TestWriteText_ReachabilityAllCalled verifies no combined count header is
+// emitted when all CVEs are called (or have empty reachability).
+func TestWriteText_ReachabilityAllCalled(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "github.com/example/called-pkg",
+			Version: "v1.0.0",
+			Direct:  true,
+			Depth:   0,
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 60,
+		OverallLevel: scorer.RiskHigh,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "github.com/example/called-pkg",
+				Version:   "v1.0.0",
+				Direct:    true,
+				RiskScore: 60,
+				RiskLevel: scorer.RiskHigh,
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-A", Severity: "HIGH", Reachability: "called"},
+					{ID: "CVE-2024-B", Severity: "MEDIUM", Reachability: ""},
+				},
+			},
+		},
+		HighRiskCount: 1,
+		TotalVulns:    2,
+	}
+
+	var buf bytes.Buffer
+	opts := &TextOptions{NoColor: true, Writer: &buf}
+	if err := WriteText(graph, ps, opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+
+	out := buf.String()
+
+	// No mixed header expected — all CVEs are called or legacy empty.
+	if strings.Contains(out, "called,") || strings.Contains(out, "imported") || strings.Contains(out, "required") {
+		t.Errorf("unexpected reachability header when all CVEs are called; output:\n%s", out)
+	}
+	// No [called] tag should appear.
+	if strings.Contains(out, "[called]") {
+		t.Errorf("[called] tag should be suppressed; output:\n%s", out)
+	}
+}

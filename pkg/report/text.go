@@ -239,14 +239,38 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	fmt.Fprintf(w, "  ├─ %s\n", c(colorDim, depExplanation(ds)))
 
 	// Vulnerabilities.
-	for _, v := range ds.Vulns {
-		aliases := strings.Join(v.Aliases, ", ")
-		if aliases == "" {
-			aliases = v.ID
+	if len(ds.Vulns) > 0 {
+		// Compute per-tier counts. Empty Reachability is treated as "called"
+		// for backward compatibility with non-govulncheck CVE sources.
+		var nCalled, nImported, nRequired int
+		for _, v := range ds.Vulns {
+			switch v.Reachability {
+			case "imported":
+				nImported++
+			case "required":
+				nRequired++
+			default:
+				nCalled++ // "called" or ""
+			}
 		}
-		fmt.Fprintf(w, "  ├─ ⚠ %s (%s) — %s\n", v.ID, v.Severity, aliases)
-		if v.FixedVersion != "" {
-			fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+		// Emit combined count header only when reachability is mixed; the
+		// simple "N vulnerabilities" phrasing is implicit from the bullet list
+		// when all are called (avoids noise on the common case).
+		if nImported > 0 || nRequired > 0 {
+			fmt.Fprintf(w, "  ├─ %s %s\n",
+				c(colorDim, "Vulnerabilities:"),
+				vulnReachabilityCountHeader(nCalled, nImported, nRequired))
+		}
+		for _, v := range ds.Vulns {
+			aliases := strings.Join(v.Aliases, ", ")
+			if aliases == "" {
+				aliases = v.ID
+			}
+			tag := reachabilityTag(v.Reachability)
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, v.Severity, tag, aliases)
+			if v.FixedVersion != "" {
+				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+			}
 		}
 	}
 
@@ -607,8 +631,15 @@ func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.Deb
 			if cve.EnrichmentFailed {
 				enrich = " [enrichment_failed]"
 			}
-			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s\n",
-				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich)
+			reachInfo := ""
+			if cve.Reachability != "" {
+				reachInfo = fmt.Sprintf(" reach=%s", cve.Reachability)
+			}
+			if cve.ReachabilityDowngrade != "" {
+				reachInfo += fmt.Sprintf(" (%s)", cve.ReachabilityDowngrade)
+			}
+			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s%s\n",
+				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich, reachInfo)
 		}
 	}
 
@@ -625,4 +656,34 @@ func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.Deb
 		}
 	}
 	fmt.Fprintf(w, "%s\n\n", c(colorDim, "──────────────────────────────────────────────────"))
+}
+
+// reachabilityTag returns the bracket tag to append after a CVE ID for
+// non-called reachability levels.  Empty string or "called" both return ""
+// (backward-compat: suppress the tag on the common case).
+func reachabilityTag(r string) string {
+	switch r {
+	case "imported", "required":
+		return fmt.Sprintf(" [%s]", r)
+	default:
+		// "" (legacy / non-govulncheck) and "called" are both untagged.
+		return ""
+	}
+}
+
+// vulnReachabilityCountHeader builds the "X called, Y imported, Z required"
+// summary string for the per-dep vulnerability section header.  Only called
+// when at least one of imported or required is > 0.
+func vulnReachabilityCountHeader(called, imported, required int) string {
+	parts := make([]string, 0, 3)
+	if called > 0 {
+		parts = append(parts, fmt.Sprintf("%d called", called))
+	}
+	if imported > 0 {
+		parts = append(parts, fmt.Sprintf("%d imported", imported))
+	}
+	if required > 0 {
+		parts = append(parts, fmt.Sprintf("%d required", required))
+	}
+	return strings.Join(parts, ", ")
 }

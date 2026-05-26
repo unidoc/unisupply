@@ -637,7 +637,15 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	// Vulnerabilities.
 	for _, v := range ds.Vulns {
 		aliases := strings.Join(v.Aliases, ", ")
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s) — %s", v.ID, v.Severity, aliases), regular)
+		// Append an inline reachability tag when the tier is not "called" (the
+		// most-severe tier).  Empty Reachability is treated as called for
+		// backward compatibility with non-govulncheck CVE sources.
+		reachTag := ""
+		switch v.Reachability {
+		case "imported", "required":
+			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
+		}
+		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s — %s", v.ID, v.Severity, reachTag, aliases), regular)
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}

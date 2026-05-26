@@ -3,6 +3,10 @@ package report
 import (
 	"testing"
 
+	"github.com/unidoc/unipdf/v3/creator"
+	"github.com/unidoc/unipdf/v3/model"
+
+	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
@@ -77,4 +81,38 @@ func TestFilterRiskBucket_NoOverlap(t *testing.T) {
 	if len(low) != 26 { // 0..25
 		t.Errorf("low bucket = %d, want 26", len(low))
 	}
+}
+
+// TestWriteDependencyBlock_ReachabilitySmoke verifies that writeDependencyBlock
+// does not panic when vulnerabilities carry all three reachability tiers.
+// This exercises the inline tag code path added in task-07.
+func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
+	// UniPDF creator may emit license warnings to stderr — that is expected in
+	// the unlicensed demo mode and does not indicate a test failure.
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	ds := &scorer.DependencyScore{
+		Module:    "github.com/example/reach-pkg",
+		Version:   "v1.0.0",
+		Direct:    true,
+		RiskScore: 75,
+		RiskLevel: scorer.RiskHigh,
+		Vulns: []scanner.Vulnerability{
+			{ID: "CVE-2024-0001", Severity: "CRITICAL", Reachability: "called"},
+			{ID: "CVE-2024-0002", Severity: "HIGH", Reachability: "imported"},
+			{ID: "CVE-2024-0003", Severity: "MEDIUM", Reachability: "required"},
+			{ID: "CVE-2024-0004", Severity: "LOW", Reachability: ""}, // legacy
+		},
+	}
+
+	// Must not panic.
+	writeDependencyBlock(c, ds, regular, bold, true)
 }

@@ -580,3 +580,84 @@ func TestWriteJSON_CriticalRiskCount(t *testing.T) {
 		t.Errorf("Summary.HighRiskCount = %d, want 1 (must not be conflated with critical)", report.Summary.HighRiskCount)
 	}
 }
+
+// TestWriteJSON_Reachability verifies that each reachability tier (called,
+// imported, required) is preserved in JSONVuln, and that empty Reachability
+// (backward-compat legacy CVE) is omitted from the JSON key (omitempty).
+func TestWriteJSON_Reachability(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "github.com/example/vuln-pkg",
+			Version: "v1.0.0",
+			Direct:  true,
+			Depth:   0,
+		},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 70,
+		OverallLevel: scorer.RiskHigh,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "github.com/example/vuln-pkg",
+				Version:   "v1.0.0",
+				Direct:    true,
+				RiskScore: 70,
+				RiskLevel: scorer.RiskHigh,
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-0001", Severity: "CRITICAL", Reachability: "called"},
+					{ID: "CVE-2024-0002", Severity: "HIGH", Reachability: "imported"},
+					{ID: "CVE-2024-0003", Severity: "MEDIUM", Reachability: "required"},
+					{ID: "CVE-2024-0004", Severity: "LOW", Reachability: ""}, // legacy: empty → omitted in JSON
+				},
+			},
+		},
+		HighRiskCount: 1,
+		TotalVulns:    4,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(report.Deps) != 1 {
+		t.Fatalf("Deps length = %d, want 1", len(report.Deps))
+	}
+	vulns := report.Deps[0].Vulns
+	if len(vulns) != 4 {
+		t.Fatalf("Vulns length = %d, want 4", len(vulns))
+	}
+
+	if vulns[0].Reachability != "called" {
+		t.Errorf("vulns[0].Reachability = %q, want %q", vulns[0].Reachability, "called")
+	}
+	if vulns[1].Reachability != "imported" {
+		t.Errorf("vulns[1].Reachability = %q, want %q", vulns[1].Reachability, "imported")
+	}
+	if vulns[2].Reachability != "required" {
+		t.Errorf("vulns[2].Reachability = %q, want %q", vulns[2].Reachability, "required")
+	}
+
+	// Empty Reachability must be absent from the JSON key (omitempty).
+	// Unmarshal into a raw map to check key presence explicitly.
+	rawAll := struct {
+		Deps []map[string]interface{} `json:"dependencies"`
+	}{}
+	if err := json.Unmarshal(buf.Bytes(), &rawAll); err != nil {
+		t.Fatalf("raw unmarshal: %v", err)
+	}
+	rawVulns, _ := rawAll.Deps[0]["vulnerabilities"].([]interface{})
+	if len(rawVulns) != 4 {
+		t.Fatalf("raw vulnerabilities length = %d, want 4", len(rawVulns))
+	}
+	vuln4, _ := rawVulns[3].(map[string]interface{})
+	if _, present := vuln4["reachability"]; present {
+		t.Errorf("empty Reachability must be omitted from JSON (omitempty), but key is present with value %v", vuln4["reachability"])
+	}
+}
