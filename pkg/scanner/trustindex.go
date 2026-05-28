@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/progress"
@@ -32,8 +32,9 @@ type TrustIndexEntry struct {
 
 // TrustIndexClient queries the unitrust API for Trust Index data.
 type TrustIndexClient struct {
-	client  *http.Client
+	client  *Client
 	baseURL string
+	host    string
 }
 
 // NewTrustIndexClient creates a client for the unitrust API.
@@ -42,11 +43,14 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration) *TrustIndexClien
 	if baseURL == "" {
 		return nil
 	}
+	host := ""
+	if u, err := url.Parse(baseURL); err == nil {
+		host = u.Host
+	}
 	return &TrustIndexClient{
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:  NewClient(ClientOptions{Timeout: timeout}),
 		baseURL: baseURL,
+		host:    host,
 	}
 }
 
@@ -73,26 +77,17 @@ func (c *TrustIndexClient) LookupAll(ctx context.Context, graph *resolver.Graph)
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/api/v1/lookup", c.baseURL)
-	rep.Step("POST %s (%d modules)", url, len(modules))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	lookupURL := fmt.Sprintf("%s/api/v1/lookup", c.baseURL)
+	rep.Step("POST %s (%d modules)", lookupURL, len(modules))
+	body, resp, err := c.client.Post(ctx, lookupURL, "application/json", bytes.NewReader(reqBody), GetOptions{
+		Host:     c.host,
+		MaxBytes: 4 * 1024 * 1024, // 4 MB — Trust Index response may include many modules.
+	})
 	if err != nil {
 		return nil, fmt.Errorf("trust index lookup: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("trust index lookup: %w", err)
-	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("trust index API returned %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	var response struct {

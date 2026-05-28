@@ -25,25 +25,33 @@ import (
 // errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
 
+// errTokenPrecondition is returned when --require-github-token is set but the
+// token is missing or invalid. Exit code 3 is reserved for this precondition
+// failure so CI pipelines can distinguish it from a runtime error (1) or a
+// policy violation (2).
+var errTokenPrecondition = errors.New("github token precondition failed")
+
 func main() {
 	var (
-		format        string
-		output        string
-		verbose       bool
-		noColor       bool
-		minRisk       int
-		directOnly    bool
-		timeout       time.Duration
-		showHelp      bool
-		showVer       bool
-		scanWorkflows bool
-		scanCI        bool
-		workflowPath  string
-		githubToken   string
-		policyFile    string
-		policyPreset  string
-		trustIndexURL string
-		progressMode  string
+		format             string
+		output             string
+		verbose            bool
+		noColor            bool
+		minRisk            int
+		directOnly         bool
+		timeout            time.Duration
+		showHelp           bool
+		showVer            bool
+		scanWorkflows      bool
+		scanCI             bool
+		workflowPath       string
+		githubToken        string
+		requireGithubToken bool
+		policyFile         string
+		policyPreset       string
+		trustIndexURL      string
+		progressMode       string
+		debugScoring       bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -59,10 +67,12 @@ func main() {
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
 	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
+	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
+	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
 	flag.Parse()
 
@@ -91,22 +101,24 @@ func main() {
 	}
 
 	cfg := runConfig{
-		path:          path,
-		format:        format,
-		output:        output,
-		verbose:       verbose,
-		noColor:       noColor,
-		minRisk:       minRisk,
-		directOnly:    directOnly,
-		timeout:       timeout,
-		scanWorkflows: scanWorkflows,
-		scanCI:        scanCI,
-		workflowPath:  workflowPath,
-		githubToken:   githubToken,
-		policyFile:    policyFile,
-		policyPreset:  policyPreset,
-		trustIndexURL: trustIndexURL,
-		progressMode:  progressMode,
+		path:               path,
+		format:             format,
+		output:             output,
+		verbose:            verbose,
+		noColor:            noColor,
+		minRisk:            minRisk,
+		directOnly:         directOnly,
+		timeout:            timeout,
+		scanWorkflows:      scanWorkflows,
+		scanCI:             scanCI,
+		workflowPath:       workflowPath,
+		githubToken:        githubToken,
+		requireGithubToken: requireGithubToken,
+		policyFile:         policyFile,
+		policyPreset:       policyPreset,
+		trustIndexURL:      trustIndexURL,
+		progressMode:       progressMode,
+		debugScoring:       debugScoring,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -114,31 +126,51 @@ func main() {
 		if errors.Is(err, errPolicyViolation) {
 			os.Exit(2)
 		}
+		// Token precondition failure exits with code 3.
+		if errors.Is(err, errTokenPrecondition) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(3)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 type runConfig struct {
-	path          string
-	format        string
-	output        string
-	verbose       bool
-	noColor       bool
-	minRisk       int
-	directOnly    bool
-	timeout       time.Duration
-	scanWorkflows bool
-	scanCI        bool
-	workflowPath  string
-	githubToken   string
-	policyFile    string
-	policyPreset  string
-	trustIndexURL string
-	progressMode  string
+	path               string
+	format             string
+	output             string
+	verbose            bool
+	noColor            bool
+	minRisk            int
+	directOnly         bool
+	timeout            time.Duration
+	scanWorkflows      bool
+	scanCI             bool
+	workflowPath       string
+	githubToken        string
+	requireGithubToken bool
+	policyFile         string
+	policyPreset       string
+	trustIndexURL      string
+	progressMode       string
+	debugScoring       bool
 }
 
 func run(cfg *runConfig) error {
+	// --require-github-token: fail fast (exit 3) when no token is present.
+	// Token validation is intentionally lightweight — we only check for
+	// presence here; a 401/403 from the GitHub API during the actual scan
+	// would surface through DataAvailable==false in the results.
+	if cfg.requireGithubToken && cfg.githubToken == "" {
+		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
+	}
+
+	// Compute scan-start time once and floor it to the start of the UTC day.
+	// All scanner age/activity classifications use this value so that two runs
+	// on the same calendar day yield identical band results for the same module.
+	scanStart := time.Now().UTC().Truncate(24 * time.Hour)
+
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
@@ -174,7 +206,7 @@ func run(cfg *runConfig) error {
 	}
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir)
+	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
 	if err != nil {
 		rep.Warn("Vulnerability scan failed: %v", err)
 	}
@@ -185,6 +217,7 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
+	maintScanner.ScanStart = scanStart
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
 	if err != nil {
 		rep.Warn("Some maintenance checks failed: %v", err)
@@ -193,6 +226,7 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
+	maintainerScanner.ScanStart = scanStart
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
@@ -203,11 +237,13 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Scoring resilience")
 	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
+	resilienceScanner.ScanStart = scanStart
 	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
 	rep.Done("")
 
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
+	aiGenScanner.ScanStart = scanStart
 	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
 	rep.Done("%d flagged", len(aiGenRisks))
 
@@ -233,7 +269,10 @@ func run(cfg *runConfig) error {
 		Resilience:  resilience,
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
+		DebugMode:   cfg.debugScoring,
+		Now:         scanStart,
 	})
+	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport
@@ -390,19 +429,27 @@ func printUsage() {
 	fmt.Println("  unisupply [flags] [path]")
 	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  unisupply                                  # Analyze current directory")
-	fmt.Println("  unisupply ./myproject                       # Analyze specific project")
-	fmt.Println("  unisupply -f json -o report.json            # JSON output to file")
-	fmt.Println("  unisupply -f pdf                            # Generate PDF risk report")
-	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json    # CycloneDX SBOM")
-	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json    # SPDX SBOM")
-	fmt.Println("  unisupply --min-risk 50                     # Only show medium+ risk deps")
-	fmt.Println("  unisupply --scan-workflows                  # Include GitHub Actions audit")
-	fmt.Println("  unisupply --scan-ci                         # Full CI/CD pipeline scan")
-	fmt.Println("  unisupply --policy policy.json              # Evaluate against policy file")
-	fmt.Println("  unisupply --policy-preset strict            # Use strict built-in policy")
-	fmt.Println("  unisupply --progress plain                  # Plain log-style progress on stderr")
-	fmt.Println("  unisupply --progress none -f json           # Silent run; JSON to stdout")
+	fmt.Println("  unisupply                                    # Analyze current directory")
+	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
+	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
+	fmt.Println("  unisupply -f pdf                             # Generate PDF risk report")
+	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
+	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
+	fmt.Println("  unisupply --min-risk 50                      # Only show medium+ risk deps")
+	fmt.Println("  unisupply --scan-workflows                   # Include GitHub Actions audit")
+	fmt.Println("  unisupply --scan-ci                          # Full CI/CD pipeline scan")
+	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
+	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
+	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if no token")
+	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
+	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
+	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
+	fmt.Println()
+	fmt.Println("Exit codes:")
+	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")
+	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
+	fmt.Println("  2  Policy violation — one or more policy rules failed")
+	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

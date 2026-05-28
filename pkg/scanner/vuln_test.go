@@ -3,6 +3,8 @@ package scanner
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
 )
 
@@ -278,6 +280,271 @@ func TestParseGovulncheckJSON_Dedup(t *testing.T) {
 	}
 }
 
+// buildGovulncheckBuf writes a sequence of govulncheck JSON objects into a
+// buffer for use in parser tests.
+func buildGovulncheckBuf(t *testing.T, objects ...map[string]json.RawMessage) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	enc := json.NewEncoder(buf)
+	for _, obj := range objects {
+		if err := enc.Encode(obj); err != nil {
+			t.Fatalf("buildGovulncheckBuf: encode failed: %v", err)
+		}
+	}
+	return buf
+}
+
+// minimalOSV returns a govulncheck "osv" JSON object for a given module and
+// severity to use in classification tests.
+func minimalOSV(osvID, modPath, severity string) map[string]json.RawMessage {
+	body := fmt.Sprintf(`{
+		"id": %q,
+		"aliases": [],
+		"summary": "test vulnerability",
+		"affected": [
+			{
+				"package": {"name": %q, "ecosystem": "Go"},
+				"ranges": [{"type": "SEMVER", "events": [{"introduced": "v1.0.0"}]}],
+				"database_specific": {"severity": %q}
+			}
+		]
+	}`, osvID, modPath, severity)
+	return map[string]json.RawMessage{"osv": json.RawMessage(body)}
+}
+
+// TestClassifyReachability_DirectCases tests classifyReachability in isolation.
+func TestClassifyReachability_DirectCases(t *testing.T) {
+	tests := []struct {
+		name  string
+		trace []traceEntry
+		want  string
+	}{
+		{
+			name:  "empty_trace_returns_required",
+			trace: nil,
+			want:  "required",
+		},
+		{
+			name: "function_set_returns_called",
+			trace: []traceEntry{
+				{Module: "github.com/example/pkg", Package: "github.com/example/pkg", Function: "Vulnerable"},
+			},
+			want: "called",
+		},
+		{
+			name: "position_set_returns_called",
+			trace: []traceEntry{
+				{Module: "github.com/example/pkg", Package: "github.com/example/pkg"},
+				{Module: "github.com/example/pkg", Package: "github.com/example/pkg", Position: &struct {
+					Filename string `json:"filename"`
+					Line     int    `json:"line"`
+					Column   int    `json:"column"`
+				}{Filename: "main.go", Line: 42, Column: 5}},
+			},
+			want: "called",
+		},
+		{
+			name: "package_only_returns_imported",
+			trace: []traceEntry{
+				{Module: "github.com/example/pkg", Package: "github.com/example/pkg"},
+			},
+			want: "imported",
+		},
+		{
+			name: "module_only_returns_required",
+			trace: []traceEntry{
+				{Module: "github.com/example/pkg"},
+			},
+			want: "required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyReachability(tt.trace)
+			if got != tt.want {
+				t.Errorf("classifyReachability() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseGovulncheckJSON_ClassifiesCalled asserts that a finding whose trace
+// has a non-empty Function field is classified as "called".
+func TestParseGovulncheckJSON_ClassifiesCalled(t *testing.T) {
+	const (
+		osvID   = "GO-2024-0001"
+		modPath = "github.com/example/called"
+	)
+
+	finding := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{
+			"osv": "GO-2024-0001",
+			"trace": [
+				{
+					"module":   "github.com/example/called",
+					"version":  "v1.0.0",
+					"package":  "github.com/example/called",
+					"function": "VulnerableFunc"
+				}
+			]
+		}`),
+	}
+
+	buf := buildGovulncheckBuf(t, minimalOSV(osvID, modPath, "HIGH"), finding)
+	results, err := parseGovulncheckJSON(buf)
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON() error: %v", err)
+	}
+
+	vulns := results[modPath]
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+	if vulns[0].Reachability != "called" {
+		t.Errorf("Reachability = %q, want %q", vulns[0].Reachability, "called")
+	}
+}
+
+// TestParseGovulncheckJSON_ClassifiesImported asserts that a finding whose
+// trace has a Package but no Function is classified as "imported".
+func TestParseGovulncheckJSON_ClassifiesImported(t *testing.T) {
+	const (
+		osvID   = "GO-2024-0002"
+		modPath = "github.com/example/imported"
+	)
+
+	finding := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{
+			"osv": "GO-2024-0002",
+			"trace": [
+				{
+					"module":  "github.com/example/imported",
+					"version": "v1.0.0",
+					"package": "github.com/example/imported"
+				}
+			]
+		}`),
+	}
+
+	buf := buildGovulncheckBuf(t, minimalOSV(osvID, modPath, "MEDIUM"), finding)
+	results, err := parseGovulncheckJSON(buf)
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON() error: %v", err)
+	}
+
+	vulns := results[modPath]
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+	if vulns[0].Reachability != "imported" {
+		t.Errorf("Reachability = %q, want %q", vulns[0].Reachability, "imported")
+	}
+}
+
+// TestParseGovulncheckJSON_ClassifiesRequired asserts that a finding whose
+// trace has only a Module (no package or function) is classified as "required".
+func TestParseGovulncheckJSON_ClassifiesRequired(t *testing.T) {
+	const (
+		osvID   = "GO-2024-0003"
+		modPath = "github.com/example/required"
+	)
+
+	finding := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{
+			"osv": "GO-2024-0003",
+			"trace": [
+				{
+					"module":  "github.com/example/required",
+					"version": "v1.0.0"
+				}
+			]
+		}`),
+	}
+
+	buf := buildGovulncheckBuf(t, minimalOSV(osvID, modPath, "LOW"), finding)
+	results, err := parseGovulncheckJSON(buf)
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON() error: %v", err)
+	}
+
+	vulns := results[modPath]
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+	if vulns[0].Reachability != "required" {
+		t.Errorf("Reachability = %q, want %q", vulns[0].Reachability, "required")
+	}
+}
+
+// TestParseGovulncheckJSON_DedupKeepsHighestReachability verifies that when the
+// same OSV+module appears multiple times (different trace depths), the parser
+// keeps the finding with the highest reachability.  The result must be
+// order-independent: flipping the input order yields the same winner.
+func TestParseGovulncheckJSON_DedupKeepsHighestReachability(t *testing.T) {
+	const (
+		osvID   = "GO-2024-0004"
+		modPath = "github.com/example/dedup"
+	)
+
+	osv := minimalOSV(osvID, modPath, "HIGH")
+
+	calledFinding := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{
+			"osv": "GO-2024-0004",
+			"trace": [
+				{
+					"module":   "github.com/example/dedup",
+					"version":  "v1.0.0",
+					"package":  "github.com/example/dedup",
+					"function": "VulnerableFunc"
+				}
+			]
+		}`),
+	}
+
+	requiredFinding := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{
+			"osv": "GO-2024-0004",
+			"trace": [
+				{
+					"module":  "github.com/example/dedup",
+					"version": "v1.0.0"
+				}
+			]
+		}`),
+	}
+
+	assertCalledWins := func(t *testing.T, results map[string][]Vulnerability) {
+		t.Helper()
+		vulns := results[modPath]
+		if len(vulns) != 1 {
+			t.Fatalf("len(vulns) = %d, want 1 (dedup should produce one entry)", len(vulns))
+		}
+		if vulns[0].Reachability != "called" {
+			t.Errorf("Reachability = %q, want %q", vulns[0].Reachability, "called")
+		}
+	}
+
+	t.Run("called_first", func(t *testing.T) {
+		buf := buildGovulncheckBuf(t, osv, calledFinding, requiredFinding)
+		results, err := parseGovulncheckJSON(buf)
+		if err != nil {
+			t.Fatalf("parseGovulncheckJSON() error: %v", err)
+		}
+		assertCalledWins(t, results)
+	})
+
+	t.Run("required_first", func(t *testing.T) {
+		buf := buildGovulncheckBuf(t, osv, requiredFinding, calledFinding)
+		results, err := parseGovulncheckJSON(buf)
+		if err != nil {
+			t.Fatalf("parseGovulncheckJSON() error: %v", err)
+		}
+		assertCalledWins(t, results)
+	})
+}
+
 // TestSeverityFromOSV tests severity extraction from OSV data.
 func TestSeverityFromOSV(t *testing.T) {
 	tests := []struct {
@@ -452,4 +719,137 @@ func TestFixedVersionFromOSV(t *testing.T) {
 			}
 		})
 	}
+}
+
+// loadGovulncheckFixture reads a testdata fixture file from the top-level
+// testdata/ directory (not the vulnenrich sub-directory) and returns its
+// contents as a bytes.Buffer suitable for passing to parseGovulncheckJSON.
+func loadGovulncheckFixture(t *testing.T, name string) *bytes.Buffer {
+	t.Helper()
+	data, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatalf("loadGovulncheckFixture(%q): %v", name, err)
+	}
+	return bytes.NewBuffer(data)
+}
+
+// TestFixture_CalledReachability loads govulncheck_called.json and asserts
+// that the parsed vulnerability carries Reachability == "called".
+// The fixture contains a finding whose trace[0] has both Function and Position
+// set, representing a directly-called vulnerable symbol.
+func TestFixture_CalledReachability(t *testing.T) {
+	results, err := parseGovulncheckJSON(loadGovulncheckFixture(t, "govulncheck_called.json"))
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+
+	const modPath = "github.com/example/vulnpkg"
+	vulns, ok := results[modPath]
+	if !ok {
+		t.Fatalf("module %q not found in results; got keys: %v", modPath, moduleKeys(results))
+	}
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+
+	vuln := vulns[0]
+	if vuln.ID != "GO-2024-9901" {
+		t.Errorf("ID = %q, want %q", vuln.ID, "GO-2024-9901")
+	}
+	if vuln.Reachability != "called" {
+		t.Errorf("Reachability = %q, want %q", vuln.Reachability, "called")
+	}
+	if vuln.FixedVersion != "v1.4.0" {
+		t.Errorf("FixedVersion = %q, want %q", vuln.FixedVersion, "v1.4.0")
+	}
+}
+
+// TestFixture_ImportedReachability loads govulncheck_imported.json and asserts
+// that the parsed vulnerability carries Reachability == "imported".
+// The fixture is derived from an actual 2026-05-25 unisupply-self govulncheck
+// run: GO-2026-5025 (CVE-2026-42506, golang.org/x/net/html) appeared with
+// trace[0].Package populated and no Function — the canonical imported shape.
+func TestFixture_ImportedReachability(t *testing.T) {
+	results, err := parseGovulncheckJSON(loadGovulncheckFixture(t, "govulncheck_imported.json"))
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+
+	const modPath = "golang.org/x/net"
+	vulns, ok := results[modPath]
+	if !ok {
+		t.Fatalf("module %q not found in results; got keys: %v", modPath, moduleKeys(results))
+	}
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+
+	vuln := vulns[0]
+	if vuln.ID != "GO-2026-5025" {
+		t.Errorf("ID = %q, want %q", vuln.ID, "GO-2026-5025")
+	}
+	if vuln.Reachability != "imported" {
+		t.Errorf("Reachability = %q, want %q", vuln.Reachability, "imported")
+	}
+	if vuln.FixedVersion != "v0.55.0" {
+		t.Errorf("FixedVersion = %q, want %q", vuln.FixedVersion, "v0.55.0")
+	}
+}
+
+// TestFixture_RequiredReachability loads govulncheck_required.json and asserts
+// that the parsed vulnerability carries Reachability == "required".
+//
+// This fixture is the canonical false-positive regression case for the
+// calibration suite (task-09): GO-2026-5005 (CVE-2026-39833,
+// golang.org/x/crypto/ssh/agent) was found in an actual 2026-05-25
+// unisupply-self govulncheck scan with a module-only trace, meaning the
+// vulnerable package is not imported by unisupply at all.  The scorer must
+// apply a reduced weight for "required"-level findings to avoid inflating the
+// risk score for this class of false-positive.
+func TestFixture_RequiredReachability(t *testing.T) {
+	results, err := parseGovulncheckJSON(loadGovulncheckFixture(t, "govulncheck_required.json"))
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+
+	const modPath = "golang.org/x/crypto"
+	vulns, ok := results[modPath]
+	if !ok {
+		t.Fatalf("module %q not found in results; got keys: %v", modPath, moduleKeys(results))
+	}
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+
+	vuln := vulns[0]
+	if vuln.ID != "GO-2026-5005" {
+		t.Errorf("ID = %q, want %q", vuln.ID, "GO-2026-5005")
+	}
+	if vuln.Reachability != "required" {
+		t.Errorf("Reachability = %q, want %q", vuln.Reachability, "required")
+	}
+	if vuln.FixedVersion != "v0.52.0" {
+		t.Errorf("FixedVersion = %q, want %q", vuln.FixedVersion, "v0.52.0")
+	}
+	// Verify the OSV alias round-trips correctly.
+	found := false
+	for _, alias := range vuln.Aliases {
+		if alias == "CVE-2026-39833" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Aliases = %v, want to contain %q", vuln.Aliases, "CVE-2026-39833")
+	}
+}
+
+// moduleKeys returns the module paths present in a results map for use in
+// diagnostic messages.
+func moduleKeys(m map[string][]Vulnerability) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

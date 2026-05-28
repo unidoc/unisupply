@@ -450,7 +450,8 @@ func TestParseGitHubPath(t *testing.T) {
 
 // TestClassifyActivity verifies activity classification based on last commit time.
 func TestClassifyActivity(t *testing.T) {
-	now := time.Now()
+	// Use a fixed, day-truncated scan-start for deterministic tests.
+	now := time.Now().UTC().Truncate(24 * time.Hour)
 
 	tests := []struct {
 		name             string
@@ -518,12 +519,64 @@ func TestClassifyActivity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyActivity(tt.lastCommit)
+			got := classifyActivity(now, tt.lastCommit)
 			if got != tt.expectedClassify {
 				t.Errorf("classifyActivity(%v) = %q, want %q", tt.lastCommit, got, tt.expectedClassify)
 			}
 		})
 	}
+}
+
+// TestClassifyActivity_StableAcrossClockJitter verifies that band classifications
+// are identical across 100 calls when scanStart is jittered by ±5 minutes within
+// the same UTC day. This is the core determinism guarantee: two scans on the same
+// calendar day must see identical classifications for the same lastCommit.
+func TestClassifyActivity_StableAcrossClockJitter(t *testing.T) {
+	// Use a fixed base day far from clock edges.
+	baseDay := time.Date(2025, time.March, 15, 0, 0, 0, 0, time.UTC)
+	const jitterIterations = 100
+	const maxJitter = 5 * time.Minute
+
+	t.Run("12_month_boundary", func(t *testing.T) {
+		// lastCommit is exactly 12 months minus 1 minute before the start of baseDay.
+		// After truncation all jittered scanStart values equal baseDay, so
+		// monthsSince(baseDay, lastCommit) == 11 → classification must be "sporadic".
+		lastCommit := baseDay.Add(-(12*30*24*time.Hour - time.Minute))
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			// Jitter within ±5 minutes but stay on the same UTC day.
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter // range: [-5m, +5m)
+			jitteredNow := baseDay.Add(jitter)
+			// Truncating to a day must collapse back to baseDay.
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
+
+	t.Run("3_month_boundary", func(t *testing.T) {
+		// lastCommit is exactly 3 months minus 1 minute before the start of baseDay.
+		// monthsSince(baseDay, lastCommit) == 2 → classification must be "active".
+		lastCommit := baseDay.Add(-(3*30*24*time.Hour - time.Minute))
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter
+			jitteredNow := baseDay.Add(jitter)
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
 }
 
 // ============================================================================
@@ -929,7 +982,7 @@ func TestMaintainerScanner_AnalyzeRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -972,7 +1025,7 @@ func TestMaintainerScanner_AnalyzeRepo_SingleMaintainer(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("single", "maintainer")
+	info := ms.analyzeRepo(context.Background(), "single", "maintainer")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -997,7 +1050,7 @@ func TestMaintainerScanner_AnalyzeRepo_NoLicense(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("no", "license")
+	info := ms.analyzeRepo(context.Background(), "no", "license")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1016,7 +1069,7 @@ func TestMaintainerScanner_AnalyzeRepo_APIError(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("error", "repo")
+	info := ms.analyzeRepo(context.Background(), "error", "repo")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil (should return partial info on API error)")
@@ -1029,6 +1082,66 @@ func TestMaintainerScanner_AnalyzeRepo_APIError(t *testing.T) {
 	if info.Repo != "repo" {
 		t.Errorf("Repo = %q, want %q", info.Repo, "repo")
 	}
+	// DataAvailable must be false when the API returned a non-200 status.
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false for 404 API response")
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_FalseOn403 verifies that a 403 response
+// from the GitHub API sets DataAvailable to false. This covers the unauthenticated
+// rate-limit scenario where stars/bus-factor would otherwise be read as zero.
+func TestMaintainerScanner_DataAvailable_FalseOn403(t *testing.T) {
+	// Serve a 403 for all /repos/ requests.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "" /* no token */)
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo(context.Background(), "docker", "docker")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false when GitHub API returns 403")
+	}
+	// Zero-valued fields must not be treated as real measurements.
+	if info.Stars != 0 {
+		t.Errorf("Stars = %d on 403 response, want 0 (zero-valued, not real)", info.Stars)
+	}
+	if info.BusFactor != 0 {
+		t.Errorf("BusFactor = %d on 403 response, want 0 (zero-valued, not real)", info.BusFactor)
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_TrueOnSuccess verifies that a successful
+// GitHub API response sets DataAvailable to true.
+func TestMaintainerScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
+	server := newMockGitHub()
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "test-token")
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if !info.DataAvailable {
+		t.Errorf("DataAvailable = false, want true for successful API response")
+	}
+	if info.Stars == 0 {
+		t.Errorf("Stars = 0 with DataAvailable=true, want real star count")
+	}
 }
 
 // TestMaintainerScanner_Cache verifies caching of repo data.
@@ -1040,13 +1153,13 @@ func TestMaintainerScanner_Cache(t *testing.T) {
 	ms.client.Transport = &testTransport{baseURL: server.URL, requestCount: make(map[string]int)}
 
 	// First call
-	info1 := ms.analyzeRepo("golang", "go")
+	info1 := ms.analyzeRepo(context.Background(), "golang", "go")
 	if info1 == nil {
 		t.Fatal("first analyzeRepo returned nil")
 	}
 
 	// Second call (should come from cache)
-	info2 := ms.analyzeRepo("golang", "go")
+	info2 := ms.analyzeRepo(context.Background(), "golang", "go")
 	if info2 == nil {
 		t.Fatal("second analyzeRepo returned nil")
 	}
@@ -1161,7 +1274,7 @@ func TestMaintainerScanner_TopContributors(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1183,7 +1296,7 @@ func TestMaintainerScanner_ArchivedRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("archived", "old")
+	info := ms.analyzeRepo(context.Background(), "archived", "old")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1205,7 +1318,7 @@ func TestMaintainerScanner_ForkRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("fork", "clone")
+	info := ms.analyzeRepo(context.Background(), "fork", "clone")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1224,7 +1337,7 @@ func TestMaintainerScanner_WidelyUsedInactive(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("widely", "used")
+	info := ms.analyzeRepo(context.Background(), "widely", "used")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1250,13 +1363,13 @@ func TestMaintainerScanner_UserCache(t *testing.T) {
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
 	// First call should fetch
-	user1 := ms.fetchUser("golang")
+	user1 := ms.fetchUser(context.Background(), "golang")
 	if user1 == nil {
 		t.Fatal("fetchUser returned nil")
 	}
 
 	// Second call should use cache
-	user2 := ms.fetchUser("golang")
+	user2 := ms.fetchUser(context.Background(), "golang")
 	if user2 == nil {
 		t.Fatal("fetchUser returned nil on cache hit")
 	}
@@ -1275,7 +1388,7 @@ func TestMaintainerScanner_FetchContributors(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	contribs := ms.fetchContributors("golang", "go")
+	contribs := ms.fetchContributors(context.Background(), "golang", "go")
 
 	if len(contribs) == 0 {
 		t.Errorf("fetchContributors returned empty slice")
@@ -1373,7 +1486,7 @@ func TestMaintainerScanner_BusinessModelDetection(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1395,7 +1508,7 @@ func TestMaintainerScanner_ActivityPatternDetection(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")

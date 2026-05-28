@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,6 +17,12 @@ import (
 
 // ResilienceInfo holds long-term reliability indicators for a module.
 type ResilienceInfo struct {
+	// DataAvailable is false when the Go module proxy returned a network
+	// error or a non-200 status for the version list — meaning no release
+	// history could be fetched. When false, all numeric fields are
+	// zero-valued and MUST NOT be interpreted as real measurements.
+	DataAvailable bool `json:"data_available"`
+
 	// Release cadence.
 	TotalReleases    int       `json:"total_releases"`
 	AvgDaysBetween   float64   `json:"avg_days_between_releases"`
@@ -44,20 +49,25 @@ type ResilienceInfo struct {
 
 // ResilienceScanner computes resilience scores from release history.
 type ResilienceScanner struct {
-	client   *http.Client
+	client   *Client
 	proxyURL string
 	cache    map[string]*ResilienceInfo
 	mu       sync.Mutex
+
+	// ScanStart is the reference time used for cadence and age calculations.
+	// Truncated to the start of a UTC day so that two scans on the same calendar
+	// day produce identical classifications. Defaults to
+	// time.Now().UTC().Truncate(24*time.Hour) at construction time.
+	ScanStart time.Time
 }
 
 // NewResilienceScanner creates a new resilience scanner.
 func NewResilienceScanner(timeout time.Duration) *ResilienceScanner {
 	return &ResilienceScanner{
-		client: &http.Client{
-			Timeout: timeout,
-		},
-		proxyURL: "https://proxy.golang.org",
-		cache:    make(map[string]*ResilienceInfo),
+		client:    NewClient(ClientOptions{Timeout: timeout}),
+		proxyURL:  "https://proxy.golang.org",
+		cache:     make(map[string]*ResilienceInfo),
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
 	}
 }
 
@@ -81,7 +91,7 @@ func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph,
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := rs.analyzeModule(d.Module.Path)
+			info := rs.analyzeModule(ctx, d.Module.Path)
 
 			// Enrich with maintainer data if available.
 			if mi, ok := maintainers[d.Module.Path]; ok {
@@ -102,7 +112,7 @@ func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph,
 	return results
 }
 
-func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
+func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) *ResilienceInfo {
 	rs.mu.Lock()
 	if cached, ok := rs.cache[modPath]; ok {
 		rs.mu.Unlock()
@@ -112,14 +122,19 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 
 	info := &ResilienceInfo{}
 
-	// Fetch version list from Go proxy.
-	versions := rs.fetchVersionList(modPath)
+	// Fetch version list from Go proxy. An empty list means the proxy was
+	// unreachable or returned an error: leave DataAvailable false so callers
+	// know zero-values are not real.
+	versions := rs.fetchVersionList(ctx, modPath)
 	if len(versions) == 0 {
 		rs.mu.Lock()
 		rs.cache[modPath] = info
 		rs.mu.Unlock()
 		return info
 	}
+
+	// Version list is available: all fields that follow are real data.
+	info.DataAvailable = true
 
 	info.TotalReleases = len(versions)
 
@@ -128,7 +143,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	majorVersions := make(map[string]bool)
 
 	for _, ver := range versions {
-		t := rs.fetchVersionTime(modPath, ver)
+		t := rs.fetchVersionTime(ctx, modPath, ver)
 		if !t.IsZero() {
 			timestamps = append(timestamps, t)
 		}
@@ -166,7 +181,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 
 		info.FirstReleaseDate = timestamps[0]
 		info.LastReleaseDate = timestamps[len(timestamps)-1]
-		info.ProjectAgeDays = int(time.Since(info.FirstReleaseDate).Hours() / 24)
+		info.ProjectAgeDays = int(rs.ScanStart.Sub(info.FirstReleaseDate).Hours() / 24)
 
 		if len(timestamps) > 1 {
 			totalDays := info.LastReleaseDate.Sub(info.FirstReleaseDate).Hours() / 24
@@ -175,7 +190,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	}
 
 	// Classify cadence.
-	info.ReleaseCadence = classifyCadence(time.Now(), info)
+	info.ReleaseCadence = classifyCadence(rs.ScanStart, info)
 
 	// Classify version scheme.
 	info.VersionScheme = classifyVersionScheme(versions)
@@ -183,7 +198,7 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	// Check for governance files (if GitHub).
 	owner, repo := parseGitHubPath(modPath)
 	if owner != "" && repo != "" {
-		rs.checkGovernanceFiles(owner, repo, info)
+		rs.checkGovernanceFiles(ctx, owner, repo, info)
 	}
 
 	rs.mu.Lock()
@@ -193,18 +208,14 @@ func (rs *ResilienceScanner) analyzeModule(modPath string) *ResilienceInfo {
 	return info
 }
 
-func (rs *ResilienceScanner) fetchVersionList(modPath string) []string {
+func (rs *ResilienceScanner) fetchVersionList(ctx context.Context, modPath string) []string {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/list", rs.proxyURL, escapedPath)
 
-	resp, err := rs.client.Get(url)
+	body, resp, err := rs.client.Get(ctx, url, GetOptions{
+		Host: proxyHost(rs.proxyURL),
+	})
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
 		return nil
 	}
 
@@ -218,18 +229,14 @@ func (rs *ResilienceScanner) fetchVersionList(modPath string) []string {
 	return versions
 }
 
-func (rs *ResilienceScanner) fetchVersionTime(modPath, version string) time.Time {
+func (rs *ResilienceScanner) fetchVersionTime(ctx context.Context, modPath, version string) time.Time {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@v/%s.info", rs.proxyURL, escapedPath, version)
 
-	resp, err := rs.client.Get(url)
+	body, resp, err := rs.client.Get(ctx, url, GetOptions{
+		Host: proxyHost(rs.proxyURL),
+	})
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return time.Time{}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
 		return time.Time{}
 	}
 
@@ -242,7 +249,7 @@ func (rs *ResilienceScanner) fetchVersionTime(modPath, version string) time.Time
 	return info.Time
 }
 
-func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *ResilienceInfo) {
+func (rs *ResilienceScanner) checkGovernanceFiles(ctx context.Context, owner, repo string, info *ResilienceInfo) {
 	// Check for SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md via GitHub API.
 	files := []struct {
 		path string
@@ -255,12 +262,11 @@ func (rs *ResilienceScanner) checkGovernanceFiles(owner, repo string, info *Resi
 
 	for _, f := range files {
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, f.path)
-		resp, err := rs.client.Head(url)
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				*f.flag = true
-			}
+		resp, err := rs.client.Head(ctx, url, GetOptions{
+			Host: "api.github.com",
+		})
+		if err == nil && resp.StatusCode == http.StatusOK {
+			*f.flag = true
 		}
 	}
 }

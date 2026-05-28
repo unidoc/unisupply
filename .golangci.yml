@@ -29,6 +29,11 @@ linters-settings:
       - name: package-comments
   gocritic:
     enabled-tags: [diagnostic, style, performance]
+    settings:
+      rangeValCopy:
+        sizeThreshold: 192
+      hugeParam:
+        sizeThreshold: 192
 
 issues:
   exclude-rules:

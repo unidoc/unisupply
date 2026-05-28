@@ -1,0 +1,1886 @@
+{
+  "_meta": {
+    "content_sha256": "2de067eff25dc94d3f7f6e69075e4b56ce6d0d576d56195439fab00af9432133",
+    "recorded_at": "2026-05-18T09:40:06Z",
+    "rerecord_reason": "Initial recording for Plan 29 calibration corpus",
+    "scanner_git_sha": "d97846a5192775feb9922ef1546d327720a61d7a",
+    "unisupply_version": "0.5.0-dev",
+    "upstream_pin": "d97846a5192775feb9922ef1546d327720a61d7a"
+  },
+  "build_file_findings": [],
+  "ci_findings": [],
+  "debug_scoring": {
+    "enriched_cves": null,
+    "headline_driver": "mean",
+    "mean_dep_risk_score": 16,
+    "per_dep_inputs": null,
+    "severity_adjusted_vuln_score": 0,
+    "step_function_inputs": {
+      "critical": 0,
+      "high": 0,
+      "low": 0,
+      "medium": 0
+    }
+  },
+  "dependencies": [
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/sirupsen/logrus",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype",
+        "golang.org/x/crypto",
+        "golang.org/x/net",
+        "golang.org/x/telemetry",
+        "golang.org/x/tools",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-04-23T15:37:02Z",
+        "months_since_release": 1
+      },
+      "module": "golang.org/x/sys",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.43.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 3,
+        "business_model": "organization",
+        "contributor_count": 3,
+        "data_available": true,
+        "forks": 7,
+        "is_org": true,
+        "last_commit_date": "2023-07-10T18:15:55Z",
+        "license": "BSD-3-Clause",
+        "open_issues": 0,
+        "owner_location": "The World",
+        "owner_name": "Gorilla web toolkit",
+        "owner_url": "https://gorilla.github.io",
+        "stars": 48,
+        "top_contributors": [
+          "kisielk",
+          "moraes",
+          "BI1BFR"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2015-08-20T05:14:29Z",
+        "months_since_release": 129
+      },
+      "module": "github.com/gorilla/i18n",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive",
+        "takeover_candidate",
+        "low_resilience"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 30,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.0.0-20150820051429-8b358169da46"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 1,
+        "business_model": "company_backed",
+        "contributor_count": 14,
+        "data_available": true,
+        "forks": 4,
+        "is_org": true,
+        "last_commit_date": "2026-05-13T05:42:42Z",
+        "license": "NOASSERTION",
+        "open_issues": 0,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 1,
+        "sub_dependencies": 1,
+        "top_contributors": [
+          "nigeltao",
+          "sampila",
+          "3ace",
+          "anovik",
+          "gunnsth"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-13T05:41:56Z",
+        "months_since_release": 0
+      },
+      "module": "github.com/unidoc/freetype",
+      "risk_factors": [
+        "single_maintainer"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 9,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 50,
+        "maintenance_score": 0,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.2.3"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply"
+      ],
+      "direct": true,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-04-22T22:03:04Z",
+        "months_since_release": 1
+      },
+      "module": "golang.org/x/vuln",
+      "risk_level": "LOW",
+      "risk_score": 1,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.3.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/sirupsen/logrus",
+        "github.com/stretchr/testify",
+        "github.com/unidoc/unichart",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 1,
+        "business_model": "individual",
+        "contributor_count": 18,
+        "data_available": true,
+        "forks": 373,
+        "last_commit_date": "2024-04-06T10:36:47Z",
+        "license": "ISC",
+        "open_issues": 69,
+        "owner_name": "Dave Collins",
+        "stars": 6392,
+        "top_contributors": [
+          "davecgh",
+          "dajohi",
+          "briandorsey",
+          "TShadwell",
+          "atombender"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2018-02-21T23:26:28Z",
+        "months_since_release": 99
+      },
+      "module": "github.com/davecgh/go-spew",
+      "risk_factors": [
+        "unmaintained",
+        "single_maintainer",
+        "maintainer_inactive",
+        "takeover_candidate"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 28,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 50,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.1.1"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 3,
+        "data_available": true,
+        "forks": 11,
+        "last_commit_date": "2024-04-10T08:36:08Z",
+        "license": "MIT",
+        "open_issues": 8,
+        "owner_location": "Galati, Romania",
+        "owner_name": "Adrian-George Bostan",
+        "owner_url": "https://bio.link/adrg",
+        "stars": 47,
+        "top_contributors": [
+          "adrg",
+          "dependabot[bot]",
+          "darkliquid"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2021-01-17T14:32:57Z",
+        "months_since_release": 64
+      },
+      "module": "github.com/adrg/sysfont",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 29,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.1.2"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/tools"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 1,
+        "business_model": "individual",
+        "contributor_count": 58,
+        "data_available": true,
+        "forks": 293,
+        "last_commit_date": "2026-03-25T05:08:07Z",
+        "license": "MIT",
+        "open_issues": 16,
+        "owner_location": "Tokyo, Japan",
+        "owner_name": "Yusuke Inuzuka",
+        "owner_url": "http://inforno.net/",
+        "stars": 4803,
+        "top_contributors": [
+          "yuin",
+          "moorereason",
+          "henry0312",
+          "abhinav",
+          "88250"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-03-25T05:06:36Z",
+        "months_since_release": 2
+      },
+      "module": "github.com/yuin/goldmark",
+      "risk_factors": [
+        "single_maintainer"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 8,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 50,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v1.4.13"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2024-09-03T12:06:38Z",
+        "months_since_release": 20
+      },
+      "module": "golang.org/x/xerrors",
+      "risk_factors": [
+        "low_resilience"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 20,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 60,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.0.0-20240903120638-7835f813f4da"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 12,
+        "data_available": true,
+        "forks": 33,
+        "last_commit_date": "2026-05-11T15:59:16Z",
+        "license": "MIT",
+        "open_issues": 6,
+        "owner_location": "Galati, Romania",
+        "owner_name": "Adrian-George Bostan",
+        "owner_url": "https://bio.link/adrg",
+        "stars": 992,
+        "top_contributors": [
+          "adrg",
+          "dependabot[bot]",
+          "nothub",
+          "GreyXor",
+          "shelepuginivan"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2024-10-31T16:19:38Z",
+        "months_since_release": 19
+      },
+      "module": "github.com/adrg/xdg",
+      "risk_level": "LOW",
+      "risk_score": 21,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 60,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.5.3"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 3,
+        "business_model": "individual",
+        "contributor_count": 100,
+        "data_available": true,
+        "forks": 2280,
+        "last_commit_date": "2026-05-08T08:46:02Z",
+        "license": "MIT",
+        "open_issues": 56,
+        "owner_company": "turbopuffer inc.",
+        "owner_location": "Ottawa, ON",
+        "owner_name": "Simon Eskildsen",
+        "owner_url": "http://turbopuffer.com",
+        "stars": 25726,
+        "sub_dependencies": 3,
+        "top_contributors": [
+          "sirupsen",
+          "dgsb",
+          "thaJeztah",
+          "aybabtme",
+          "dclendenan"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-10-23T12:47:52Z",
+        "months_since_release": 7
+      },
+      "module": "github.com/sirupsen/logrus",
+      "risk_level": "LOW",
+      "risk_score": 6,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.9.3"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 1,
+        "business_model": "company_backed",
+        "contributor_count": 3,
+        "data_available": true,
+        "forks": 1,
+        "is_org": true,
+        "last_commit_date": "2022-07-02T20:03:34Z",
+        "license": "Apache-2.0",
+        "open_issues": 0,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 0,
+        "top_contributors": [
+          "AbdullahDiaa",
+          "sampila",
+          "gunnsth"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2022-07-02T20:03:34Z",
+        "months_since_release": 46
+      },
+      "module": "github.com/unidoc/garabic",
+      "risk_factors": [
+        "unmaintained",
+        "single_maintainer",
+        "maintainer_inactive",
+        "takeover_candidate",
+        "low_resilience"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 38,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 50,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.0.0-20220702200334-8c7cb25baa11"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 20,
+        "data_available": true,
+        "forks": 160,
+        "last_commit_date": "2024-07-26T19:52:02Z",
+        "license": "MIT",
+        "open_issues": 34,
+        "owner_name": "kr",
+        "owner_url": "https://xph.us/",
+        "stars": 1410,
+        "top_contributors": [
+          "kr",
+          "cee-dub",
+          "jhenstridge",
+          "jmcvetta",
+          "myitcv"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2022-08-29T23:03:05Z",
+        "months_since_release": 45
+      },
+      "module": "github.com/kr/pretty",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive",
+        "takeover_candidate"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 29,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "golang.org/x/tools",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T19:23:27Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/telemetry",
+      "risk_factors": [
+        "low_resilience"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 5,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.0.0-20260421165255-392afab6f40e"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "golang.org/x/mod",
+        "golang.org/x/text",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T20:49:05Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/tools",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.44.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unitype",
+        "gopkg.in/yaml.v3"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2020-11-30T13:44:42Z",
+        "months_since_release": 66
+      },
+      "module": "gopkg.in/check.v1",
+      "risk_factors": [
+        "unmaintained",
+        "low_resilience"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 33,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 30,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v1.0.0-20180628173108-788fd7840127"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "company_backed",
+        "contributor_count": 4,
+        "data_available": true,
+        "forks": 9,
+        "is_org": true,
+        "last_commit_date": "2025-01-09T16:13:53Z",
+        "license": "NOASSERTION",
+        "open_issues": 0,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 17,
+        "sub_dependencies": 10,
+        "top_contributors": [
+          "gunnsth",
+          "sampila",
+          "3ace",
+          "nanitor-gunnsth"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-01-09T06:02:38Z",
+        "months_since_release": 16
+      },
+      "module": "github.com/unidoc/unitype",
+      "risk_factors": [
+        "maintainer_inactive"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 18,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 60,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.5.1"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 3,
+        "data_available": true,
+        "forks": 29,
+        "last_commit_date": "2026-03-27T02:32:17Z",
+        "license": "MIT",
+        "open_issues": 4,
+        "owner_location": "Galati, Romania",
+        "owner_name": "Adrian-George Bostan",
+        "owner_url": "https://bio.link/adrg",
+        "stars": 418,
+        "top_contributors": [
+          "adrg",
+          "dependabot[bot]",
+          "fisabelle-lmi"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2023-09-27T15:55:27Z",
+        "months_since_release": 32
+      },
+      "module": "github.com/adrg/strutil",
+      "risk_factors": [
+        "unmaintained"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 29,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.3.1"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/timestamp",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "sporadic",
+        "bus_factor": 3,
+        "business_model": "company_backed",
+        "contributor_count": 17,
+        "data_available": true,
+        "forks": 11,
+        "is_org": true,
+        "last_commit_date": "2025-08-22T09:40:05Z",
+        "license": "MIT",
+        "open_issues": 1,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 1,
+        "top_contributors": [
+          "fullsailor",
+          "jvehent",
+          "sampila",
+          "bilalashraf123",
+          "vanbroup"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-08-22T09:38:24Z",
+        "months_since_release": 9
+      },
+      "module": "github.com/unidoc/pkcs7",
+      "risk_level": "LOW",
+      "risk_score": 9,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.2.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply"
+      ],
+      "direct": true,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 4,
+        "business_model": "individual",
+        "contributor_count": 84,
+        "data_available": true,
+        "forks": 370,
+        "last_commit_date": "2026-05-16T14:05:00Z",
+        "license": "BSD-3-Clause",
+        "open_issues": 140,
+        "owner_location": "NYC",
+        "owner_name": "Steve Francia",
+        "owner_url": "http://spf13.com",
+        "stars": 2737,
+        "top_contributors": [
+          "eparis",
+          "tomasaschan",
+          "ogier",
+          "n10v",
+          "thaJeztah"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-09-02T06:08:29Z",
+        "months_since_release": 8
+      },
+      "module": "github.com/spf13/pflag",
+      "risk_level": "LOW",
+      "risk_score": 6,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.0.10"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/freetype",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T18:32:22Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/image",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.39.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/sirupsen/logrus",
+        "github.com/unidoc/unichart",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 4,
+        "business_model": "organization",
+        "contributor_count": 100,
+        "data_available": true,
+        "forks": 1714,
+        "is_org": true,
+        "last_commit_date": "2026-05-17T13:31:49Z",
+        "license": "MIT",
+        "open_issues": 353,
+        "owner_location": "Boulder, CO \u0026 Worldwide \u0026 The Cloud",
+        "owner_name": "Stretchr, Inc.",
+        "stars": 26000,
+        "sub_dependencies": 4,
+        "top_contributors": [
+          "ernesto-jimenez",
+          "dolmen",
+          "brackendawson",
+          "tylerb",
+          "boyan-soubachov"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-08-27T10:46:31Z",
+        "months_since_release": 9
+      },
+      "module": "github.com/stretchr/testify",
+      "risk_level": "LOW",
+      "risk_score": 6,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.7.0"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-06-13T18:44:18Z",
+        "months_since_release": 11
+      },
+      "module": "golang.org/x/tools/go/expect",
+      "risk_level": "LOW",
+      "risk_score": 12,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.1.1-deprecated"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3",
+        "golang.org/x/net"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T18:32:18Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/crypto",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.50.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/stretchr/testify"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 4,
+        "business_model": "organization",
+        "contributor_count": 17,
+        "data_available": true,
+        "forks": 78,
+        "is_org": true,
+        "last_commit_date": "2026-03-20T13:17:27Z",
+        "license": "MIT",
+        "open_issues": 4,
+        "owner_location": "Boulder, CO \u0026 Worldwide \u0026 The Cloud",
+        "owner_name": "Stretchr, Inc.",
+        "stars": 853,
+        "top_contributors": [
+          "hanzei",
+          "tylerb",
+          "dependabot[bot]",
+          "geseq",
+          "matryer"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-10-03T06:41:42Z",
+        "months_since_release": 7
+      },
+      "module": "github.com/stretchr/objx",
+      "risk_level": "LOW",
+      "risk_score": 12,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.5.2"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 58,
+        "data_available": true,
+        "forks": 191,
+        "last_commit_date": "2026-05-04T13:46:57Z",
+        "license": "MIT",
+        "open_issues": 36,
+        "owner_location": "Tokyo, Japan",
+        "owner_name": "Gabriel Vasile",
+        "stars": 1976,
+        "sub_dependencies": 1,
+        "top_contributors": [
+          "gabriel-vasile",
+          "dependabot[bot]",
+          "ppai-plivo",
+          "WheeskyJack",
+          "pippo"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-02-01T06:52:37Z",
+        "months_since_release": 3
+      },
+      "module": "github.com/gabriel-vasile/mimetype",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.4.8"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/crypto",
+        "golang.org/x/net"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T14:56:58Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/term",
+      "risk_level": "LOW",
+      "risk_score": 3,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.42.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/stretchr/testify",
+        "github.com/unidoc/unichart",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 5,
+        "data_available": true,
+        "forks": 116,
+        "last_commit_date": "2023-05-30T11:23:07Z",
+        "license": "NOASSERTION",
+        "open_issues": 4,
+        "owner_name": "Patrick Mézard",
+        "stars": 428,
+        "top_contributors": [
+          "pmezard",
+          "visualfc",
+          "shazow",
+          "justbuchanan",
+          "rdwilliamson"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2016-01-10T10:55:54Z",
+        "months_since_release": 124
+      },
+      "module": "github.com/pmezard/go-difflib",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive",
+        "takeover_candidate"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 23,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v1.0.0"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/tools",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 1,
+        "business_model": "company_backed",
+        "contributor_count": 29,
+        "data_available": true,
+        "forks": 222,
+        "is_org": true,
+        "last_commit_date": "2026-03-10T22:00:54Z",
+        "license": "BSD-3-Clause",
+        "open_issues": 57,
+        "owner_location": "United States of America",
+        "owner_name": "Google",
+        "owner_url": "https://opensource.google/",
+        "stars": 4632,
+        "top_contributors": [
+          "dsnet",
+          "neild",
+          "muesli",
+          "tklauser",
+          "178inaba"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-01-14T18:15:44Z",
+        "months_since_release": 16
+      },
+      "module": "github.com/google/go-cmp",
+      "risk_factors": [
+        "single_maintainer"
+      ],
+      "risk_level": "LOW",
+      "risk_score": 18,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 60,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.6.0"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-06-13T18:44:18Z",
+        "months_since_release": 11
+      },
+      "module": "golang.org/x/tools/go/packages/packagestest",
+      "risk_level": "LOW",
+      "risk_score": 12,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.1.1-deprecated"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "individual",
+        "contributor_count": 7,
+        "data_available": true,
+        "forks": 27,
+        "last_commit_date": "2024-07-26T19:36:48Z",
+        "license": "MIT",
+        "open_issues": 3,
+        "owner_name": "kr",
+        "owner_url": "https://xph.us/",
+        "stars": 98,
+        "top_contributors": [
+          "kr",
+          "dependabot[bot]",
+          "octo",
+          "maruel",
+          "mmorel-35"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2020-02-14T20:31:06Z",
+        "months_since_release": 75
+      },
+      "module": "github.com/kr/text",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 29,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "version": "v0.2.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/gabriel-vasile/mimetype",
+        "github.com/unidoc/unipdf/v3",
+        "golang.org/x/crypto",
+        "golang.org/x/tools"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T20:02:48Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/net",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.53.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "golang.org/x/telemetry",
+        "golang.org/x/text",
+        "golang.org/x/tools",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T14:58:09Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/mod",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.35.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "organization",
+        "contributor_count": 2,
+        "data_available": true,
+        "forks": 13,
+        "is_org": true,
+        "last_commit_date": "2021-11-04T18:27:44Z",
+        "license": "Apache-2.0",
+        "open_issues": 5,
+        "owner_name": "Trimmer",
+        "owner_url": "https://trimmer.io",
+        "stars": 68,
+        "top_contributors": [
+          "echa",
+          "martinhoefling"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2021-11-04T18:27:19Z",
+        "months_since_release": 54
+      },
+      "module": "github.com/trimmer-io/go-xmp",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 26,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v1.0.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 3,
+        "business_model": "organization",
+        "contributor_count": 3,
+        "data_available": true,
+        "forks": 7,
+        "is_org": true,
+        "last_commit_date": "2020-04-29T03:17:37Z",
+        "license": "MIT",
+        "open_issues": 0,
+        "owner_location": "Düsseldorf, Germany",
+        "owner_name": "marvin + konsorten",
+        "owner_url": "http://konsorten.de",
+        "stars": 8,
+        "top_contributors": [
+          "fkollmann",
+          "konsorten-ops",
+          "filmil"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2020-04-28T12:16:39Z",
+        "months_since_release": 73
+      },
+      "module": "github.com/konsorten/go-windows-terminal-sequences",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 26,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v1.0.2"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/stretchr/testify",
+        "github.com/unidoc/unichart",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": true,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2022-05-27T08:35:30Z",
+        "months_since_release": 48
+      },
+      "module": "gopkg.in/yaml.v3",
+      "risk_factors": [
+        "unmaintained"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 26,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 30,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v3.0.1"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 2,
+        "business_model": "company_backed",
+        "contributor_count": 4,
+        "data_available": true,
+        "forks": 3,
+        "is_org": true,
+        "last_commit_date": "2020-04-12T00:55:15Z",
+        "license": "BSD-2-Clause",
+        "open_issues": 0,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 1,
+        "sub_dependencies": 1,
+        "top_contributors": [
+          "vanbroup",
+          "bilalashraf123",
+          "a5i",
+          "gunnsth"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2020-04-12T00:55:13Z",
+        "months_since_release": 73
+      },
+      "module": "github.com/unidoc/timestamp",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive",
+        "low_resilience"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 30,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.0.0-20200412005513-91597fd3793a"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "golang.org/x/telemetry",
+        "golang.org/x/text",
+        "golang.org/x/tools",
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-02-23T18:54:42Z",
+        "months_since_release": 3
+      },
+      "module": "golang.org/x/sync",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.20.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply"
+      ],
+      "direct": true,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 4,
+        "business_model": "company_backed",
+        "contributor_count": 25,
+        "data_available": true,
+        "forks": 277,
+        "is_org": true,
+        "last_commit_date": "2026-04-10T00:37:28Z",
+        "license": "NOASSERTION",
+        "open_issues": 14,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 3075,
+        "sub_dependencies": 25,
+        "top_contributors": [
+          "gunnsth",
+          "adrg",
+          "peterwilliams97",
+          "unidoc-build",
+          "s4kibs4mi"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-04-27T09:02:36Z",
+        "months_since_release": 13
+      },
+      "module": "github.com/unidoc/unipdf/v3",
+      "risk_level": "LOW",
+      "risk_score": 15,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 60,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v3.69.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3",
+        "github.com/unidoc/unitype",
+        "golang.org/x/crypto",
+        "golang.org/x/image",
+        "golang.org/x/net"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-05-08T14:56:42Z",
+        "months_since_release": 0
+      },
+      "module": "golang.org/x/text",
+      "risk_level": "LOW",
+      "risk_score": 0,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.36.0"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "inactive",
+        "bus_factor": 3,
+        "business_model": "company_backed",
+        "contributor_count": 5,
+        "data_available": true,
+        "forks": 14,
+        "is_org": true,
+        "last_commit_date": "2023-09-18T10:10:21Z",
+        "license": "Apache-2.0",
+        "open_issues": 5,
+        "owner_location": "United States of America",
+        "owner_name": "Google",
+        "owner_url": "https://opensource.google/",
+        "stars": 180,
+        "top_contributors": [
+          "jba",
+          "vangent",
+          "gbrlsnchs",
+          "neild",
+          "toshi0607"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2022-04-08T22:55:17Z",
+        "months_since_release": 49
+      },
+      "module": "github.com/google/go-cmdtest",
+      "risk_factors": [
+        "unmaintained",
+        "maintainer_inactive",
+        "takeover_candidate"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 26,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.4.1-0.20220921163831-55ab3332a786"
+    },
+    {
+      "dependency_path": [
+        "golang.org/x/vuln"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "sporadic",
+        "bus_factor": 3,
+        "business_model": "company_backed",
+        "contributor_count": 7,
+        "data_available": true,
+        "forks": 30,
+        "is_org": true,
+        "last_commit_date": "2026-01-10T08:53:38Z",
+        "license": "Apache-2.0",
+        "open_issues": 3,
+        "owner_location": "United States of America",
+        "owner_name": "Google",
+        "owner_url": "https://opensource.google/",
+        "stars": 673,
+        "top_contributors": [
+          "stapelberg",
+          "hansmi",
+          "twpayne",
+          "tklauser",
+          "costela"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2021-04-06T14:11:08Z",
+        "months_since_release": 61
+      },
+      "module": "github.com/google/renameio",
+      "risk_factors": [
+        "unmaintained"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 26,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v0.1.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unisupply",
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "active",
+        "bus_factor": 3,
+        "business_model": "company_backed",
+        "contributor_count": 5,
+        "data_available": true,
+        "forks": 7,
+        "is_org": true,
+        "last_commit_date": "2026-03-11T03:29:18Z",
+        "license": "MIT",
+        "open_issues": 0,
+        "owner_location": "The Web",
+        "owner_name": "UniDoc",
+        "owner_url": "https://unidoc.io",
+        "stars": 9,
+        "sub_dependencies": 4,
+        "top_contributors": [
+          "adrg",
+          "3ace",
+          "anovik",
+          "gunnsth",
+          "kellemNegasi"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2026-02-19T10:22:49Z",
+        "months_since_release": 3
+      },
+      "module": "github.com/unidoc/unichart",
+      "risk_level": "LOW",
+      "risk_score": 3,
+      "score_breakdown": {
+        "depth_score": 0,
+        "maintainer_score": 0,
+        "maintenance_score": 0,
+        "maturity_score": 30,
+        "vuln_score": 0
+      },
+      "test_only": false,
+      "version": "v0.4.0"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unipdf/v3"
+      ],
+      "direct": false,
+      "maintainer": {
+        "activity_pattern": "sporadic",
+        "bus_factor": 4,
+        "business_model": "individual",
+        "contributor_count": 17,
+        "data_available": true,
+        "forks": 184,
+        "last_commit_date": "2025-07-25T11:19:23Z",
+        "license": "MIT",
+        "open_issues": 7,
+        "owner_name": "Florian",
+        "owner_url": "https://chaos.social/@boombuler",
+        "stars": 1550,
+        "top_contributors": [
+          "boombuler",
+          "zhaori96",
+          "danielwhite",
+          "arp242",
+          "PMoneda"
+        ]
+      },
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2025-07-22T22:10:49Z",
+        "months_since_release": 10
+      },
+      "module": "github.com/boombuler/barcode",
+      "risk_level": "LOW",
+      "risk_score": 9,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 0,
+        "maintenance_score": 25,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v1.0.2"
+    },
+    {
+      "dependency_path": [
+        "github.com/unidoc/unitype"
+      ],
+      "direct": false,
+      "maintenance": {
+        "archived": false,
+        "deprecated": false,
+        "last_release": "2020-11-17T15:46:20Z",
+        "months_since_release": 66
+      },
+      "module": "gopkg.in/yaml.v2",
+      "risk_factors": [
+        "unmaintained"
+      ],
+      "risk_level": "MEDIUM",
+      "risk_score": 29,
+      "score_breakdown": {
+        "depth_score": 20,
+        "maintainer_score": 30,
+        "maintenance_score": 90,
+        "maturity_score": 0,
+        "vuln_score": 0
+      },
+      "version": "v2.4.0"
+    }
+  ],
+  "diagnostics": {
+    "max_dep_risk_score": 38,
+    "p95_dep_risk_score": 30
+  },
+  "generated_at": "2026-05-18T09:32:32Z",
+  "headline_driver": "mean",
+  "mean_dep_risk_score": 16,
+  "overall_risk_level": "LOW",
+  "overall_risk_score": 16,
+  "project": {
+    "direct_dependencies": 4,
+    "go_version": "1.25.10",
+    "module": "github.com/unidoc/unisupply",
+    "total_dependencies": 44,
+    "transitive_dependencies": 40
+  },
+  "severity_adjusted_vuln_score": 0,
+  "summary": {
+    "high_risk_count": 0,
+    "low_risk_count": 29,
+    "medium_risk_count": 15,
+    "total_vulnerabilities": 0,
+    "unmaintained_1yr": 5,
+    "unmaintained_2yr": 16
+  },
+  "takeover_candidates": [
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 3,
+      "owner": "google",
+      "reason": "widely used but inactive",
+      "repo": "go-cmdtest",
+      "stars": 180
+    },
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 1,
+      "owner": "davecgh",
+      "reason": "widely used but inactive",
+      "repo": "go-spew",
+      "stars": 6392
+    },
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 2,
+      "owner": "kr",
+      "reason": "widely used but inactive",
+      "repo": "pretty",
+      "stars": 1410
+    },
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 3,
+      "owner": "gorilla",
+      "reason": "repository archived",
+      "repo": "i18n",
+      "stars": 48
+    },
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 2,
+      "owner": "pmezard",
+      "reason": "widely used but inactive",
+      "repo": "go-difflib",
+      "stars": 428
+    },
+    {
+      "activity_pattern": "inactive",
+      "bus_factor": 1,
+      "owner": "unidoc",
+      "reason": "single maintainer, inactive",
+      "repo": "garabic",
+      "stars": 0
+    }
+  ],
+  "tool": "unisupply",
+  "version": "0.5.0-dev"
+}

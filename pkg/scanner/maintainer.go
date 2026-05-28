@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +16,13 @@ import (
 
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
+	// DataAvailable is false when the GitHub API was unreachable, returned a
+	// non-200 status (e.g. 403 rate-limit or 404), or when the token was
+	// missing for an authenticated-only endpoint. When false, all numeric
+	// fields (Stars, BusFactor, etc.) are zero-valued and MUST NOT be
+	// interpreted as real measurements.
+	DataAvailable bool `json:"data_available"`
+
 	Owner            string    `json:"owner"`
 	Repo             string    `json:"repo"`
 	OwnerName        string    `json:"owner_name"`     // display name of owner
@@ -48,22 +54,33 @@ type MaintainerInfo struct {
 
 // MaintainerScanner analyzes module maintainership via the GitHub API.
 type MaintainerScanner struct {
-	client    *http.Client
+	client    *Client
 	token     string
 	cache     map[string]*MaintainerInfo
 	userCache map[string]*githubUser
+	diskCache *maintainerCache
 	mu        sync.Mutex
+
+	// ScanStart is the reference time used for all age/activity classifications.
+	// It is truncated to the start of a UTC day so that two scans on the same
+	// calendar day produce identical band results for the same lastCommit.
+	// Defaults to time.Now().UTC().Truncate(24*time.Hour) when the scanner is
+	// constructed. Override in tests or from the CLI entry point.
+	ScanStart time.Time
 }
 
-// NewMaintainerScanner creates a new maintainer scanner.
+// NewMaintainerScanner creates a new maintainer scanner with a disk-backed
+// response cache rooted at the OS user cache directory. Consecutive same-day
+// scans will serve GitHub API responses from disk, eliminating per-scan drift
+// caused by GitHub edge-cache variance.
 func NewMaintainerScanner(timeout time.Duration, githubToken string) *MaintainerScanner {
 	return &MaintainerScanner{
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:    NewClient(ClientOptions{Timeout: timeout}),
 		token:     githubToken,
 		cache:     make(map[string]*MaintainerInfo),
 		userCache: make(map[string]*githubUser),
+		diskCache: newMaintainerCache("", 0), // defaults: OS cache dir, 24h TTL
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
 	}
 }
 
@@ -141,7 +158,7 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := ms.analyzeRepo(owner, repo)
+			info := ms.analyzeRepo(ctx, owner, repo)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
@@ -157,7 +174,7 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	return results
 }
 
-func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
+func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string) *MaintainerInfo {
 	cacheKey := owner + "/" + repo
 	ms.mu.Lock()
 	if cached, ok := ms.cache[cacheKey]; ok {
@@ -171,14 +188,18 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 		Repo:  repo,
 	}
 
-	// Fetch repo info.
-	repoData, err := ms.fetchRepo(owner, repo)
+	// Fetch repo info. On any failure (network error, 403, 404, etc.) we
+	// leave DataAvailable as false so callers know zero-values are not real.
+	repoData, err := ms.fetchRepo(ctx, owner, repo)
 	if err != nil {
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
 		ms.mu.Unlock()
 		return info
 	}
+
+	// The primary API call succeeded: all fields that follow are real data.
+	info.DataAvailable = true
 
 	info.Description = repoData.Description
 	info.IsArchived = repoData.Archived
@@ -204,10 +225,10 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 		}
 	}
 
-	info.ActivityPattern = classifyActivity(info.LastCommitDate)
+	info.ActivityPattern = classifyActivity(ms.ScanStart, info.LastCommitDate)
 
 	// Fetch owner profile (user or org).
-	user := ms.fetchUser(owner)
+	user := ms.fetchUser(ctx, owner)
 	if user != nil {
 		info.OwnerName = user.Name
 		if info.OwnerName == "" {
@@ -223,7 +244,7 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 	info.BusinessModel = classifyBusinessModel(info, repoData)
 
 	// Fetch contributors for bus factor analysis.
-	contributors := ms.fetchContributors(owner, repo)
+	contributors := ms.fetchContributors(ctx, owner, repo)
 	info.ContributorCount = len(contributors)
 	info.BusFactor = computeBusFactor(contributors)
 
@@ -245,9 +266,9 @@ func (ms *MaintainerScanner) analyzeRepo(owner, repo string) *MaintainerInfo {
 	return info
 }
 
-func (ms *MaintainerScanner) fetchRepo(owner, repo string) (*githubRepo, error) {
+func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) (*githubRepo, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +279,7 @@ func (ms *MaintainerScanner) fetchRepo(owner, repo string) (*githubRepo, error) 
 	return &result, nil
 }
 
-func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
+func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githubUser {
 	ms.mu.Lock()
 	if cached, ok := ms.userCache[login]; ok {
 		ms.mu.Unlock()
@@ -267,7 +288,7 @@ func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
 	ms.mu.Unlock()
 
 	url := fmt.Sprintf("https://api.github.com/users/%s", login)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil
 	}
@@ -283,9 +304,9 @@ func (ms *MaintainerScanner) fetchUser(login string) *githubUser {
 	return &user
 }
 
-func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContributor {
+func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo string) []githubContributor {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contributors?per_page=100", owner, repo)
-	body, err := ms.githubGet(url)
+	body, err := ms.githubGet(ctx, url)
 	if err != nil {
 		return nil
 	}
@@ -296,31 +317,52 @@ func (ms *MaintainerScanner) fetchContributors(owner, repo string) []githubContr
 	return contributors
 }
 
-func (ms *MaintainerScanner) githubGet(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, http.NoBody)
-	if err != nil {
-		return nil, err
+// githubGet fetches url from the disk cache when a fresh entry exists (within
+// the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
+// response body on HTTP 200, and returns the body. Non-200 responses are not
+// cached — the error is returned directly to the caller as before.
+func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte, error) {
+	// Consult the disk cache first.
+	if ms.diskCache != nil {
+		if cached, hit, err := ms.diskCache.Get(url); err == nil && hit {
+			return cached, nil
+		}
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	auth := ""
 	if ms.token != "" {
-		req.Header.Set("Authorization", "Bearer "+ms.token)
+		auth = "Bearer " + ms.token
 	}
-	resp, err := ms.client.Do(req)
+	body, resp, err := ms.client.Get(ctx, url, GetOptions{
+		Host:       "api.github.com",
+		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
+		AuthHeader: auth,
+		Accept:     "application/vnd.github.v3+json",
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+
+	// Persist only on success; non-200 responses are never cached.
+	if ms.diskCache != nil {
+		_ = ms.diskCache.Put(url, body) // ignore cache-write errors — not fatal
+	}
+
+	return body, nil
 }
 
-func classifyActivity(lastCommit time.Time) string {
+// classifyActivity returns "active", "sporadic", "inactive", or "unknown"
+// based on the elapsed months between now and lastCommit. now should be the
+// scan-start time (truncated to a UTC day) so that two scans on the same
+// calendar day yield identical classifications for the same lastCommit.
+func classifyActivity(now, lastCommit time.Time) string {
 	if lastCommit.IsZero() {
 		return "unknown"
 	}
-	months := monthsSince(time.Now(), lastCommit)
+	months := monthsSince(now, lastCommit)
 	switch {
 	case months < 3:
 		return "active"

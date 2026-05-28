@@ -7,6 +7,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+## [0.5.0] - unreleased
+
+### Improvements
+
+- Vulnerability scoring: imported-only CVEs are downgraded one severity tier in the project-level headline; required-only CVEs are downgraded two tiers. Per-dep weight multipliers ×0.7 (imported) and ×0.3 (required). Required-only CVEs no longer promote per-dep `risk_level`.
+- Per-CVE `reachability` field added to JSON output (`called` / `imported` / `required`).
+- Scoring iteration order is now deterministic — `worst_cve_id` is reproducible across same-input runs.
+- Maintainer scanner activity classification is quantized to scan-start UTC day; GitHub API responses are disk-cached with a 24h TTL.
+
 ## [0.4.0] - 2026-05-08
 
 First public release, production-ready for supply chain enforcement in CI/CD pipelines.
