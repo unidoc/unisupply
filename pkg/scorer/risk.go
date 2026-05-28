@@ -857,9 +857,17 @@ func computeOverallScore(deps []*DependencyScore) int {
 		weightedSum += float64(ds.RiskScore) * weight
 
 		if len(ds.Vulns) > 0 {
-			hasVulns = true
 			if ds.RiskScore > maxVulnScore {
 				maxVulnScore = ds.RiskScore
+			}
+			// Mirror severityFloor's logic: "required" CVEs are excluded because
+			// their code never links into the build. Only "called", "imported", or
+			// unset (backward-compat alias for "called") trigger the floor.
+			for _, v := range ds.Vulns {
+				if v.Reachability != "required" {
+					hasVulns = true
+					break
+				}
 			}
 		}
 	}
