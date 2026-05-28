@@ -94,15 +94,6 @@ func main() {
 		githubToken = os.Getenv("GITHUB_TOKEN")
 	}
 
-	// --require-github-token: exit 3 immediately if no token is present.
-	// Token validation is intentionally lightweight — we only check for
-	// presence here; a 401/403 from the GitHub API during the actual scan
-	// would surface through DataAvailable==false in the results.
-	if requireGithubToken && githubToken == "" {
-		fmt.Fprintln(os.Stderr, "Error: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)")
-		os.Exit(3)
-	}
-
 	// Determine target path.
 	path := "."
 	if flag.NArg() > 0 {
@@ -110,23 +101,24 @@ func main() {
 	}
 
 	cfg := runConfig{
-		path:          path,
-		format:        format,
-		output:        output,
-		verbose:       verbose,
-		noColor:       noColor,
-		minRisk:       minRisk,
-		directOnly:    directOnly,
-		timeout:       timeout,
-		scanWorkflows: scanWorkflows,
-		scanCI:        scanCI,
-		workflowPath:  workflowPath,
-		githubToken:   githubToken,
-		policyFile:    policyFile,
-		policyPreset:  policyPreset,
-		trustIndexURL: trustIndexURL,
-		progressMode:  progressMode,
-		debugScoring:  debugScoring,
+		path:               path,
+		format:             format,
+		output:             output,
+		verbose:            verbose,
+		noColor:            noColor,
+		minRisk:            minRisk,
+		directOnly:         directOnly,
+		timeout:            timeout,
+		scanWorkflows:      scanWorkflows,
+		scanCI:             scanCI,
+		workflowPath:       workflowPath,
+		githubToken:        githubToken,
+		requireGithubToken: requireGithubToken,
+		policyFile:         policyFile,
+		policyPreset:       policyPreset,
+		trustIndexURL:      trustIndexURL,
+		progressMode:       progressMode,
+		debugScoring:       debugScoring,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -136,6 +128,7 @@ func main() {
 		}
 		// Token precondition failure exits with code 3.
 		if errors.Is(err, errTokenPrecondition) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(3)
 		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -144,26 +137,35 @@ func main() {
 }
 
 type runConfig struct {
-	path          string
-	format        string
-	output        string
-	verbose       bool
-	noColor       bool
-	minRisk       int
-	directOnly    bool
-	timeout       time.Duration
-	scanWorkflows bool
-	scanCI        bool
-	workflowPath  string
-	githubToken   string
-	policyFile    string
-	policyPreset  string
-	trustIndexURL string
-	progressMode  string
-	debugScoring  bool
+	path               string
+	format             string
+	output             string
+	verbose            bool
+	noColor            bool
+	minRisk            int
+	directOnly         bool
+	timeout            time.Duration
+	scanWorkflows      bool
+	scanCI             bool
+	workflowPath       string
+	githubToken        string
+	requireGithubToken bool
+	policyFile         string
+	policyPreset       string
+	trustIndexURL      string
+	progressMode       string
+	debugScoring       bool
 }
 
 func run(cfg *runConfig) error {
+	// --require-github-token: fail fast (exit 3) when no token is present.
+	// Token validation is intentionally lightweight — we only check for
+	// presence here; a 401/403 from the GitHub API during the actual scan
+	// would surface through DataAvailable==false in the results.
+	if cfg.requireGithubToken && cfg.githubToken == "" {
+		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
+	}
+
 	// Compute scan-start time once and floor it to the start of the UTC day.
 	// All scanner age/activity classifications use this value so that two runs
 	// on the same calendar day yield identical band results for the same module.

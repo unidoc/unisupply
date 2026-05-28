@@ -567,6 +567,13 @@ func severityWeight(severity string) float64 {
 // These weights answer: "how risky is this module?" (per-dep axis).
 // See the project-level severity_adjusted_vuln_score table in Task 10 for the
 // complementary axis. Never call one from the other.
+
+// highOrAboveWeightFloor is the reachability-adjusted weight at or above which
+// a CVE counts toward the pile-up bonus in vulnScore. Derived from the source
+// tables (an imported HIGH: 80 × 0.7 = 56) rather than hardcoded, so it tracks
+// any future change to severityWeight or reachabilityFactor automatically.
+var highOrAboveWeightFloor = severityWeight("HIGH") * reachabilityFactor("imported")
+
 func vulnScore(vulns []scanner.Vulnerability) float64 {
 	if len(vulns) == 0 {
 		return 0
@@ -585,7 +592,7 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 		// Count HIGH-or-above using the reachability-adjusted weight so that a
 		// required CRITICAL (30 pts) is not treated equivalently to a called
 		// CRITICAL (100 pts) in the pile-up bonus.
-		if w >= 56 { // ×0.7 of HIGH(80) = 56; called/imported HIGH-or-above
+		if w >= highOrAboveWeightFloor {
 			highOrAboveCount++
 		}
 	}
