@@ -105,7 +105,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       250,
 						Forks:       50,
 						OpenIssues:  10,
-						PushedAt:    time.Now().Add(-18 * 30 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(0, -18, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-1000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -145,7 +145,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       500,
 						Forks:       100,
 						OpenIssues:  0,
-						PushedAt:    time.Now().Add(-3 * 365 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(-3, 0, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-2000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -165,7 +165,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       5000,
 						Forks:       1000,
 						OpenIssues:  200,
-						PushedAt:    time.Now().Add(-24 * 30 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(-2, 0, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-3000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -450,62 +450,70 @@ func TestParseGitHubPath(t *testing.T) {
 
 // TestClassifyActivity verifies activity classification based on last commit time.
 func TestClassifyActivity(t *testing.T) {
-	// Use a fixed, day-truncated scan-start for deterministic tests.
-	now := time.Now().UTC().Truncate(24 * time.Hour)
+	// Use a fixed reference date anchored to the first of a month. classifyActivity
+	// is driven by calendar-month math (monthsSince), and AddDate normalizes
+	// overflow days forward — so a reference like May 31 minus 3 months yields
+	// March 2 (Feb has 28 days), which monthsSince counts as 2 months, not 3.
+	// Anchoring to day 1 avoids that normalization and keeps the test stable
+	// regardless of the wall-clock date it runs on.
+	now := time.Date(2025, time.July, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name             string
 		lastCommit       time.Time
 		expectedClassify string
 	}{
-		// Active (< 3 months)
+		// Active (< 3 months). classifyActivity uses calendar-month math
+		// (monthsSince), so use AddDate to express offsets in the same units
+		// — otherwise day-count arithmetic drifts across months of varying
+		// length and causes flakes near band boundaries.
 		{
 			name:             "active_one_week",
-			lastCommit:       now.Add(-7 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, 0, -7),
 			expectedClassify: "active",
 		},
 		{
 			name:             "active_one_month",
-			lastCommit:       now.Add(-30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -1, 0),
 			expectedClassify: "active",
 		},
 		{
 			name:             "active_two_months",
-			lastCommit:       now.Add(-60 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -2, 0),
 			expectedClassify: "active",
 		},
 
 		// Sporadic (3-12 months)
 		{
 			name:             "sporadic_three_months",
-			lastCommit:       now.Add(-3 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -3, 0),
 			expectedClassify: "sporadic",
 		},
 		{
 			name:             "sporadic_six_months",
-			lastCommit:       now.Add(-6 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -6, 0),
 			expectedClassify: "sporadic",
 		},
 		{
 			name:             "sporadic_eleven_months",
-			lastCommit:       now.Add(-11 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -11, 0),
 			expectedClassify: "sporadic",
 		},
 
-		// Inactive (> 12 months)
+		// Inactive (>= 12 months)
 		{
 			name:             "inactive_one_year",
-			lastCommit:       now.Add(-365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-1, 0, 0),
 			expectedClassify: "inactive",
 		},
 		{
 			name:             "inactive_two_years",
-			lastCommit:       now.Add(-2 * 365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-2, 0, 0),
 			expectedClassify: "inactive",
 		},
 		{
 			name:             "inactive_five_years",
-			lastCommit:       now.Add(-5 * 365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-5, 0, 0),
 			expectedClassify: "inactive",
 		},
 
@@ -538,10 +546,12 @@ func TestClassifyActivity_StableAcrossClockJitter(t *testing.T) {
 	const maxJitter = 5 * time.Minute
 
 	t.Run("12_month_boundary", func(t *testing.T) {
-		// lastCommit is exactly 12 months minus 1 minute before the start of baseDay.
-		// After truncation all jittered scanStart values equal baseDay, so
-		// monthsSince(baseDay, lastCommit) == 11 → classification must be "sporadic".
-		lastCommit := baseDay.Add(-(12*30*24*time.Hour - time.Minute))
+		// lastCommit sits just inside the "inactive" band: exactly 12 calendar
+		// months before baseDay, so monthsSince(baseDay, lastCommit) == 12 →
+		// classification is "inactive". The point of the jitter loop is that
+		// small clock wobble must not push the classification across the
+		// sporadic/inactive boundary.
+		lastCommit := baseDay.AddDate(0, -12, 0)
 		want := classifyActivity(baseDay, lastCommit)
 
 		for i := range jitterIterations {
@@ -560,9 +570,10 @@ func TestClassifyActivity_StableAcrossClockJitter(t *testing.T) {
 	})
 
 	t.Run("3_month_boundary", func(t *testing.T) {
-		// lastCommit is exactly 3 months minus 1 minute before the start of baseDay.
-		// monthsSince(baseDay, lastCommit) == 2 → classification must be "active".
-		lastCommit := baseDay.Add(-(3*30*24*time.Hour - time.Minute))
+		// lastCommit sits just inside the "sporadic" band: exactly 3 calendar
+		// months before baseDay, so monthsSince(baseDay, lastCommit) == 3 →
+		// classification is "sporadic". Jitter must not flip it to "active".
+		lastCommit := baseDay.AddDate(0, -3, 0)
 		want := classifyActivity(baseDay, lastCommit)
 
 		for i := range jitterIterations {
