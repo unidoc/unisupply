@@ -876,6 +876,37 @@ func TestComputeOverallScore_WeightedAverage(t *testing.T) {
 			checkFn: func(score int) bool { return score >= 26 },
 		},
 		{
+			// required-only vulns must not trigger the MEDIUM floor.
+			// Mirrors the unitype scenario: one UNKNOWN/required CVE, low dep scores.
+			name: "required-only vulns do not trigger floor",
+			deps: []*DependencyScore{
+				{
+					RiskScore: 10,
+					Vulns: []scanner.Vulnerability{
+						{ID: "GO-2026-0001", Severity: "UNKNOWN", Reachability: "required"},
+					},
+				},
+				{RiskScore: 5},
+				{RiskScore: 8},
+			},
+			// Weighted mean ≈ 8; must stay below 26 because no called/imported vuln.
+			checkFn: func(score int) bool { return score < 26 },
+		},
+		{
+			// called vuln alongside required vulns still triggers the floor.
+			name: "called vuln alongside required still triggers floor",
+			deps: []*DependencyScore{
+				{
+					RiskScore: 10,
+					Vulns: []scanner.Vulnerability{
+						{ID: "GO-2026-0002", Severity: "UNKNOWN", Reachability: "required"},
+						{ID: "GO-2026-0003", Severity: "LOW", Reachability: "called"},
+					},
+				},
+			},
+			checkFn: func(score int) bool { return score >= 26 },
+		},
+		{
 			name: "two deps with equal score",
 			deps: []*DependencyScore{
 				{
