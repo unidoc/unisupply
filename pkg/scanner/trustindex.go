@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,24 @@ import (
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
+
+// privateCIDRs is parsed once at init to avoid repeated net.ParseCIDR calls.
+var privateCIDRs []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"10.0.0.0/8",
+		"100.64.0.0/10", // CGNAT / shared address space (RFC 6598)
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"169.254.0.0/16",
+		"fc00::/7",
+		"fe80::/10",
+	} {
+		_, network, _ := net.ParseCIDR(cidr)
+		privateCIDRs = append(privateCIDRs, network)
+	}
+}
 
 // TrustIndexEntry holds Trust Index data for a module (from unitrust API).
 type TrustIndexEntry struct {
@@ -91,19 +110,30 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration, allowPrivate boo
 	// Pin the startup-validated IPs at dial time to close the DNS-rebinding window.
 	// Without this, http.Client re-resolves on every dial, giving an attacker a
 	// second opportunity to return a private/metadata IP after passing startup checks.
-	dialTransport := http.DefaultTransport.(*http.Transport).Clone()
+	dt, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("trust-index: unexpected http.DefaultTransport type; cannot pin dial IPs")
+	}
+	dialTransport := dt.Clone()
 	dialTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
-		var dialer net.Dialer
+
+		var (
+			dialer net.Dialer
+			errs   []error
+		)
+
 		for _, ip := range addrs {
-			if conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port)); err == nil {
+			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			if dialErr == nil {
 				return conn, nil
 			}
+			errs = append(errs, dialErr)
 		}
-		return nil, fmt.Errorf("trust-index: failed to connect to %s", addr)
+		return nil, fmt.Errorf("trust-index: failed to connect to %s: %w", addr, errors.Join(errs...))
 	}
 	c.Transport = dialTransport
 	return &TrustIndexClient{
@@ -113,19 +143,11 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration, allowPrivate boo
 	}, nil
 }
 
-// isPrivateIP reports whether ip falls in an RFC1918, link-local, or IPv6
-// ULA/link-local range. Loopback is intentionally excluded so that localhost
-// remains usable without --trust-index-allow-private.
+// isPrivateIP reports whether ip falls in an RFC1918, CGNAT, link-local, or
+// IPv6 ULA/link-local range. Loopback is intentionally excluded so that
+// localhost remains usable without --trust-index-allow-private.
 func isPrivateIP(ip net.IP) bool {
-	for _, cidr := range []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"169.254.0.0/16",
-		"fc00::/7",
-		"fe80::/10",
-	} {
-		_, network, _ := net.ParseCIDR(cidr)
+	for _, network := range privateCIDRs {
 		if network.Contains(ip) {
 			return true
 		}
@@ -157,7 +179,7 @@ func (c *TrustIndexClient) LookupAll(ctx context.Context, graph *resolver.Graph)
 	}
 
 	lookupURL := fmt.Sprintf("%s/api/v1/lookup", c.baseURL)
-	rep.Warn("trust-index: will POST %d module paths to %s", len(modules), lookupURL)
+	rep.Warn("trust-index: posting %d module paths to %s", len(modules), lookupURL)
 	body, resp, err := c.client.Post(ctx, lookupURL, "application/json", bytes.NewReader(reqBody), GetOptions{
 		Host:     c.host,
 		MaxBytes: 4 * 1024 * 1024, // 4 MB — Trust Index response may include many modules.

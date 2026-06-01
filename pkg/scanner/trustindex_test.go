@@ -105,6 +105,34 @@ func TestNewTrustIndexClient_SSRF_HttpRequiresLoopback(t *testing.T) {
 	}
 }
 
+func TestNewTrustIndexClient_SSRF_CGNAT(t *testing.T) {
+	// 100.64.0.0/10 is CGNAT (RFC 6598) — commonly used for cloud-internal
+	// infrastructure. Must be rejected without --trust-index-allow-private.
+	_, err := NewTrustIndexClient("https://100.64.0.1/", 5*time.Second, false)
+	if err == nil {
+		t.Fatal("expected error for CGNAT address without --trust-index-allow-private")
+	}
+}
+
+func TestNewTrustIndexClient_IPv6Loopback(t *testing.T) {
+	// ::1 is IPv6 loopback — must be allowed on http without --trust-index-allow-private.
+	client, err := NewTrustIndexClient("http://[::1]:8080", 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error for IPv6 loopback: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client for IPv6 loopback")
+	}
+}
+
+func TestNewTrustIndexClient_UnsupportedScheme(t *testing.T) {
+	// Non-http(s) schemes (e.g. ftp) must be rejected for non-loopback hosts.
+	_, err := NewTrustIndexClient("ftp://example.com/", 5*time.Second, false)
+	if err == nil {
+		t.Fatal("expected error for non-https scheme on non-loopback host")
+	}
+}
+
 func TestTrustIndexClient_LookupAll_NilClient(t *testing.T) {
 	var client *TrustIndexClient
 
