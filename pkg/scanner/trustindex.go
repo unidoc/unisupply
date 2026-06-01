@@ -87,8 +87,27 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration, allowPrivate boo
 		}
 	}
 
+	c := NewClient(ClientOptions{Timeout: timeout})
+	// Pin the startup-validated IPs at dial time to close the DNS-rebinding window.
+	// Without this, http.Client re-resolves on every dial, giving an attacker a
+	// second opportunity to return a private/metadata IP after passing startup checks.
+	dialTransport := http.DefaultTransport.(*http.Transport).Clone()
+	dialTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		var dialer net.Dialer
+		for _, ip := range addrs {
+			if conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip, port)); err == nil {
+				return conn, nil
+			}
+		}
+		return nil, fmt.Errorf("trust-index: failed to connect to %s", addr)
+	}
+	c.Transport = dialTransport
 	return &TrustIndexClient{
-		client:  NewClient(ClientOptions{Timeout: timeout}),
+		client:  c,
 		baseURL: baseURL,
 		host:    u.Host,
 	}, nil
