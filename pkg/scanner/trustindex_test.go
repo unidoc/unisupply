@@ -42,26 +42,66 @@ func makeTiGraph(deps ...tiDepSpec) *resolver.Graph {
 }
 
 func TestNewTrustIndexClient_EmptyURL(t *testing.T) {
-	client := NewTrustIndexClient("", 5*time.Second)
-
+	client, err := NewTrustIndexClient("", 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error for empty URL: %v", err)
+	}
 	if client != nil {
 		t.Error("expected nil client for empty URL")
 	}
 }
 
-func TestNewTrustIndexClient_ValidURL(t *testing.T) {
-	client := NewTrustIndexClient("http://localhost:8080", 5*time.Second)
-
-	if client == nil {
-		t.Fatal("expected non-nil client for valid URL")
+func TestNewTrustIndexClient_ValidURL_Localhost(t *testing.T) {
+	client, err := NewTrustIndexClient("http://localhost:8080", 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error for localhost URL: %v", err)
 	}
-
+	if client == nil {
+		t.Fatal("expected non-nil client for localhost URL")
+	}
 	if client.baseURL != "http://localhost:8080" {
 		t.Errorf("expected baseURL to be set, got %s", client.baseURL)
 	}
-
 	if client.client == nil {
 		t.Error("expected initialized http.Client")
+	}
+}
+
+func TestNewTrustIndexClient_SSRF_LinkLocal(t *testing.T) {
+	_, err := NewTrustIndexClient("http://169.254.169.254/foo", 5*time.Second, false)
+	if err == nil {
+		t.Fatal("expected error for link-local address")
+	}
+}
+
+func TestNewTrustIndexClient_SSRF_RFC1918_NoFlag(t *testing.T) {
+	_, err := NewTrustIndexClient("https://10.0.0.5/", 5*time.Second, false)
+	if err == nil {
+		t.Fatal("expected error for RFC1918 address without --trust-index-allow-private")
+	}
+}
+
+func TestNewTrustIndexClient_SSRF_RFC1918_WithFlag(t *testing.T) {
+	// With allowPrivate=true the RFC1918 address is accepted at construction
+	// time. Connection will fail (no server), but NewTrustIndexClient must not
+	// error on the address itself.
+	client, err := NewTrustIndexClient("https://10.0.0.5/", 5*time.Second, true)
+	if err != nil {
+		t.Fatalf("unexpected error with allowPrivate=true: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client with allowPrivate=true")
+	}
+}
+
+func TestNewTrustIndexClient_SSRF_HttpRequiresLoopback(t *testing.T) {
+	// A non-loopback host with http scheme must be rejected even without a
+	// private IP (it would send credentials over plaintext to an arbitrary host).
+	// Use a hostname that resolves to a public IP — here we synthesise that
+	// with a literal non-loopback IP.
+	_, err := NewTrustIndexClient("http://8.8.8.8/", 5*time.Second, false)
+	if err == nil {
+		t.Fatal("expected error for http with non-loopback host")
 	}
 }
 
@@ -85,7 +125,10 @@ func TestTrustIndexClient_LookupAll_NilClient(t *testing.T) {
 }
 
 func TestTrustIndexClient_LookupAll_EmptyGraph(t *testing.T) {
-	client := NewTrustIndexClient("http://localhost:8080", 5*time.Second)
+	client, err := NewTrustIndexClient("http://localhost:8080", 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := &resolver.Graph{
 		Root:         "test/module",
@@ -166,7 +209,10 @@ func TestTrustIndexClient_LookupAll_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	// Create test graph with 2 dependencies
 	graph := makeTiGraph(
@@ -241,7 +287,10 @@ func TestTrustIndexClient_LookupAll_ServerError_500(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{
@@ -273,7 +322,10 @@ func TestTrustIndexClient_LookupAll_ServerError_503(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{
@@ -302,7 +354,10 @@ func TestTrustIndexClient_LookupAll_BadJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{
@@ -326,7 +381,10 @@ func TestTrustIndexClient_LookupAll_BadJSON(t *testing.T) {
 
 func TestTrustIndexClient_LookupAll_ConnectionError(t *testing.T) {
 	// Use a non-existent server address
-	client := NewTrustIndexClient("http://localhost:54321", 100*time.Millisecond)
+	client, err := NewTrustIndexClient("http://localhost:54321", 100*time.Millisecond, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{
@@ -377,7 +435,10 @@ func TestTrustIndexClient_LookupAll_MultipleModules(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	// Create graph with 5 dependencies
 	graph := makeTiGraph(
@@ -422,7 +483,10 @@ func TestTrustIndexClient_LookupAll_PartialResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{path: "github.com/foo/bar", ver: "v1.0.0", direct: true, depth: 0},
@@ -460,7 +524,10 @@ func TestTrustIndexClient_LookupAll_EmptyResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{path: "github.com/foo/bar", ver: "v1.0.0", direct: true, depth: 0},
@@ -508,7 +575,10 @@ func TestTrustIndexClient_LookupAll_AllFields(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewTrustIndexClient(server.URL, 5*time.Second)
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating client: %v", err)
+	}
 
 	graph := makeTiGraph(
 		tiDepSpec{path: "github.com/test/full", ver: "v1.0.0", direct: true, depth: 0},

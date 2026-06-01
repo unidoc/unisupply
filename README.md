@@ -298,6 +298,13 @@ output unchanged.
 - Failures of the Trust Index call (network errors, non-200 responses) are
   surfaced as warnings; they do not abort the scan or alter risk scores
   derived from the in-tree scanners.
+- **SSRF defense.** `--trust-index-url` requires `https` for all non-loopback
+  hosts. RFC1918, link-local (`169.254/16`), and IPv6 ULA/link-local addresses
+  are rejected unless `--trust-index-allow-private` is set. Use
+  `--trust-index-allow-private` only when running a self-hosted unitrust on a
+  private network — never in public CI where the flag value could be
+  controlled by an attacker. A warning is printed before each POST so the
+  destination is always visible in logs.
 
 ## Architecture
 
@@ -341,6 +348,7 @@ The most frequently used flags:
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)              |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                      |
 | `--trust-index-url`     | unitrust endpoint for curated trust scores                    |
+| `--trust-index-allow-private` | Allow `--trust-index-url` to target RFC1918/link-local addresses (self-hosted) |
 | `--policy-preset`       | `strict` or `moderate`                                        |
 | `--policy`              | Path to a custom policy JSON file                             |
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
