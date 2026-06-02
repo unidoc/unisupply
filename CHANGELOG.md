@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [0.5.0] - unreleased
 
+### Security
+
+- **Trust Index SSRF defense.** `--trust-index-url` now requires `https` for all non-loopback hosts. RFC1918, link-local (`169.254/16`), and IPv6 ULA/link-local addresses are rejected at startup unless `--trust-index-allow-private` is explicitly set. The host is resolved at startup; any resolved IP in a denied range causes a fatal error. Resolved IPs are then **pinned at dial time** via a custom `DialContext`, preventing DNS-rebinding attacks where an attacker returns a safe IP at startup and a private/metadata IP at request time. A warning is printed before every bulk POST naming the exact URL and module count so the destination is visible in logs. Pass `--trust-index-allow-private` to use a self-hosted unitrust on a private network.
+
 ### Improvements
 
 - Vulnerability scoring: imported-only CVEs are downgraded one severity tier in the project-level headline; required-only CVEs are downgraded two tiers. Per-dep weight multipliers ×0.7 (imported) and ×0.3 (required). Required-only CVEs no longer promote per-dep `risk_level`.

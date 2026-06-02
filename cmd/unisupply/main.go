@@ -33,25 +33,26 @@ var errTokenPrecondition = errors.New("github token precondition failed")
 
 func main() {
 	var (
-		format             string
-		output             string
-		verbose            bool
-		noColor            bool
-		minRisk            int
-		directOnly         bool
-		timeout            time.Duration
-		showHelp           bool
-		showVer            bool
-		scanWorkflows      bool
-		scanCI             bool
-		workflowPath       string
-		githubToken        string
-		requireGithubToken bool
-		policyFile         string
-		policyPreset       string
-		trustIndexURL      string
-		progressMode       string
-		debugScoring       bool
+		format                 string
+		output                 string
+		verbose                bool
+		noColor                bool
+		minRisk                int
+		directOnly             bool
+		timeout                time.Duration
+		showHelp               bool
+		showVer                bool
+		scanWorkflows          bool
+		scanCI                 bool
+		workflowPath           string
+		githubToken            string
+		requireGithubToken     bool
+		policyFile             string
+		policyPreset           string
+		trustIndexURL          string
+		trustIndexAllowPrivate bool
+		progressMode           string
+		debugScoring           bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -71,6 +72,7 @@ func main() {
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
+	flag.BoolVar(&trustIndexAllowPrivate, "trust-index-allow-private", false, "Allow --trust-index-url to target RFC1918/link-local addresses (e.g. self-hosted on a private network)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
 	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
@@ -101,24 +103,25 @@ func main() {
 	}
 
 	cfg := runConfig{
-		path:               path,
-		format:             format,
-		output:             output,
-		verbose:            verbose,
-		noColor:            noColor,
-		minRisk:            minRisk,
-		directOnly:         directOnly,
-		timeout:            timeout,
-		scanWorkflows:      scanWorkflows,
-		scanCI:             scanCI,
-		workflowPath:       workflowPath,
-		githubToken:        githubToken,
-		requireGithubToken: requireGithubToken,
-		policyFile:         policyFile,
-		policyPreset:       policyPreset,
-		trustIndexURL:      trustIndexURL,
-		progressMode:       progressMode,
-		debugScoring:       debugScoring,
+		path:                   path,
+		format:                 format,
+		output:                 output,
+		verbose:                verbose,
+		noColor:                noColor,
+		minRisk:                minRisk,
+		directOnly:             directOnly,
+		timeout:                timeout,
+		scanWorkflows:          scanWorkflows,
+		scanCI:                 scanCI,
+		workflowPath:           workflowPath,
+		githubToken:            githubToken,
+		requireGithubToken:     requireGithubToken,
+		policyFile:             policyFile,
+		policyPreset:           policyPreset,
+		trustIndexURL:          trustIndexURL,
+		trustIndexAllowPrivate: trustIndexAllowPrivate,
+		progressMode:           progressMode,
+		debugScoring:           debugScoring,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -137,24 +140,25 @@ func main() {
 }
 
 type runConfig struct {
-	path               string
-	format             string
-	output             string
-	verbose            bool
-	noColor            bool
-	minRisk            int
-	directOnly         bool
-	timeout            time.Duration
-	scanWorkflows      bool
-	scanCI             bool
-	workflowPath       string
-	githubToken        string
-	requireGithubToken bool
-	policyFile         string
-	policyPreset       string
-	trustIndexURL      string
-	progressMode       string
-	debugScoring       bool
+	path                   string
+	format                 string
+	output                 string
+	verbose                bool
+	noColor                bool
+	minRisk                int
+	directOnly             bool
+	timeout                time.Duration
+	scanWorkflows          bool
+	scanCI                 bool
+	workflowPath           string
+	githubToken            string
+	requireGithubToken     bool
+	policyFile             string
+	policyPreset           string
+	trustIndexURL          string
+	trustIndexAllowPrivate bool
+	progressMode           string
+	debugScoring           bool
 }
 
 func run(cfg *runConfig) error {
@@ -248,7 +252,10 @@ func run(cfg *runConfig) error {
 	rep.Done("%d flagged", len(aiGenRisks))
 
 	var trustIndex map[string]*scanner.TrustIndexEntry
-	trustClient := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout)
+	trustClient, err := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout, cfg.trustIndexAllowPrivate)
+	if err != nil {
+		return fmt.Errorf("trust index: %w", err)
+	}
 	if trustClient != nil {
 		rep.Stage("Querying Trust Index")
 		var tiErr error
