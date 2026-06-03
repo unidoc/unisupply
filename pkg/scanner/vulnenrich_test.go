@@ -135,29 +135,38 @@ func TestVulnEnrich_OSVFixture(t *testing.T) {
 	}
 }
 
-// --- AC#3 + recorded fixture: GHSA returns CRITICAL ---
+// --- AC#3 + recorded fixture: GitHub Advisory returns CRITICAL via CVE lookup ---
 
-// TestVulnEnrich_GHSAFixture tests GHSA fallback enrichment using the recorded
-// fixture for GHSA-vc3v-ppc7-v486.
+// TestVulnEnrich_GHSAFixture tests GitHub Advisory fallback enrichment using
+// the recorded fixture for CVE-2024-23653. OSV and NVD fail; GitHub Advisory
+// resolves via the ?cve_id= endpoint (array response).
 func TestVulnEnrich_GHSAFixture(t *testing.T) {
-	fixture := loadFixture(t, "ghsa-vc3v-ppc7-v486.json")
+	arrayFixture := loadFixture(t, "ghsa-CVE-2024-23653-array.json")
 
-	// OSV returns 404, GHSA returns the fixture.
 	calls := 0
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
-		if strings.Contains(req.URL.Host, "osv.dev") {
+		host := req.URL.Host
+		switch {
+		case strings.Contains(host, "osv.dev"):
 			return &http.Response{
 				StatusCode: 404,
 				Body:       io.NopCloser(strings.NewReader(`{"code":5,"message":"Bug not found"}`)),
 				Header:     make(http.Header),
 			}, nil
+		case strings.Contains(host, "nvd.nist.gov"):
+			return &http.Response{
+				StatusCode: 404,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"Not Found"}`)),
+				Header:     make(http.Header),
+			}, nil
+		default: // api.github.com
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(string(arrayFixture))),
+				Header:     make(http.Header),
+			}, nil
 		}
-		return &http.Response{
-			StatusCode: 200,
-			Body:       io.NopCloser(strings.NewReader(string(fixture))),
-			Header:     make(http.Header),
-		}, nil
 	})
 
 	e := newEnricherWithTransport(t, transport, "", nil)
@@ -171,8 +180,164 @@ func TestVulnEnrich_GHSAFixture(t *testing.T) {
 	if v.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL; warnings: %v", v.Severity, warns)
 	}
+	if calls != 3 {
+		t.Errorf("Expected 3 HTTP calls (OSV + NVD + GitHub), got %d", calls)
+	}
+}
+
+// TestVulnEnrich_NVDFixture tests that NVD resolves severity when OSV returns
+// no data, using the recorded NVD fixture for CVE-2024-23653.
+func TestVulnEnrich_NVDFixture(t *testing.T) {
+	nvdFixture := loadFixture(t, "nvd-CVE-2024-23653.json")
+
+	calls := 0
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		host := req.URL.Host
+		switch {
+		case strings.Contains(host, "osv.dev"):
+			return &http.Response{
+				StatusCode: 404,
+				Body:       io.NopCloser(strings.NewReader(`{"code":5,"message":"Bug not found"}`)),
+				Header:     make(http.Header),
+			}, nil
+		case strings.Contains(host, "nvd.nist.gov"):
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(string(nvdFixture))),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Error("GitHub Advisory should not be called when NVD succeeds")
+			return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+		}
+	})
+
+	e := newEnricherWithTransport(t, transport, "", nil)
+	v := &Vulnerability{
+		ID:       "CVE-2024-23653",
+		Severity: "UNKNOWN",
+	}
+	warns := e.Enrich(context.Background(), v)
+
+	if v.Severity != "CRITICAL" {
+		t.Errorf("Severity = %q, want CRITICAL; warnings: %v", v.Severity, warns)
+	}
 	if calls != 2 {
-		t.Errorf("Expected 2 HTTP calls (OSV + GHSA), got %d", calls)
+		t.Errorf("Expected 2 HTTP calls (OSV + NVD), got %d", calls)
+	}
+}
+
+// TestVulnEnrichment_OSVFails_NVDSucceeds_HonestSeverity is the table-driven
+// regression test covering all four tier combinations: OSV-OK, OSV-fail/NVD-OK,
+// OSV-fail/NVD-fail/GitHub-OK, all-fail.
+func TestVulnEnrichment_OSVFails_NVDSucceeds_HonestSeverity(t *testing.T) {
+	osvFixture := string(loadFixture(t, "osv-CVE-2024-23653.json"))
+	nvdFixture := string(loadFixture(t, "nvd-CVE-2024-23653.json"))
+	ghFixture := string(loadFixture(t, "ghsa-CVE-2024-23653-array.json"))
+
+	cases := []struct {
+		name            string
+		osvStatus       int
+		nvdStatus       int
+		ghStatus        int
+		wantSeverity    string
+		wantFailed      bool
+		wantCallsAtMost int // GitHub is not called if NVD succeeds
+	}{
+		{
+			name:            "OSV_OK",
+			osvStatus:       200,
+			nvdStatus:       500, // should not be reached
+			ghStatus:        500, // should not be reached
+			wantSeverity:    "CRITICAL",
+			wantFailed:      false,
+			wantCallsAtMost: 1,
+		},
+		{
+			name:            "OSV_fail_NVD_OK",
+			osvStatus:       404,
+			nvdStatus:       200,
+			ghStatus:        500, // should not be reached
+			wantSeverity:    "CRITICAL",
+			wantFailed:      false,
+			wantCallsAtMost: 2,
+		},
+		{
+			name:            "OSV_fail_NVD_fail_GitHub_OK",
+			osvStatus:       404,
+			nvdStatus:       404,
+			ghStatus:        200,
+			wantSeverity:    "CRITICAL",
+			wantFailed:      false,
+			wantCallsAtMost: 3,
+		},
+		{
+			name:            "all_fail",
+			osvStatus:       500,
+			nvdStatus:       500,
+			ghStatus:        500,
+			wantSeverity:    "UNKNOWN",
+			wantFailed:      true,
+			wantCallsAtMost: 3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				host := req.URL.Host
+				var status int
+				var body string
+				switch {
+				case strings.Contains(host, "osv.dev"):
+					status = tc.osvStatus
+					if status == 200 {
+						body = osvFixture
+					} else {
+						body = `{"code":5,"message":"not found"}`
+					}
+				case strings.Contains(host, "nvd.nist.gov"):
+					status = tc.nvdStatus
+					if status == 200 {
+						body = nvdFixture
+					} else {
+						body = `{"message":"not found"}`
+					}
+				default: // github.com
+					status = tc.ghStatus
+					if status == 200 {
+						body = ghFixture
+					} else {
+						body = `{"message":"internal server error"}`
+					}
+				}
+				return &http.Response{
+					StatusCode: status,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+				}, nil
+			})
+
+			e := newEnricherWithTransport(t, transport, "", nil)
+			v := &Vulnerability{
+				ID:       "CVE-2024-23653",
+				Severity: "UNKNOWN",
+			}
+			warns := e.Enrich(context.Background(), v)
+
+			if v.Severity != tc.wantSeverity {
+				t.Errorf("Severity = %q, want %q; warnings: %v", v.Severity, tc.wantSeverity, warns)
+			}
+			if v.EnrichmentFailed != tc.wantFailed {
+				t.Errorf("EnrichmentFailed = %v, want %v", v.EnrichmentFailed, tc.wantFailed)
+			}
+			if calls > tc.wantCallsAtMost {
+				t.Errorf("HTTP calls = %d, want ≤ %d (short-circuit broken)", calls, tc.wantCallsAtMost)
+			}
+		})
 	}
 }
 
@@ -434,6 +599,130 @@ func TestValidateVulnID_BoundaryLength(t *testing.T) {
 	id101 := id + "1"
 	if validateVulnID(id101) {
 		t.Errorf("validateVulnID(%q) = true, want false for 101-char ID", id101)
+	}
+}
+
+// --- Task 5: Cache durability ---
+
+// TestVulnEnrich_FailureCachedFor1h verifies that a failed enrichment is cached
+// for 1h: a second call within 1h makes zero HTTP calls and still reports
+// EnrichmentFailed=true with severity UNKNOWN.
+func TestVulnEnrich_FailureCachedFor1h(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, st, "", func() time.Time { return fixedTime })
+
+	// First call — all tiers fail, failure gets cached.
+	v1 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+
+	if !v1.EnrichmentFailed {
+		t.Fatal("First call: expected EnrichmentFailed=true")
+	}
+	callsAfterFirst := st.calls
+
+	// Second call at same time — still within 1 h TTL, must serve from failure cache, no HTTP calls.
+	v2 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	if st.calls != callsAfterFirst {
+		t.Errorf("Second call within 1h: expected %d total HTTP calls, got %d (cache not used)", callsAfterFirst, st.calls)
+	}
+	if !v2.EnrichmentFailed {
+		t.Error("Second call: EnrichmentFailed should still be true from cached failure")
+	}
+	if v2.Severity != "UNKNOWN" {
+		t.Errorf("Second call: Severity = %q, want UNKNOWN", v2.Severity)
+	}
+}
+
+// TestVulnEnrich_FailureCacheTTL_Expiry verifies that a cached failure expires
+// after 1h (not 24h), and the enricher re-fetches on the next call.
+func TestVulnEnrich_FailureCacheTTL_Expiry(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+
+	currentTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	clockFn := func() time.Time { return currentTime }
+	e := newEnricherWithTransport(t, st, "", clockFn)
+
+	// First call — failure cached.
+	v1 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+	callsAfterFirst := st.calls
+
+	// Advance 2 hours — past 1h failure TTL.
+	currentTime = currentTime.Add(2 * time.Hour)
+
+	// Second call after failure TTL expiry — must re-fetch.
+	v2 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	if st.calls <= callsAfterFirst {
+		t.Errorf("After failure TTL expiry: expected more HTTP calls than %d, got %d", callsAfterFirst, st.calls)
+	}
+}
+
+// TestVulnEnrich_CacheVersionMismatch verifies that an on-disk cache entry with
+// a different version is treated as a miss and triggers a fresh network lookup.
+func TestVulnEnrich_CacheVersionMismatch(t *testing.T) {
+	fixture := loadFixture(t, "osv-CVE-2024-23653.json")
+
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	// Write an old-version cache entry manually.
+	cacheDir := t.TempDir()
+	oldEntry := `{"version":0,"fetched_at":"2024-03-01T12:00:00Z","result":{"severity":"HIGH","source":"osv"}}`
+	cacheFile := filepath.Join(cacheDir, "CVE-2024-23653.json")
+	if err := os.WriteFile(cacheFile, []byte(oldEntry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &staticTransport{statusCode: 200, body: string(fixture)}
+	e := NewVulnEnricher(VulnEnricherOptions{
+		CacheDir: cacheDir,
+		clockFn:  func() time.Time { return fixedTime },
+	})
+	e.client.Transport = st
+
+	v := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v)
+
+	// The old-version entry must have been treated as a miss → network call made.
+	if st.calls == 0 {
+		t.Error("Expected network call due to cache version mismatch; got 0 calls")
+	}
+	// And result from the live call is used.
+	if v.Severity != "CRITICAL" {
+		t.Errorf("Severity = %q, want CRITICAL after version-mismatch re-fetch", v.Severity)
+	}
+}
+
+// TestVulnEnrich_NoUNKNOWNDisplayedAsLOW verifies the golden invariant: no CVE
+// with UNKNOWN severity produces "LOW" in the text report. The cached-failure
+// path is exercised here (second call uses the 1h-cached failure), ensuring the
+// display is correct even when enrichment results come from cache.
+func TestVulnEnrich_NoUNKNOWNDisplayedAsLOW(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, st, "", func() time.Time { return fixedTime })
+
+	// First call — all tiers fail; failure cached.
+	v1 := &Vulnerability{ID: "CVE-2024-99999", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+
+	// Second call — served from 1h failure cache.
+	v2 := &Vulnerability{ID: "CVE-2024-99999", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	// Neither the live nor the cached path should produce "LOW".
+	for _, v := range []*Vulnerability{v1, v2} {
+		if strings.EqualFold(v.Severity, "LOW") {
+			t.Errorf("CVE %s: Severity = %q — UNKNOWN must not be displayed as LOW", v.ID, v.Severity)
+		}
+		if !v.EnrichmentFailed {
+			t.Errorf("CVE %s: EnrichmentFailed should be true", v.ID)
+		}
 	}
 }
 

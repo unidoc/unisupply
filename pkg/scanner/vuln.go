@@ -57,10 +57,20 @@ type Vulnerability struct {
 	// the original severity was UNKNOWN and the ID passed validation).
 	EnrichmentAttempted bool `json:"enrichment_attempted,omitempty"`
 
-	// EnrichmentFailed is true when enrichment was attempted but both OSV
-	// and GHSA lookups failed. Task 08 uses this to distinguish
-	// "no severity data" from "severity data unavailable due to API failure".
+	// EnrichmentFailed is true when enrichment was attempted but all tiers
+	// (OSV, NVD, and GitHub Advisory) failed. Distinguishes "no severity data"
+	// from "severity data unavailable due to API failure".
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
+
+	// SeveritySource records which API resolved the severity: "osv", "nvd",
+	// "ghsa", or "none" when all tiers failed. Empty when enrichment was not
+	// attempted (severity was known from govulncheck).
+	SeveritySource string `json:"severity_source,omitempty"`
+
+	// EnrichmentErrors holds a brief failure summary when all enrichment tiers
+	// failed (EnrichmentFailed==true). At most one entry: the consolidated
+	// "severity lookup failed (OSV/NVD/GitHub)" warning message.
+	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
 
 	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
 	PublishedAt *time.Time `json:"published_at,omitempty"`

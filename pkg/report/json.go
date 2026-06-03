@@ -132,6 +132,14 @@ type JSONVuln struct {
 	FixPublishedAt      *time.Time `json:"fix_published_at,omitempty"`
 	DaysUnpatched       int        `json:"days_unpatched,omitempty"`
 	Reachability        string     `json:"reachability,omitempty"`
+	// SeveritySource is "osv", "nvd", "ghsa", or "none" (all tiers failed).
+	// Empty when enrichment was not attempted (severity was known from govulncheck).
+	SeveritySource string `json:"severity_source,omitempty"`
+	// SeverityScored is the tier the scorer assigns: UNKNOWN is promoted to
+	// MEDIUM by default, or HIGH when reachability is confirmed "called".
+	SeverityScored string `json:"severity_scored,omitempty"`
+	// EnrichmentErrors holds the failure summary when all enrichment tiers failed.
+	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
 }
 
 // JSONMaintenance is maintenance health info.
@@ -306,6 +314,9 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				FixPublishedAt:      v.FixPublishedAt,
 				DaysUnpatched:       v.DaysUnpatched,
 				Reachability:        v.Reachability,
+				SeveritySource:      v.SeveritySource,
+				SeverityScored:      scorer.ScoredSeverity(v),
+				EnrichmentErrors:    v.EnrichmentErrors,
 			})
 		}
 
