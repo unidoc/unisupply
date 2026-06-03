@@ -185,15 +185,17 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	// All tiers failed.
 	v.EnrichmentFailed = true
-	warnings = append(warnings,
-		fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID),
-	)
+	v.SeveritySource = "none"
+	msg := fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID)
+	v.EnrichmentErrors = []string{msg}
+	warnings = append(warnings, msg)
 	return warnings
 }
 
 // enrichResult holds the data extracted from OSV or GHSA responses.
 type enrichResult struct {
 	Severity    string     `json:"severity"`
+	Source      string     `json:"source,omitempty"` // "osv", "nvd", or "ghsa"
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 	ModifiedAt  *time.Time `json:"modified_at,omitempty"`
 }
@@ -205,6 +207,9 @@ type enrichResult struct {
 func (e *VulnEnricher) applyEnrichResult(v *Vulnerability, r *enrichResult) {
 	if r.Severity != "" {
 		v.Severity = r.Severity
+	}
+	if r.Source != "" {
+		v.SeveritySource = r.Source
 	}
 	if r.PublishedAt != nil && v.PublishedAt == nil {
 		v.PublishedAt = r.PublishedAt
@@ -310,6 +315,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 		}
 	}
 
+	result.Source = "osv"
 	return result, warnings
 }
 
@@ -397,6 +403,7 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 		}
 	}
 
+	result.Source = "nvd"
 	return result, warnings
 }
 
@@ -453,6 +460,7 @@ func (e *VulnEnricher) fetchGHSAByCVE(ctx context.Context, cveID string) (result
 		}
 	}
 
+	result.Source = "ghsa"
 	return result, warnings
 }
 

@@ -1364,6 +1364,64 @@ func TestUnknownSeverityFloor(t *testing.T) {
 	}
 }
 
+// TestVulnScore_Unknown_DefaultsToMedium verifies that an UNKNOWN-severity CVE
+// with empty reachability (unconfirmed) scores as MEDIUM in both the per-dep
+// floor and the project-level step function.
+func TestVulnScore_Unknown_DefaultsToMedium(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path: "github.com/unknownsev/pkg", Version: "v1.0.0",
+		Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false),
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(50, headline)...)
+	input := twoAxisEmptyInput(graph)
+
+	v := testutil.MakeVulnWithDates("CVE-2024-0001", "UNKNOWN", 90, 0, true)
+	v.Reachability = "" // unconfirmed — must NOT escalate to HIGH
+	input.Vulns["github.com/unknownsev/pkg"] = []scanner.Vulnerability{v}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 40 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 40 (UNKNOWN + empty reachability → MEDIUM step)", ps.SeverityAdjustedVulnScore)
+	}
+	for _, dep := range ps.Dependencies {
+		if dep.Module == "github.com/unknownsev/pkg" {
+			if dep.RiskLevel != RiskMedium {
+				t.Errorf("dep RiskLevel = %s, want MEDIUM", dep.RiskLevel)
+			}
+		}
+	}
+}
+
+// TestVulnScore_Unknown_ReachableTreatedAsHigh verifies that an UNKNOWN-severity
+// CVE with confirmed reachability ("called") escalates to HIGH in both the
+// per-dep floor and the project-level step function.
+func TestVulnScore_Unknown_ReachableTreatedAsHigh(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path: "github.com/unknownsev/pkg", Version: "v1.0.0",
+		Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false),
+	}
+	graph := testutil.MakeGraph(twoAxisCleanDeps(50, headline)...)
+	input := twoAxisEmptyInput(graph)
+
+	v := testutil.MakeVulnWithDates("CVE-2024-0002", "UNKNOWN", 90, 0, true)
+	v.Reachability = "called" // confirmed reachable → pessimistic HIGH
+	input.Vulns["github.com/unknownsev/pkg"] = []scanner.Vulnerability{v}
+
+	ps := ScoreAll(input)
+
+	if ps.SeverityAdjustedVulnScore != 70 {
+		t.Errorf("SeverityAdjustedVulnScore = %d, want 70 (UNKNOWN + called → HIGH, stepFunction(High:1)=70)", ps.SeverityAdjustedVulnScore)
+	}
+	for _, dep := range ps.Dependencies {
+		if dep.Module == "github.com/unknownsev/pkg" {
+			if dep.RiskLevel != RiskHigh {
+				t.Errorf("dep RiskLevel = %s, want HIGH", dep.RiskLevel)
+			}
+		}
+	}
+}
+
 // TestScoreAll_NoWarningsWhenDataAvailable verifies that Warnings is empty
 // when all maintainer data was successfully fetched.
 func TestScoreAll_NoWarningsWhenDataAvailable(t *testing.T) {

@@ -108,6 +108,11 @@ type ProjectScore struct {
 	// WorstCVESeverity is the severity tier (post-downgrade) of WorstCVEID.
 	WorstCVESeverity string `json:"worst_cve_severity,omitempty"`
 
+	// WorstCVESourceSeverity is the raw severity string reported by the
+	// advisory source for WorstCVEID (e.g. "UNKNOWN" when enrichment failed).
+	// May differ from WorstCVESeverity when the scorer promotes UNKNOWN.
+	WorstCVESourceSeverity string `json:"worst_cve_source_severity,omitempty"`
+
 	// Diagnostics carries tail aggregates that the headline intentionally drops
 	// (they over-promote healthy projects with long stale-but-inert tails).
 	// NON-NORMATIVE: downstream consumers must not build policy gates on these
@@ -324,6 +329,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	ps.SeverityAdjustedVulnScore = sevResult.score
 	ps.WorstCVEID = sevResult.worstID
 	ps.WorstCVESeverity = sevResult.worstSeverity
+	ps.WorstCVESourceSeverity = sevResult.worstSourceSeverity
 
 	if ps.SeverityAdjustedVulnScore > ps.MeanDepRiskScore {
 		ps.OverallScore = ps.SeverityAdjustedVulnScore
@@ -617,10 +623,11 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 //
 // Floor table:
 //
-//	CRITICAL or HIGH → 51 (HIGH band)
-//	MEDIUM           → 26 (MEDIUM band)
-//	LOW              → 0  (no floor; amplifier below may still raise it)
-//	UNKNOWN with enrichment failure → 26 (conservative MEDIUM)
+//	CRITICAL or HIGH                       → 51 (HIGH band)
+//	MEDIUM                                 → 26 (MEDIUM band)
+//	LOW                                    → 0  (no floor; amplifier below may still raise it)
+//	UNKNOWN + enrichment failure + called  → 51 (pessimistic HIGH: confirmed reachable, severity unknown)
+//	UNKNOWN + enrichment failure           → 26 (conservative MEDIUM)
 //
 // The `now` argument is forwarded to lowFixAgeFloor in the LOW-only branch.
 // Pass the scan-start clock reference (see ScoreInput.Now) for day-quantized
@@ -634,7 +641,8 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 	hasCritical := false
 	hasHigh := false
 	hasMedium := false
-	hasUnknownFailed := false
+	hasUnknownCalledFailed := false // UNKNOWN + enrichment failure + confirmed called
+	hasUnknownFailed := false       // UNKNOWN + enrichment failure, reachability unconfirmed
 
 	for _, v := range vulns {
 		// Skip required-only CVEs — they do not contribute to the floor.
@@ -651,9 +659,14 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 		case "LOW":
 			// LOW: no floor from severity alone; handled by fix-age amplifier below.
 		default:
-			// UNKNOWN: conservative if enrichment failed.
+			// UNKNOWN: escalate to HIGH only when reachability is confirmed called;
+			// empty reachability stays MEDIUM (absence of confirmation ≠ reachable).
 			if v.EnrichmentFailed {
-				hasUnknownFailed = true
+				if v.Reachability == "called" {
+					hasUnknownCalledFailed = true
+				} else {
+					hasUnknownFailed = true
+				}
 			}
 		}
 	}
@@ -665,9 +678,11 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 		return 51, RiskHigh
 	case hasMedium:
 		return 26, RiskMedium
+	case hasUnknownCalledFailed:
+		// Confirmed-reachable CVE with unknown severity: pessimistic HIGH floor.
+		return 51, RiskHigh
 	case hasUnknownFailed:
-		// We attempted enrichment but could not determine severity.
-		// Conservative floor: MEDIUM, because the CVE could be HIGH.
+		// Enrichment failed but reachability unconfirmed: conservative MEDIUM.
 		return 26, RiskMedium
 	default:
 		// Only LOW CVEs present (or only required CVEs, which are excluded above);
@@ -921,12 +936,13 @@ func riskLevelOrder(l RiskLevel) int {
 
 // severityAdjustedResult is the bundled output of severityAdjustedVulnScore.
 type severityAdjustedResult struct {
-	score         int
-	worstID       string
-	worstSeverity string
-	stepInputs    StepFunctionInputs
-	enrichedCVEs  []DebugCVE
-	perDepInputs  []DebugPerDepInput
+	score               int
+	worstID             string
+	worstSeverity       string
+	worstSourceSeverity string // raw v.Severity before scoring (may be "UNKNOWN")
+	stepInputs          StepFunctionInputs
+	enrichedCVEs        []DebugCVE
+	perDepInputs        []DebugPerDepInput
 }
 
 // severityAdjustedVulnScore computes the CVE-driven step-function axis.
@@ -982,6 +998,13 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			rawTier := effectiveTier(v)
 			if rawTier == "" {
 				continue
+			}
+
+			// UNKNOWN + confirmed called → treat as HIGH for the step function.
+			// Empty reachability stays MEDIUM (unconfirmed ≠ reachable).
+			// Mirrors the severityFloor policy for the per-dep axis.
+			if strings.EqualFold(v.Severity, "UNKNOWN") && v.Reachability == "called" {
+				rawTier = "HIGH"
 			}
 
 			// Step 1: apply reachability downgrade (rawTier → reachabilityTier).
@@ -1040,6 +1063,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 				worstRank = rank
 				res.worstID = v.ID
 				res.worstSeverity = finalTier
+				res.worstSourceSeverity = v.Severity
 			}
 
 			dc := DebugCVE{
@@ -1098,11 +1122,10 @@ func stepFunction(c StepFunctionInputs) int {
 
 // effectiveTier normalises a CVE's severity for the step function.
 //
-// UNKNOWN is treated as MEDIUM — conservative because the CVE could be HIGH
-// or CRITICAL underneath. The user-facing renderer keeps showing "UNKNOWN" so
-// data uncertainty stays visible. This collapses both the EnrichmentFailed and
-// "scanner never set a tier" cases into MEDIUM, matching the per-dep
-// severityFloor() conservative-floor logic.
+// UNKNOWN is treated as MEDIUM as a default. The caller (severityAdjustedVulnScore)
+// may further promote UNKNOWN to HIGH when reachability is confirmed "called" —
+// see the inline override there. This function handles only the tier vocabulary
+// normalisation; reachability-aware escalation is the caller's responsibility.
 func effectiveTier(v *scanner.Vulnerability) string {
 	switch strings.ToUpper(strings.TrimSpace(v.Severity)) {
 	case "CRITICAL":
@@ -1119,6 +1142,23 @@ func effectiveTier(v *scanner.Vulnerability) string {
 		// UNKNOWN and anything not in the tier vocabulary.
 		return "MEDIUM"
 	}
+}
+
+// ScoredSeverity returns the severity tier the scorer assigns to v for display
+// and policy purposes. It mirrors the logic in severityAdjustedVulnScore:
+// UNKNOWN defaults to MEDIUM unless reachability is confirmed "called", in which
+// case it is promoted to HIGH. Known tiers are returned as-is.
+//
+// Use this instead of v.Severity when rendering scored results — it keeps the
+// display and scoring logic in sync without duplicating the policy in reporters.
+func ScoredSeverity(v scanner.Vulnerability) string {
+	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+		if v.Reachability == "called" {
+			return "HIGH"
+		}
+		return "MEDIUM"
+	}
+	return strings.ToUpper(v.Severity)
 }
 
 // downgradeTier shifts a tier down by one notch. Used for test-only deps.

@@ -156,7 +156,11 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 		txt := fmt.Sprintf("Driver: %s   (mean=%d, severity_adjusted=%d)",
 			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
 		if ps.WorstCVEID != "" {
-			txt += fmt.Sprintf("\nWorst CVE: %s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+			if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+				txt += fmt.Sprintf("\nWorst CVE: %s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+			} else {
+				txt += fmt.Sprintf("\nWorst CVE: %s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+			}
 		}
 		dChunk := driverPara.Append(txt)
 		dChunk.Style.Font = regular
@@ -218,7 +222,11 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 		addTableRow(c, table, "Severity-Adjusted Vuln", fmt.Sprintf("%d", ps.SeverityAdjustedVulnScore), regular, bold)
 	}
 	if ps.WorstCVEID != "" {
-		addTableRow(c, table, "Worst CVE", fmt.Sprintf("%s (%s)", ps.WorstCVEID, ps.WorstCVESeverity), regular, bold)
+		worstCVEVal := fmt.Sprintf("%s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+			worstCVEVal = fmt.Sprintf("%s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+		}
+		addTableRow(c, table, "Worst CVE", worstCVEVal, regular, bold)
 	}
 	_ = c.Draw(table)
 
@@ -249,6 +257,40 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>2yr): %d", ps.Unmaintained2yr), regular)
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>1yr): %d", ps.Unmaintained1yr), regular)
 	_ = c.Draw(findings)
+
+	// Data-quality notes: list CVEs with unresolved severity.
+	var unknownVulns []scanner.Vulnerability
+	for _, ds := range ps.Dependencies {
+		for _, v := range ds.Vulns {
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				unknownVulns = append(unknownVulns, v)
+			}
+		}
+	}
+	if len(unknownVulns) > 0 {
+		subheading(c, "Data-quality Notes", bold)
+		notePara := c.NewStyledParagraph()
+		notePara.SetMargins(0, 0, 5, 0)
+		notePara.SetLineHeight(1.6)
+		noteIntro := notePara.Append(fmt.Sprintf(
+			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
+				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
+			len(unknownVulns),
+		))
+		noteIntro.Style.Font = regular
+		noteIntro.Style.FontSize = 11
+		for _, v := range unknownVulns {
+			scored := scorer.ScoredSeverity(v)
+			line := fmt.Sprintf("  • %s — scored %s", v.ID, scored)
+			if len(v.EnrichmentErrors) > 0 {
+				line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
+			}
+			chunk := notePara.Append(line + "\n")
+			chunk.Style.Font = regular
+			chunk.Style.FontSize = 10
+		}
+		_ = c.Draw(notePara)
+	}
 }
 
 // filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).

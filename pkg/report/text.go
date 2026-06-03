@@ -70,7 +70,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
 	}
 	if ps.WorstCVEID != "" {
-		fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
+		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+			fmt.Fprintf(w, "  Worst CVE: %s (scored %s, source %s)\n",
+				ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+		} else {
+			fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
+		}
 	}
 	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
@@ -267,7 +272,14 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 				aliases = v.ID
 			}
 			tag := reachabilityTag(v.Reachability)
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, v.Severity, tag, aliases)
+			displaySev := v.Severity
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				displaySev = "UNKNOWN"
+			}
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, displaySev, tag, aliases)
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
+			}
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
 			}
