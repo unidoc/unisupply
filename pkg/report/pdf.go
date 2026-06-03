@@ -258,16 +258,16 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>1yr): %d", ps.Unmaintained1yr), regular)
 	_ = c.Draw(findings)
 
-	// Data-quality notes: list CVEs with unresolved severity.
-	var unknownVulns []scanner.Vulnerability
+	// Data-quality notes: list vulns where enrichment was attempted but failed.
+	var failedVulns []scanner.Vulnerability
 	for _, ds := range ps.Dependencies {
 		for _, v := range ds.Vulns {
-			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
-				unknownVulns = append(unknownVulns, v)
+			if v.EnrichmentFailed {
+				failedVulns = append(failedVulns, v)
 			}
 		}
 	}
-	if len(unknownVulns) > 0 {
+	if len(failedVulns) > 0 {
 		subheading(c, "Data-quality Notes", bold)
 		notePara := c.NewStyledParagraph()
 		notePara.SetMargins(0, 0, 5, 0)
@@ -275,11 +275,11 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 		noteIntro := notePara.Append(fmt.Sprintf(
 			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
 				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
-			len(unknownVulns),
+			len(failedVulns),
 		))
 		noteIntro.Style.Font = regular
 		noteIntro.Style.FontSize = 11
-		for _, v := range unknownVulns {
+		for _, v := range failedVulns {
 			scored := scorer.ScoredSeverity(v)
 			line := fmt.Sprintf("  • %s — scored %s", v.ID, scored)
 			if len(v.EnrichmentErrors) > 0 {

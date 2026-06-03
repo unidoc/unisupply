@@ -136,14 +136,14 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	// Try cache first.
 	if cached, ok := e.loadCache(v.ID); ok {
-		if cached.Source == "none" || cached.Severity == "" {
+		if cached == nil || cached.Source == "none" || cached.Severity == "" {
 			// Cached failure — restore failure state identically to the live path.
 			markEnrichmentFailed(v)
+			msg := fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID)
 			if len(v.EnrichmentErrors) == 0 {
-				v.EnrichmentErrors = []string{
-					fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID),
-				}
+				v.EnrichmentErrors = []string{msg}
 			}
+			warnings = append(warnings, msg)
 		} else {
 			e.applyEnrichResult(v, cached)
 		}
@@ -199,7 +199,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 	}
 
 	// All tiers failed — cache the failure for 1h so transient outages don't
-	// hammer four APIs on every scan, and apply the failure state to the vuln.
+	// hammer three APIs on every scan, and apply the failure state to the vuln.
 	failureResult := &enrichResult{Source: "none"}
 	e.saveCache(v.ID, failureResult)
 	markEnrichmentFailed(v)
@@ -216,7 +216,7 @@ func markEnrichmentFailed(v *Vulnerability) {
 	v.SeveritySource = "none"
 }
 
-// enrichResult holds the data extracted from OSV or GHSA responses.
+// enrichResult holds the data extracted from OSV, NVD, or GitHub Advisory responses.
 type enrichResult struct {
 	Severity    string     `json:"severity"`
 	Source      string     `json:"source,omitempty"` // "osv", "nvd", or "ghsa"
