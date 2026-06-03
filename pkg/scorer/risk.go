@@ -203,7 +203,7 @@ type DebugCVE struct {
 	// reader can tell why an UNKNOWN was treated as MEDIUM in the step function.
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
 	// Reachability is the govulncheck reachability tier: "called", "imported",
-	// "required", or "" (empty means backward-compat, treated as "called").
+	// "required", or "" (non-govulncheck source; see isConfirmedReachable).
 	Reachability string `json:"reachability,omitempty"`
 	// ReachabilityDowngrade describes the tier shift applied due to reachability
 	// (e.g. "CRITICAL→HIGH (imported)"). Empty when no downgrade was applied.
@@ -692,7 +692,7 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 			// UNKNOWN: escalate to HIGH only when reachability is confirmed called;
 			// empty reachability stays MEDIUM (absence of confirmation ≠ reachable).
 			if v.EnrichmentFailed {
-				if v.Reachability == "called" {
+				if isConfirmedReachable(v) {
 					hasUnknownCalledFailed = true
 				} else {
 					hasUnknownFailed = true
@@ -1033,7 +1033,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			// UNKNOWN + confirmed called → treat as HIGH for the step function.
 			// Empty reachability stays MEDIUM (unconfirmed ≠ reachable).
 			// Mirrors the severityFloor policy for the per-dep axis.
-			if strings.EqualFold(v.Severity, "UNKNOWN") && v.Reachability == "called" {
+			if strings.EqualFold(v.Severity, "UNKNOWN") && isConfirmedReachable(*v) {
 				rawTier = "HIGH"
 			}
 
@@ -1183,7 +1183,7 @@ func effectiveTier(v *scanner.Vulnerability) string {
 // display and scoring logic in sync without duplicating the policy in reporters.
 func ScoredSeverity(v scanner.Vulnerability) string {
 	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
-		if v.Reachability == "called" {
+		if isConfirmedReachable(v) {
 			return "HIGH"
 		}
 		return "MEDIUM"
@@ -1206,6 +1206,21 @@ func downgradeTier(t string) string {
 	default:
 		return ""
 	}
+}
+
+// isConfirmedReachable reports whether v's reachability is explicitly confirmed
+// at the "called" level for the purposes of UNKNOWN-severity escalation.
+//
+// This is intentionally stricter than the weight axis (reachabilityFactor /
+// reachabilityDowngrade), which defaults "" to the worst-case factor of 1.0.
+// Here "" is treated as unconfirmed — absence of a govulncheck-derived label
+// does not imply the function was actually called. The two axes diverge
+// deliberately:
+//
+//   - Weight axis: "" → 1.0 (pessimistic; don't under-weight unknown sources).
+//   - Confirmation axis: "" → false (conservative; don't over-escalate severity).
+func isConfirmedReachable(v scanner.Vulnerability) bool {
+	return v.Reachability == "called"
 }
 
 // reachabilityDowngrade returns the post-downgrade tier for a CVE based on how

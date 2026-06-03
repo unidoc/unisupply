@@ -29,8 +29,11 @@ import (
 //     from it is imported (trace contains only a Module entry).
 //   - ""         — reachability was not determined; the vulnerability was
 //     sourced from a mechanism other than govulncheck (e.g. a future enrichment
-//     pass or a manually injected record). The scorer treats an empty value as
-//     "called" for backward compatibility, giving it the highest weight.
+//     pass or a manually injected record). The scorer applies two axes with
+//     deliberately different defaults: the weight axis treats "" as "called"
+//     (worst-case, highest weight), while the confirmation axis treats "" as
+//     unconfirmed (UNKNOWN severity stays MEDIUM, not HIGH). See
+//     isConfirmedReachable in pkg/scorer/risk.go for the confirmation axis.
 //
 // Static-analysis caveat: "not called" does not mean "not exploitable".
 // govulncheck performs whole-program analysis on the static call graph, which
