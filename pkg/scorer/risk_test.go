@@ -1455,7 +1455,7 @@ func TestScoreAll_NoWarningsWhenDataAvailable(t *testing.T) {
 // The headline is OverallScore = max(MeanDepRiskScore, SeverityAdjustedVulnScore).
 // SeverityAdjustedVulnScore is a CVE-driven step function with a test-only
 // downgrade-then-step applied before counting. The tests below cover the seven
-// acceptance criteria from plan-29 task 10.
+// acceptance criteria for the two-axis scoring model.
 // =============================================================================
 
 // twoAxisCleanDeps builds a graph with n clean-but-not-trusted dependencies
@@ -2234,7 +2234,7 @@ func TestRequiredOnly_PerDepBandDrivenByLevelFromScore(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Headline candidate tests (plan 45): four-candidate selection
+// Headline candidate tests: four-candidate selection
 // ---------------------------------------------------------------------------
 
 // TestHeadline_ReachableCVE_BeatsMean verifies that when a called CRITICAL
@@ -2631,7 +2631,7 @@ func TestP95DepRiskCandidate(t *testing.T) {
 
 // TestMeanDepRiskScore_Retained verifies that MeanDepRiskScore is still
 // computed and stored on ProjectScore (even though it no longer drives the
-// headline under plan 45).
+// headline).
 func TestMeanDepRiskScore_Retained(t *testing.T) {
 	specs := []testutil.DepSpec{
 		{Path: "github.com/pkg1", Version: "v1.0.0", Direct: true, Depth: 0},

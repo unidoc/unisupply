@@ -66,8 +66,8 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 			})
 		}
 
-		// TODO(plan-37): KEV check.
-		// TODO(plan-46): pseudo-version provenance check.
+		// TODO: add KEV (Known Exploited Vulnerabilities) check.
+		// TODO: add pseudo-version provenance check.
 	}
 
 	return bombs

@@ -264,7 +264,7 @@ func buildDeps(in []fixtureDep) []*DependencyScore {
 
 // rerunHeadline computes the same headline ScoreAll would have produced from
 // the recorded per-dep RiskScore + Vulns + IsTestOnly + Maintenance.
-// Mirrors the four-candidate logic in ScoreAll (plan 45).
+// Mirrors the four-candidate logic in ScoreAll.
 func rerunHeadline(deps []*DependencyScore) (mean, sevAdj, overall int, level RiskLevel, driver, worstID, worstSev string) {
 	mean = computeOverallScore(deps)
 	sev := severityAdjustedVulnScore(time.Now(), deps)

@@ -74,7 +74,7 @@ type DependencyScore struct {
 
 // ProjectScore holds the overall project risk assessment.
 //
-// Plan 45 introduces a four-candidate headline:
+// The headline score is the maximum of four candidates:
 //
 //	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 //
@@ -92,7 +92,7 @@ type ProjectScore struct {
 	Unmaintained2yr   int                `json:"unmaintained_2yr"`
 	Unmaintained1yr   int                `json:"unmaintained_1yr"`
 
-	// MeanDepRiskScore is non-normative (plan 45): retained for dashboards/trend lines; not used in headline.
+	// MeanDepRiskScore is non-normative: retained for dashboards/trend lines; not used in headline.
 	// Equal to the pre-Task-10 OverallScore. Use this when you want a portfolio-wide signal
 	// that is not dominated by a single dep.
 	MeanDepRiskScore int `json:"mean_dep_risk_score"`
@@ -326,7 +326,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		)
 	}
 
-	// Four-candidate headline (plan 45).
+	// Four-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
 	//
 	// MeanDepRiskScore is non-normative — retained for dashboards/trend lines.
 	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
@@ -1383,9 +1383,9 @@ func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 	return best
 }
 
-// cveFloor computes a floor score based on post-reachability CVE tiers (plan 36).
+// cveFloor computes a floor score based on the CVE's reachability tier.
 //
-// Scoring per D1-consistency rule:
+// Scoring matrix (reachability × severity):
 //
 //	called or "" CRITICAL  → 60
 //	called or "" HIGH      → 55
@@ -1397,8 +1397,8 @@ func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 // Empty reachability is treated as "called" for backward compatibility (mirrors
 // reachabilityDowngrade convention).
 func cveFloor(deps []*DependencyScore) HeadlineCandidate {
-	// cve_floor reflects post-reachability tier (plan 36): called/imported CRITICAL→60,
-	// called HIGH→55, imported HIGH→40, required CRITICAL→40.
+	// cve_floor scoring: called/imported CRITICAL→60, called HIGH→55,
+	// imported HIGH→40, required CRITICAL→40.
 	best := HeadlineCandidate{Name: "cve_floor"}
 
 	for _, ds := range deps {
