@@ -14,6 +14,7 @@ import (
 
 const (
 	osvHost           = "api.osv.dev"
+	nvdHost           = "services.nvd.nist.gov"
 	ghsaHost          = "api.github.com"
 	enrichMaxBytes    = 512 * 1024 // 512 KB per spec
 	cacheSubDir       = "unisupply/vuln"
@@ -144,17 +145,35 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		return warnings
 	}
 
-	// GHSA fallback: find a GHSA alias in the existing alias list.
-	ghsaID := ""
-	for _, alias := range v.Aliases {
-		if strings.HasPrefix(alias, "GHSA-") {
-			ghsaID = alias
-			break
+	// Find a CVE alias for NVD and GitHub Advisory lookups.
+	// The ID itself may be a CVE (govulncheck sometimes uses CVE as primary ID),
+	// or a CVE alias may appear in v.Aliases (always present for Go advisories).
+	cveID := ""
+	if strings.HasPrefix(v.ID, "CVE-") {
+		cveID = v.ID
+	} else {
+		for _, alias := range v.Aliases {
+			if strings.HasPrefix(alias, "CVE-") && validateVulnID(alias) {
+				cveID = alias
+				break
+			}
 		}
 	}
 
-	if ghsaID != "" && validateVulnID(ghsaID) {
-		ghsaResult, ghsaWarns := e.fetchGHSA(ctx, ghsaID)
+	if cveID != "" {
+		// NVD lookup (canonical CVSS authority for CVEs).
+		nvdResult, nvdWarns := e.fetchNVD(ctx, cveID)
+		warnings = append(warnings, nvdWarns...)
+
+		if nvdResult != nil && nvdResult.Severity != "" {
+			e.saveCache(v.ID, nvdResult)
+			e.applyEnrichResult(v, nvdResult)
+			return warnings
+		}
+
+		// GitHub Advisory lookup by CVE ID (?cve_id= endpoint).
+		// Covers advisories that have no GHSA alias yet (fresh GO-2026-xxxx).
+		ghsaResult, ghsaWarns := e.fetchGHSAByCVE(ctx, cveID)
 		warnings = append(warnings, ghsaWarns...)
 
 		if ghsaResult != nil && ghsaResult.Severity != "" {
@@ -164,10 +183,10 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		}
 	}
 
-	// Both paths failed.
+	// All tiers failed.
 	v.EnrichmentFailed = true
 	warnings = append(warnings,
-		fmt.Sprintf("OSV severity lookup failed for %s; severity remains UNKNOWN", v.ID),
+		fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID),
 	)
 	return warnings
 }
@@ -294,7 +313,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 	return result, warnings
 }
 
-// ghsaResponse is a partial decode of the GitHub Advisory API response.
+// ghsaResponse is a partial decode of a single GitHub Advisory API record.
 type ghsaResponse struct {
 	GHSAID string `json:"ghsa_id"`
 	CVSSV3 *struct {
@@ -305,11 +324,89 @@ type ghsaResponse struct {
 	UpdatedAt   string `json:"updated_at"`
 }
 
-// fetchGHSA queries https://api.github.com/advisories/{ghsa_id} and returns an
-// enrichResult. The GitHub token is injected by the httpclient RoundTripper
-// after host-pin validation — not passed in the URL.
-func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (result *enrichResult, warnings []string) {
-	url := "https://api.github.com/advisories/" + ghsaID
+// nvdCVSSMetric is one entry in the NVD CVE metrics array (v3.1 or v3.0).
+type nvdCVSSMetric struct {
+	CVSSData struct {
+		BaseScore    float64 `json:"baseScore"`
+		BaseSeverity string  `json:"baseSeverity"`
+	} `json:"cvssData"`
+}
+
+// nvdResponse is a partial decode of the NVD CVE 2.0 API response.
+type nvdResponse struct {
+	TotalResults    int `json:"totalResults"`
+	Vulnerabilities []struct {
+		CVE struct {
+			Published string `json:"published"`
+			Metrics   struct {
+				CVSSV31 []nvdCVSSMetric `json:"cvssMetricV31"`
+				CVSSV30 []nvdCVSSMetric `json:"cvssMetricV30"`
+			} `json:"metrics"`
+		} `json:"cve"`
+	} `json:"vulnerabilities"`
+}
+
+// fetchNVD queries https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<id>
+// and returns an enrichResult. Returns (nil, warnings) on network or parse
+// failure; returns (&enrichResult{}, nil) when NVD has no data for the CVE.
+func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enrichResult, warnings []string) {
+	url := "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cveID
+	body, resp, err := e.client.Get(ctx, url, GetOptions{
+		Host:     nvdHost,
+		MaxBytes: enrichMaxBytes,
+		Accept:   "application/json",
+	})
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
+		return nil, warnings
+	}
+	if resp.StatusCode != 200 {
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD returned HTTP %d for %s", resp.StatusCode, cveID))
+		return nil, warnings
+	}
+
+	var nvd nvdResponse
+	if err := json.Unmarshal(body, &nvd); err != nil {
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD JSON parse error for %s: %v", cveID, err))
+		return nil, warnings
+	}
+	if nvd.TotalResults == 0 || len(nvd.Vulnerabilities) == 0 {
+		return &enrichResult{}, nil
+	}
+
+	cveData := nvd.Vulnerabilities[0].CVE
+	result = &enrichResult{}
+
+	// Prefer CVSS v3.1; fall back to v3.0 when v3.1 metrics are absent.
+	metrics := cveData.Metrics.CVSSV31
+	if len(metrics) == 0 {
+		metrics = cveData.Metrics.CVSSV30
+	}
+	if len(metrics) > 0 {
+		m := metrics[0]
+		if m.CVSSData.BaseScore > 0 {
+			result.Severity = cvssScoreToTier(m.CVSSData.BaseScore)
+		} else if m.CVSSData.BaseSeverity != "" {
+			result.Severity = cvssStringToTier(m.CVSSData.BaseSeverity)
+		}
+	}
+
+	if cveData.Published != "" {
+		if t, err := time.Parse("2006-01-02T15:04:05.999", cveData.Published); err == nil {
+			result.PublishedAt = &t
+		}
+	}
+
+	return result, warnings
+}
+
+// fetchGHSAByCVE queries https://api.github.com/advisories?cve_id=<cveID> and
+// returns an enrichResult from the first matching advisory. Returns
+// (&enrichResult{}, nil) when no advisory is found (empty array response).
+// The GitHub token is injected by the httpclient RoundTripper after host-pin
+// validation — not passed in the URL.
+func (e *VulnEnricher) fetchGHSAByCVE(ctx context.Context, cveID string) (result *enrichResult, warnings []string) {
+	url := "https://api.github.com/advisories?cve_id=" + cveID
 
 	authHeader := ""
 	if e.opts.GitHubToken != "" {
@@ -322,29 +419,31 @@ func (e *VulnEnricher) fetchGHSA(ctx context.Context, ghsaID string) (result *en
 		AuthHeader: authHeader,
 		Accept:     "application/vnd.github+json",
 	})
-
 	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GHSA fetch error for %s: %v", ghsaID, err))
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GitHub Advisory fetch error for %s: %v", cveID, err))
 		return nil, warnings
 	}
 	if resp.StatusCode != 200 {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GHSA returned HTTP %d for %s", resp.StatusCode, ghsaID))
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GitHub Advisory returned HTTP %d for %s", resp.StatusCode, cveID))
 		return nil, warnings
 	}
 
-	var ghsa ghsaResponse
-	if err := json.Unmarshal(body, &ghsa); err != nil {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GHSA JSON parse error for %s: %v", ghsaID, err))
+	var advisories []ghsaResponse
+	if err := json.Unmarshal(body, &advisories); err != nil {
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GitHub Advisory JSON parse error for %s: %v", cveID, err))
 		return nil, warnings
 	}
+	if len(advisories) == 0 {
+		return &enrichResult{}, nil
+	}
 
+	ghsa := advisories[0]
 	result = &enrichResult{}
 
 	// Prefer numeric CVSS score for precision.
 	if ghsa.CVSSV3 != nil && ghsa.CVSSV3.Score > 0 {
 		result.Severity = cvssScoreToTier(ghsa.CVSSV3.Score)
 	} else if ghsa.Severity != "" {
-		// GitHub also returns a text tier; map it directly.
 		result.Severity = strings.ToUpper(ghsa.Severity)
 	}
 
