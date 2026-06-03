@@ -111,10 +111,10 @@ path that pulled the module in.
 | Build files      | Unpinned Docker images, `curl \| bash` patterns         | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores                                    | unitrust API (optional)    |
 
-The risk score is a weighted composite:
+The risk score is a weighted composite per dependency:
 
 ```
-Risk Score (0–100) =
+Per-Dep Risk Score (0–100) =
     Vulnerabilities × 0.40
   + Maintenance     × 0.25
   + Depth           × 0.15
@@ -124,6 +124,32 @@ Risk Score (0–100) =
   + AI-Gen Penalty         (0–15)
   + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
 ```
+
+**Project headline score** is the maximum of four candidates — it never dilutes a single bad actor into a healthy-looking average:
+
+```
+Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+```
+
+| Candidate | Description |
+| ------------------- | ----------------------------------------------------------------- |
+| `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
+| `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
+| `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
+| `cve_floor` | Floor based on post-reachability CVE tier: called/imported CRITICAL→60, called HIGH→55, imported HIGH→40, required CRITICAL→40 |
+
+**Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
+
+| Candidate | Value |
+| ------------------- | ----- |
+| `severity_adjusted` | 10 |
+| `p95_dep_risk` | 12 |
+| `archived_floor` | 60 ← direct archived dep |
+| `cve_floor` | 40 |
+
+Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
+
+`MeanDepRiskScore` is still available in JSON `diagnostics` for trend lines, but is not the headline.
 
 Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL** 76–100.
 

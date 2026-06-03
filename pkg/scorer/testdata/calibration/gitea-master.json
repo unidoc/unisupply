@@ -1,17 +1,17 @@
 {
   "_meta": {
-    "content_sha256": "474854de5b3027f81a60e0e600cc391a9b4d4e222e21ac3a9743e2c2155ec02b",
     "recorded_at": "2026-05-18T09:31:56Z",
-    "rerecord_reason": "Initial recording for Plan 29 calibration corpus",
+    "rerecord_reason": "plan-45: headline = max(four candidates); p95_dep_risk beats mean for gitea-master",
     "scanner_git_sha": "d97846a5192775feb9922ef1546d327720a61d7a",
     "unisupply_version": "0.5.0-dev",
-    "upstream_pin": "6a270662690439cabe8582e92c22b04d1f8a3fe9"
+    "upstream_pin": "6a270662690439cabe8582e92c22b04d1f8a3fe9",
+    "content_sha256": "2cd69969cd784e1c29090f3eb8174958d48716f11b2bbbc1d1889a1f07849bf1"
   },
   "build_file_findings": [],
   "ci_findings": [],
   "debug_scoring": {
     "enriched_cves": null,
-    "headline_driver": "mean",
+    "headline_driver": "p95_dep_risk",
     "mean_dep_risk_score": 18,
     "per_dep_inputs": null,
     "severity_adjusted_vuln_score": 0,
@@ -189,7 +189,7 @@
         "license": "MIT",
         "open_issues": 5,
         "owner_location": "United States",
-        "owner_name": "Montgomery Edwards⁴⁴⁸",
+        "owner_name": "Montgomery Edwards\u2074\u2074\u2078",
         "stars": 92,
         "top_contributors": [
           "x448",
@@ -3865,7 +3865,7 @@
         "last_commit_date": "2026-03-20T13:17:27Z",
         "license": "MIT",
         "open_issues": 4,
-        "owner_location": "Boulder, CO \u0026 Worldwide \u0026 The Cloud",
+        "owner_location": "Boulder, CO & Worldwide & The Cloud",
         "owner_name": "Stretchr, Inc.",
         "stars": 853,
         "sub_dependencies": 4,
@@ -4678,7 +4678,7 @@
         "last_commit_date": "2023-05-30T11:23:07Z",
         "license": "NOASSERTION",
         "open_issues": 4,
-        "owner_name": "Patrick Mézard",
+        "owner_name": "Patrick M\u00e9zard",
         "stars": 428,
         "top_contributors": [
           "pmezard",
@@ -5509,7 +5509,7 @@
         "license": "BSD-3-Clause",
         "open_issues": 0,
         "owner_location": "Oslo",
-        "owner_name": "Alexander F. Rødseth",
+        "owner_name": "Alexander F. R\u00f8dseth",
         "owner_url": "https://arodseth.com/",
         "stars": 15,
         "top_contributors": [
@@ -5790,7 +5790,7 @@
         "last_commit_date": "2026-05-17T13:31:49Z",
         "license": "MIT",
         "open_issues": 353,
-        "owner_location": "Boulder, CO \u0026 Worldwide \u0026 The Cloud",
+        "owner_location": "Boulder, CO & Worldwide & The Cloud",
         "owner_name": "Stretchr, Inc.",
         "stars": 26000,
         "sub_dependencies": 5,
@@ -8922,7 +8922,7 @@
         "license": "MIT",
         "open_issues": 0,
         "owner_location": "Berlin",
-        "owner_name": "Björn Rabenstein",
+        "owner_name": "Bj\u00f6rn Rabenstein",
         "stars": 113,
         "top_contributors": [
           "bmizerany",
@@ -9910,7 +9910,7 @@
         "last_commit_date": "2026-04-07T12:24:42Z",
         "license": "MIT",
         "open_issues": 32,
-        "owner_location": "Berlin, Dublin, Helsinki, Dortmund, Erfurt, Mönchengladbach, Hamburg",
+        "owner_location": "Berlin, Dublin, Helsinki, Dortmund, Erfurt, M\u00f6nchengladbach, Hamburg",
         "owner_name": "Zalando SE",
         "owner_url": "https://tech.zalando.com",
         "stars": 1235,
@@ -11787,7 +11787,7 @@
         "last_commit_date": "2024-01-19T14:56:22Z",
         "license": "BSD-3-Clause",
         "open_issues": 7,
-        "owner_location": "Zürich, Switzerland",
+        "owner_location": "Z\u00fcrich, Switzerland",
         "owner_name": "go-fed",
         "owner_url": "go-fed.org",
         "stars": 80,
@@ -12375,7 +12375,7 @@
         "last_commit_date": "2023-01-29T09:28:14Z",
         "license": "BSD-3-Clause",
         "open_issues": 9,
-        "owner_name": "Rémy O",
+        "owner_name": "R\u00e9my O",
         "stars": 84,
         "top_contributors": [
           "remyoudompheng",
@@ -13052,7 +13052,7 @@
         "open_issues": 6,
         "owner_company": "Datadog",
         "owner_location": "Berlin, Germany",
-        "owner_name": "Felix Geisendörfer",
+        "owner_name": "Felix Geisend\u00f6rfer",
         "owner_url": "http://felixge.de/",
         "stars": 1149,
         "top_contributors": [
@@ -14874,7 +14874,7 @@
         "license": "Apache-2.0",
         "open_issues": 11,
         "owner_company": "YouTube",
-        "owner_location": "Zürich",
+        "owner_location": "Z\u00fcrich",
         "owner_name": "Michal Witkowski",
         "owner_url": "https://mwitkow.me",
         "stars": 269,
@@ -16378,7 +16378,7 @@
         "open_issues": 6,
         "owner_company": "Datadog",
         "owner_location": "Berlin, Germany",
-        "owner_name": "Felix Geisendörfer",
+        "owner_name": "Felix Geisend\u00f6rfer",
         "owner_url": "http://felixge.de/",
         "stars": 3107,
         "sub_dependencies": 2,
@@ -18151,7 +18151,7 @@
         "last_commit_date": "2026-04-19T14:46:58Z",
         "license": "MIT",
         "open_issues": 135,
-        "owner_company": "#\"\u003e\u003cimg src=X onerror=alert('👋🐶');\u003e",
+        "owner_company": "#\"><img src=X onerror=alert('\ud83d\udc4b\ud83d\udc36');>",
         "owner_location": "Tokyo, Japan",
         "owner_name": "Linda_pp",
         "owner_url": "https://rhysd.github.io/",
@@ -21064,7 +21064,7 @@
         "last_commit_date": "2020-08-17T13:07:02Z",
         "license": "Apache-2.0",
         "open_issues": 0,
-        "owner_name": "ᴊᴏᴇ ᴄʜᴇɴ",
+        "owner_name": "\u1d0a\u1d0f\u1d07 \u1d04\u029c\u1d07\u0274",
         "owner_url": "unknwon.io",
         "stars": 750,
         "sub_dependencies": 4,
@@ -22750,7 +22750,7 @@
         "license": "NOASSERTION",
         "open_issues": 45,
         "owner_location": "Poland",
-        "owner_name": "Michał Derkacz",
+        "owner_name": "Micha\u0142 Derkacz",
         "stars": 735,
         "top_contributors": [
           "michalderkacz",
@@ -23175,9 +23175,9 @@
         "last_commit_date": "2025-11-13T14:32:28Z",
         "license": "MIT",
         "open_issues": 7,
-        "owner_company": "ᒪ̊Λ̸̊ṅ̊̇ï̊̈ä̊̇̈k̊̇̈̊ë̊̈̇̊ä゚̈̇̊𖦹゚ Ꮥ̊͜͡ᑌ̊͜͡ᑭ̊͜͡Ɛ̊͜͡ᖇ̊͜͡ᑕ̊͜͡ᒪ̊͜͡ᑌ̊͜͡Ꮥ̊͜͡Ƭ̊͜͡Ɛ̊͜͡ᖇ̊ ⟳ ✧゚꩜",
+        "owner_company": "\u14aa\u030a\u039b\u0338\u030a\u1e45\u030a\u0307\u00ef\u030a\u0308\u00e4\u030a\u0307\u0308k\u030a\u0307\u0308\u030a\u00eb\u030a\u0308\u0307\u030a\u00e4\u309a\u0308\u0307\u030a\ud81a\uddb9\u309a \u13d5\u030a\u035c\u0361\u144c\u030a\u035c\u0361\u146d\u030a\u035c\u0361\u0190\u030a\u035c\u0361\u1587\u030a\u035c\u0361\u1455\u030a\u035c\u0361\u14aa\u030a\u035c\u0361\u144c\u030a\u035c\u0361\u13d5\u030a\u035c\u0361\u01ac\u030a\u035c\u0361\u0190\u030a\u035c\u0361\u1587\u030a \u27f3 \u2727\u309a\uaa5c",
         "owner_location": "/dev/null",
-        "owner_name": "k⃝͡yl͜e j⃝͡en͜s͜en",
+        "owner_name": "k\u20dd\u0361yl\u035ce j\u20dd\u0361en\u035cs\u035cen",
         "owner_url": "http://som.yale.edu/kyle-jensen",
         "stars": 293,
         "top_contributors": [
@@ -23643,7 +23643,7 @@
         "open_issues": 19,
         "owner_company": "@GetStream  ",
         "owner_location": "Nijmegen, NL",
-        "owner_name": "Frank Schröder",
+        "owner_name": "Frank Schr\u00f6der",
         "owner_url": "https://mastodon.social/@magiconair",
         "stars": 342,
         "top_contributors": [
@@ -25319,10 +25319,10 @@
     "p95_dep_risk_score": 34
   },
   "generated_at": "2026-05-18T09:31:33Z",
-  "headline_driver": "mean",
+  "headline_driver": "p95_dep_risk",
   "mean_dep_risk_score": 18,
-  "overall_risk_level": "LOW",
-  "overall_risk_score": 18,
+  "overall_risk_level": "MEDIUM",
+  "overall_risk_score": 34,
   "project": {
     "direct_dependencies": 118,
     "go_version": "1.26.3",
@@ -26464,6 +26464,6 @@
   "tool": "unisupply",
   "version": "0.5.0-dev",
   "warnings": [
-    "GitHub API unauthenticated — maintainer data unavailable for 13 module(s); maintainer weight excluded from those scores"
+    "GitHub API unauthenticated \u2014 maintainer data unavailable for 13 module(s); maintainer weight excluded from those scores"
   ]
 }

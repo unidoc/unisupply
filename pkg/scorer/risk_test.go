@@ -1620,8 +1620,8 @@ func TestTwoAxis_NoCVEsManyDeps(t *testing.T) {
 	if ps.OverallLevel != RiskLow {
 		t.Errorf("OverallLevel = %s, want LOW (500 stale-but-inert deps)", ps.OverallLevel)
 	}
-	if ps.HeadlineDriver != "mean" {
-		t.Errorf("HeadlineDriver = %q, want %q (mean drives when severity_adjusted == 0)", ps.HeadlineDriver, "mean")
+	if ps.HeadlineDriver != "p95_dep_risk" {
+		t.Errorf("HeadlineDriver = %q, want %q (p95_dep_risk drives when severity_adjusted == 0)", ps.HeadlineDriver, "p95_dep_risk")
 	}
 }
 
@@ -1679,8 +1679,8 @@ func TestTwoAxis_HeadlineDriverPopulated(t *testing.T) {
 			Path: "github.com/test/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
 		})
 		ps := ScoreAll(twoAxisEmptyInput(graph))
-		if ps.HeadlineDriver != "mean" {
-			t.Errorf("HeadlineDriver = %q, want mean (no CVEs)", ps.HeadlineDriver)
+		if ps.HeadlineDriver != "p95_dep_risk" {
+			t.Errorf("HeadlineDriver = %q, want p95_dep_risk (no CVEs)", ps.HeadlineDriver)
 		}
 	})
 
@@ -1742,11 +1742,11 @@ func TestTwoAxis_MeanWinsWhenLargerThanSeverity(t *testing.T) {
 	if ps.MeanDepRiskScore == 0 {
 		t.Errorf("MeanDepRiskScore = 0, expected >0 (archived deps)")
 	}
-	if ps.HeadlineDriver != "mean" {
-		t.Errorf("HeadlineDriver = %q, want mean", ps.HeadlineDriver)
+	if ps.HeadlineDriver != "archived_floor" {
+		t.Errorf("HeadlineDriver = %q, want archived_floor (direct archived deps)", ps.HeadlineDriver)
 	}
-	if ps.OverallScore != ps.MeanDepRiskScore {
-		t.Errorf("OverallScore = %d, want MeanDepRiskScore = %d", ps.OverallScore, ps.MeanDepRiskScore)
+	if ps.OverallScore != 60 {
+		t.Errorf("OverallScore = %d, want 60 (direct archived → archived_floor=60)", ps.OverallScore)
 	}
 }
 
@@ -2230,5 +2230,433 @@ func TestRequiredOnly_PerDepBandDrivenByLevelFromScore(t *testing.T) {
 	// Cross-check the design intent: a required-only dep must not surface as HIGH/CRITICAL.
 	if ds.RiskLevel == RiskHigh || ds.RiskLevel == RiskCritical {
 		t.Errorf("ds.RiskLevel = %s, want LOW or MEDIUM for required-only CVEs", ds.RiskLevel)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Headline candidate tests (plan 45): four-candidate selection
+// ---------------------------------------------------------------------------
+
+// TestHeadline_ReachableCVE_BeatsMean verifies that when a called CRITICAL
+// CVE with imported downgrade (→ 40 at cve_floor) competes against
+// severity_adjusted (70 for 1-2 HIGH after reachability downgrade),
+// severity_adjusted wins. The real gold-sample is that cve_floor still fires
+// when no severity_adjusted risk exists (verified in TestCVEFloor).
+// For a full integration test, verify that a called CRITICAL CVE beats the mean.
+func TestHeadline_ReachableCVE_BeatsMean(t *testing.T) {
+	// 1 dep with called CRITICAL CVE (which the step function treats as severity_adjusted=95)
+	// plus 40 healthy deps with tiny risk scores.
+	specs := []testutil.DepSpec{
+		{
+			Path:       "github.com/risky/pkg",
+			Version:    "v1.0.0",
+			Direct:     true,
+			Depth:      0,
+			IsTestOnly: testutil.BoolPtr(false),
+		},
+	}
+	for i := 0; i < 40; i++ {
+		specs = append(specs, testutil.DepSpec{
+			Path:    fmt.Sprintf("github.com/clean/pkg%d", i),
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   0,
+		})
+	}
+	graph := testutil.MakeGraph(specs...)
+
+	input := ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	}
+	input.Vulns["github.com/risky/pkg"] = []scanner.Vulnerability{
+		{
+			ID:           "GO-2026-9999",
+			Severity:     "CRITICAL",
+			Reachability: "called",
+		},
+	}
+
+	ps := ScoreAll(input)
+
+	// With a called CRITICAL CVE, severity_adjusted should be 95 (any CRITICAL),
+	// which beats p95_dep_risk, archived_floor, and cve_floor (60 for called CRITICAL).
+	if ps.HeadlineCandidate.Name != "severity_adjusted" {
+		t.Errorf("HeadlineCandidate.Name = %q, want severity_adjusted (called CRITICAL drives severity_adjusted=95)",
+			ps.HeadlineCandidate.Name)
+	}
+	if ps.HeadlineCandidate.Score < 95 {
+		t.Errorf("HeadlineCandidate.Score = %.0f, want >= 95 (called CRITICAL → severity_adjusted=95)",
+			ps.HeadlineCandidate.Score)
+	}
+	if levelFromScore(ps.OverallScore) != RiskCritical {
+		t.Errorf("levelFromScore(%d) = %s, want CRITICAL", ps.OverallScore, levelFromScore(ps.OverallScore))
+	}
+}
+
+// TestArchivedFloor tests the archivedFloor function directly with various
+// dep configurations.
+func TestArchivedFloor(t *testing.T) {
+	t.Run("transitive archived", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/old/pkg",
+				Direct:     false, // transitive
+				IsTestOnly: testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived: true,
+				},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.Score != 51 {
+			t.Errorf("Score = %.0f, want 51 (transitive archived)", candidate.Score)
+		}
+		if candidate.Name != "archived_floor" {
+			t.Errorf("Name = %q, want archived_floor", candidate.Name)
+		}
+	})
+
+	t.Run("direct archived", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/old/pkg",
+				Direct:     true, // direct
+				IsTestOnly: testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived: true,
+				},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.Score != 60 {
+			t.Errorf("Score = %.0f, want 60 (direct archived)", candidate.Score)
+		}
+	})
+
+	t.Run("test-only archived (no floor)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/old/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(true), // test-only → skip
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived: true,
+				},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (test-only archived → no floor)", candidate.Score)
+		}
+	})
+
+	t.Run("two archived (direct + transitive)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/old/pkg1",
+				Direct:     false,
+				IsTestOnly: testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived: true,
+				},
+			},
+			{
+				Module:     "github.com/old/pkg2",
+				Direct:     true, // higher score wins
+				IsTestOnly: testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived: true,
+				},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.Score != 60 {
+			t.Errorf("Score = %.0f, want 60 (direct wins over transitive)", candidate.Score)
+		}
+		if candidate.DrivingDep != "github.com/old/pkg2" {
+			t.Errorf("DrivingDep = %q, want github.com/old/pkg2", candidate.DrivingDep)
+		}
+	})
+
+	t.Run("zero archived deps", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:      "github.com/active/pkg",
+				Direct:      true,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: false},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (no archived deps)", candidate.Score)
+		}
+	})
+}
+
+// TestCVEFloor tests the cveFloor function with various CVE reachability +
+// severity combinations.
+func TestCVEFloor(t *testing.T) {
+	t.Run("called CRITICAL", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-001", Severity: "CRITICAL", Reachability: "called"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 60 {
+			t.Errorf("Score = %.0f, want 60 (called CRITICAL)", candidate.Score)
+		}
+	})
+
+	t.Run("called HIGH", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-002", Severity: "HIGH", Reachability: "called"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 55 {
+			t.Errorf("Score = %.0f, want 55 (called HIGH)", candidate.Score)
+		}
+	})
+
+	t.Run("imported CRITICAL", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-003", Severity: "CRITICAL", Reachability: "imported"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 40 {
+			t.Errorf("Score = %.0f, want 40 (imported CRITICAL)", candidate.Score)
+		}
+	})
+
+	t.Run("imported HIGH", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-004", Severity: "HIGH", Reachability: "imported"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 40 {
+			t.Errorf("Score = %.0f, want 40 (imported HIGH)", candidate.Score)
+		}
+	})
+
+	t.Run("required CRITICAL", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-005", Severity: "CRITICAL", Reachability: "required"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 40 {
+			t.Errorf("Score = %.0f, want 40 (required CRITICAL)", candidate.Score)
+		}
+	})
+
+	t.Run("empty reachability (called backward-compat)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-006", Severity: "CRITICAL", Reachability: ""}, // empty = called
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 60 {
+			t.Errorf("Score = %.0f, want 60 (empty reachability → called → CRITICAL → 60)", candidate.Score)
+		}
+	})
+
+	t.Run("no CVEs", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/clean/pkg",
+				Direct:     true,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns:      []scanner.Vulnerability{},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (no CVEs)", candidate.Score)
+		}
+	})
+
+	t.Run("test-only CVE (skipped)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:     "github.com/risky/pkg",
+				Direct:     false,
+				IsTestOnly: testutil.BoolPtr(true), // test-only → skip
+				Vulns: []scanner.Vulnerability{
+					{ID: "CVE-2024-007", Severity: "CRITICAL", Reachability: "called"},
+				},
+			},
+		}
+		candidate := cveFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (test-only CVE → skipped)", candidate.Score)
+		}
+	})
+}
+
+// TestSelectHeadline tests the selectHeadline function for max-score selection
+// and tie-breaking.
+func TestSelectHeadline(t *testing.T) {
+	t.Run("max wins", func(t *testing.T) {
+		candidates := []HeadlineCandidate{
+			{Name: "severity_adjusted", Score: 20},
+			{Name: "p95_dep_risk", Score: 35},
+			{Name: "archived_floor", Score: 60},
+			{Name: "cve_floor", Score: 55},
+		}
+		winner := selectHeadline(candidates)
+		if winner.Name != "archived_floor" {
+			t.Errorf("winner.Name = %q, want archived_floor", winner.Name)
+		}
+		if winner.Score != 60 {
+			t.Errorf("winner.Score = %.0f, want 60", winner.Score)
+		}
+	})
+
+	t.Run("tie resolves to first", func(t *testing.T) {
+		candidates := []HeadlineCandidate{
+			{Name: "candidate_a", Score: 50},
+			{Name: "candidate_b", Score: 50},
+		}
+		winner := selectHeadline(candidates)
+		if winner.Name != "candidate_a" {
+			t.Errorf("winner.Name = %q, want candidate_a (first in tie)", winner.Name)
+		}
+	})
+
+	t.Run("empty slice", func(t *testing.T) {
+		candidates := []HeadlineCandidate{}
+		winner := selectHeadline(candidates)
+		if winner.Name != "" || winner.Score != 0 {
+			t.Errorf("winner should be zero-value for empty slice, got %+v", winner)
+		}
+	})
+
+	t.Run("single candidate", func(t *testing.T) {
+		candidates := []HeadlineCandidate{
+			{Name: "only_one", Score: 42},
+		}
+		winner := selectHeadline(candidates)
+		if winner.Name != "only_one" || winner.Score != 42 {
+			t.Errorf("winner = %+v, want {Name: only_one, Score: 42}", winner)
+		}
+	})
+}
+
+// TestP95DepRiskCandidate tests the p95DepRiskCandidate function.
+func TestP95DepRiskCandidate(t *testing.T) {
+	t.Run("single dep", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{Module: "github.com/single/pkg", RiskScore: 35},
+		}
+		candidate := p95DepRiskCandidate(deps)
+		if candidate.Score != 35 {
+			t.Errorf("Score = %.0f, want 35 (single dep)", candidate.Score)
+		}
+		if candidate.DrivingDep != "github.com/single/pkg" {
+			t.Errorf("DrivingDep = %q, want github.com/single/pkg", candidate.DrivingDep)
+		}
+	})
+
+	t.Run("20 deps", func(t *testing.T) {
+		// Create 20 deps with scores 1..20.
+		deps := make([]*DependencyScore, 20)
+		for i := 0; i < 20; i++ {
+			deps[i] = &DependencyScore{
+				Module:    fmt.Sprintf("github.com/pkg%d", i+1),
+				RiskScore: i + 1,
+			}
+		}
+		candidate := p95DepRiskCandidate(deps)
+		// idx = ceil(0.95*20)-1 = ceil(19)-1 = 18
+		// sorted[18] (0-indexed) = 19 (the 19th score out of 20)
+		if candidate.Score != 19 {
+			t.Errorf("Score = %.0f, want 19 (95th percentile of 1..20)", candidate.Score)
+		}
+	})
+
+	t.Run("zero deps", func(t *testing.T) {
+		deps := []*DependencyScore{}
+		candidate := p95DepRiskCandidate(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (zero deps)", candidate.Score)
+		}
+	})
+}
+
+// TestMeanDepRiskScore_Retained verifies that MeanDepRiskScore is still
+// computed and stored on ProjectScore (even though it no longer drives the
+// headline under plan 45).
+func TestMeanDepRiskScore_Retained(t *testing.T) {
+	specs := []testutil.DepSpec{
+		{Path: "github.com/pkg1", Version: "v1.0.0", Direct: true, Depth: 0},
+		{Path: "github.com/pkg2", Version: "v1.0.0", Direct: false, Depth: 1},
+		{Path: "github.com/pkg3", Version: "v1.0.0", Direct: false, Depth: 2},
+	}
+	graph := testutil.MakeGraph(specs...)
+
+	input := ScoreInput{
+		Graph:       graph,
+		Vulns:       make(map[string][]scanner.Vulnerability),
+		Maintenance: make(map[string]*scanner.MaintenanceInfo),
+		Maintainers: make(map[string]*scanner.MaintainerInfo),
+		Typosquats:  make(map[string]*scanner.TyposquatResult),
+		Resilience:  make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
+		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.MeanDepRiskScore == 0 && len(ps.Dependencies) > 0 {
+		t.Errorf("MeanDepRiskScore = 0, expected >0 for non-empty graph")
+	}
+	if ps.MeanDepRiskScore < 0 || ps.MeanDepRiskScore > 100 {
+		t.Errorf("MeanDepRiskScore = %d, want in [0, 100]", ps.MeanDepRiskScore)
 	}
 }
