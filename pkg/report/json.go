@@ -21,10 +21,11 @@ type JSONReport struct {
 	OverallRisk  int         `json:"overall_risk_score"`
 	OverallLevel string      `json:"overall_risk_level"`
 
-	// MeanDepRiskScore is the legacy weighted-mean axis (the pre-Task-10
-	// overall_risk_score). SeverityAdjustedVulnScore is the CVE-driven
-	// step-function axis. HeadlineDriver records which axis produced
-	// overall_risk_score: "mean" or "severity_adjusted".
+	// MeanDepRiskScore is the legacy weighted-mean axis (non-normative; retained
+	// for dashboards and trend lines). SeverityAdjustedVulnScore is the
+	// CVE-driven step-function axis. HeadlineDriver records which of the four
+	// candidates produced overall_risk_score: "severity_adjusted", "p95_dep_risk",
+	// "archived_floor", or "cve_floor".
 	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
 	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
 	HeadlineDriver            string `json:"headline_driver,omitempty"`

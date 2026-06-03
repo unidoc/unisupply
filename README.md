@@ -149,7 +149,7 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 
 Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
 
-`MeanDepRiskScore` is still available in JSON `diagnostics` for trend lines, but is not the headline.
+`MeanDepRiskScore` is still available as the top-level JSON field `mean_dep_risk_score` for trend lines, but is not the headline.
 
 Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL** 76–100.
 

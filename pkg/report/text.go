@@ -60,7 +60,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score (two-axis headline).
+	// Overall score (four-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
 	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
