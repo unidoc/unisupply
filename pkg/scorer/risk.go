@@ -32,6 +32,15 @@ const (
 	RiskCritical RiskLevel = "CRITICAL"
 )
 
+// HeadlineCandidate records one axis that competes to become the headline score.
+// The four candidates are: severity_adjusted, p95_dep_risk, archived_floor, cve_floor.
+type HeadlineCandidate struct {
+	Name       string  `json:"name"`        // "severity_adjusted" | "p95_dep_risk" | "archived_floor" | "cve_floor"
+	Score      float64 `json:"score"`       // raw candidate value (0–100)
+	DrivingDep string  `json:"driving_dep"` // module path of the dep that set the score, e.g. "github.com/gorilla/i18n"
+	Reason     string  `json:"reason"`      // human-readable explanation, e.g. "archived 129 months"
+}
+
 // DependencyScore holds the risk assessment for a single dependency.
 type DependencyScore struct {
 	Module         string                   `json:"module"`
@@ -65,15 +74,12 @@ type DependencyScore struct {
 
 // ProjectScore holds the overall project risk assessment.
 //
-// Task 10 introduces a two-axis headline:
+// The headline score is the maximum of four candidates:
 //
-//	OverallScore = max(MeanDepRiskScore, SeverityAdjustedVulnScore)
+//	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 //
-// MeanDepRiskScore is the legacy weighted-mean answer to "how risky is this
-// portfolio on average?" SeverityAdjustedVulnScore is a CVE-driven step
-// function that answers "how bad is the worst-case CVE pile-up?" The headline
-// takes the max so a single CRITICAL CVE cannot be diluted by hundreds of
-// clean transitives. HeadlineDriver records which axis won.
+// MeanDepRiskScore is retained as a non-normative portfolio-wide signal.
+// HeadlineDriver records which of the four candidates won.
 type ProjectScore struct {
 	OverallScore      int                `json:"overall_risk_score"`
 	OverallLevel      RiskLevel          `json:"overall_risk_level"`
@@ -86,8 +92,8 @@ type ProjectScore struct {
 	Unmaintained2yr   int                `json:"unmaintained_2yr"`
 	Unmaintained1yr   int                `json:"unmaintained_1yr"`
 
-	// MeanDepRiskScore is the weighted-mean axis (legacy formula). Equal to the
-	// pre-Task-10 OverallScore. Use this when you want a portfolio-wide signal
+	// MeanDepRiskScore is non-normative: retained for dashboards/trend lines; not used in headline.
+	// Equal to the pre-Task-10 OverallScore. Use this when you want a portfolio-wide signal
 	// that is not dominated by a single dep.
 	MeanDepRiskScore int `json:"mean_dep_risk_score"`
 
@@ -96,9 +102,14 @@ type ProjectScore struct {
 	// before counting. See severityAdjustedVulnScore in risk.go.
 	SeverityAdjustedVulnScore int `json:"severity_adjusted_vuln_score"`
 
-	// HeadlineDriver is "mean" or "severity_adjusted" — which axis produced
-	// OverallScore. Empty when there are no dependencies.
+	// HeadlineDriver is one of "severity_adjusted", "p95_dep_risk", "archived_floor",
+	// "cve_floor" — which of the four candidates produced OverallScore.
+	// Empty when there are no dependencies.
 	HeadlineDriver string `json:"headline_driver,omitempty"`
+
+	// HeadlineCandidate records the winning candidate's full detail (score, driving dep, reason).
+	// Nil when there are no dependencies (same condition that clears HeadlineDriver).
+	HeadlineCandidate *HeadlineCandidate `json:"headline_candidate,omitempty"`
 
 	// WorstCVEID is the ID of the most-severe enriched CVE on a production-path
 	// dep (after test-only downgrade). Surfaces the load-bearing finding at a
@@ -316,13 +327,10 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		)
 	}
 
-	// Two-axis headline (Task 10).
+	// Four-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
 	//
-	// MeanDepRiskScore is the legacy weighted-mean — answers "how risky is this
-	// portfolio on average?" SeverityAdjustedVulnScore is the CVE-driven step
-	// function — answers "how bad is the worst-case CVE pile-up?" The headline
-	// takes max so a single CRITICAL CVE cannot be diluted by hundreds of clean
-	// transitives.
+	// MeanDepRiskScore is non-normative — retained for dashboards/trend lines.
+	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
 	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
 
 	sevResult := severityAdjustedVulnScore(now, ps.Dependencies)
@@ -331,18 +339,40 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	ps.WorstCVESeverity = sevResult.worstSeverity
 	ps.WorstCVESourceSeverity = sevResult.worstSourceSeverity
 
-	if ps.SeverityAdjustedVulnScore > ps.MeanDepRiskScore {
-		ps.OverallScore = ps.SeverityAdjustedVulnScore
-		ps.HeadlineDriver = "severity_adjusted"
-	} else {
-		ps.OverallScore = ps.MeanDepRiskScore
-		ps.HeadlineDriver = "mean"
+	// Build the severity_adjusted candidate. For DrivingDep, find the dep that
+	// owns WorstCVEID (if any).
+	sevCandidate := HeadlineCandidate{Name: "severity_adjusted", Score: float64(sevResult.score)}
+	if sevResult.worstID != "" {
+		for _, ds := range ps.Dependencies {
+			for _, v := range ds.Vulns {
+				if v.ID == sevResult.worstID {
+					sevCandidate.DrivingDep = ds.Module
+					sevCandidate.Reason = fmt.Sprintf("%s (%s)", sevResult.worstID, sevResult.worstSeverity)
+					break
+				}
+			}
+			if sevCandidate.DrivingDep != "" {
+				break
+			}
+		}
 	}
-	// HeadlineDriver is meaningless when there are no dependencies (both axes
-	// are 0). Clear it once, after the comparison, so the json:omitempty tag
-	// produces a clean empty-graph report.
+
+	candidates := []HeadlineCandidate{
+		sevCandidate,
+		p95DepRiskCandidate(ps.Dependencies),
+		archivedFloor(ps.Dependencies),
+		cveFloor(ps.Dependencies),
+	}
+	winner := selectHeadline(candidates)
+	ps.HeadlineCandidate = &winner
+	ps.OverallScore = int(math.Round(winner.Score))
+	ps.HeadlineDriver = winner.Name
+
+	// HeadlineDriver is meaningless when there are no dependencies (all candidates
+	// score 0). Clear it so the json:omitempty tag produces a clean empty-graph report.
 	if len(ps.Dependencies) == 0 {
 		ps.HeadlineDriver = ""
+		ps.HeadlineCandidate = nil
 	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
 
@@ -1265,29 +1295,175 @@ func computeDiagnostics(deps []*DependencyScore) *Diagnostics {
 		return nil
 	}
 
-	scores := make([]int, 0, len(deps))
 	maxScore := 0
 	for _, ds := range deps {
-		scores = append(scores, ds.RiskScore)
 		if ds.RiskScore > maxScore {
 			maxScore = ds.RiskScore
 		}
 	}
 
-	sort.Ints(scores)
-	// Nearest-rank p95: index = ceil(0.95 * N) - 1, clamped to [0, N-1].
-	idx := int(math.Ceil(0.95*float64(len(scores)))) - 1
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(scores) {
-		idx = len(scores) - 1
-	}
+	p95 := p95DepRiskCandidate(deps)
 
 	return &Diagnostics{
 		MaxDepRiskScore: maxScore,
-		P95DepRiskScore: scores[idx],
+		P95DepRiskScore: int(p95.Score),
 	}
+}
+
+// p95DepRiskCandidate computes the nearest-rank 95th-percentile per-dep RiskScore
+// and wraps it as a HeadlineCandidate. The sort operates on a copy of deps so
+// the caller's slice order is preserved (order is load-bearing for
+// severityAdjustedVulnScore's first-wins tie-break).
+func p95DepRiskCandidate(deps []*DependencyScore) HeadlineCandidate {
+	if len(deps) == 0 {
+		return HeadlineCandidate{Name: "p95_dep_risk"}
+	}
+
+	sorted := make([]*DependencyScore, len(deps))
+	copy(sorted, deps)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].RiskScore < sorted[j].RiskScore
+	})
+
+	// Nearest-rank formula: idx = ceil(0.95 * N) - 1, clamped to [0, N-1].
+	idx := int(math.Ceil(0.95*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+
+	d := sorted[idx]
+	return HeadlineCandidate{
+		Name:       "p95_dep_risk",
+		Score:      float64(d.RiskScore),
+		DrivingDep: d.Module,
+		Reason:     "p95 of dep risk scores",
+	}
+}
+
+// archivedFloor floors the headline to HIGH when any non-test-only dep in the
+// graph is archived.
+//
+// archived → upstream will never patch a future CVE → unbounded latent risk →
+// HIGH floor (51); direct dependency escalates to 60.
+// "on the import path" approximated as non-test-only in-graph (true call-graph
+// reachability is per-CVE only).
+// HIGH band starts at 51 (levelFromScore), so all HIGH floors use 51, not 50.
+func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
+	best := HeadlineCandidate{Name: "archived_floor"}
+
+	for _, ds := range deps {
+		if ds.IsTestOnly != nil && *ds.IsTestOnly {
+			continue
+		}
+		if ds.Maintenance == nil || !ds.Maintenance.Archived {
+			continue
+		}
+
+		// HIGH band starts at 51 (levelFromScore), so all HIGH floors use 51, not 50.
+		var score float64
+		if ds.Direct {
+			score = 60
+		} else {
+			score = 51
+		}
+
+		if score > best.Score {
+			reason := "archived"
+			if ds.Maintenance.MonthsSinceRelease > 0 {
+				reason = fmt.Sprintf("archived %d months", ds.Maintenance.MonthsSinceRelease)
+			}
+			best.Score = score
+			best.DrivingDep = ds.Module
+			best.Reason = reason
+		}
+	}
+
+	return best
+}
+
+// cveFloor computes a floor score based on the CVE's reachability tier.
+//
+// Scoring matrix (reachability × severity):
+//
+//	called or "" CRITICAL  → 60
+//	called or "" HIGH      → 55
+//	imported CRITICAL      → 40
+//	imported HIGH          → 40
+//	required CRITICAL      → 40
+//	else                   → 0
+//
+// Empty reachability is treated as "called" for backward compatibility (mirrors
+// reachabilityDowngrade convention).
+//
+// Design note: in the current scoring model, severityAdjustedVulnScore produces
+// values that meet or exceed cveFloor for the same CVE (e.g. called CRITICAL →
+// severity_adjusted=95 vs cveFloor=60; required CRITICAL → both give 40 but
+// severity_adjusted is first in the candidate slice). cveFloor therefore acts as
+// a documented semantic anchor — it makes the scoring contract explicit for each
+// reachability tier — and will become load-bearing if severity_adjusted weights
+// are adjusted or new reachability tiers are introduced.
+func cveFloor(deps []*DependencyScore) HeadlineCandidate {
+	// cve_floor scoring: called CRITICAL→60, called HIGH→55,
+	// imported CRITICAL/HIGH→40, required CRITICAL→40.
+	best := HeadlineCandidate{Name: "cve_floor"}
+
+	for _, ds := range deps {
+		if ds.IsTestOnly != nil && *ds.IsTestOnly {
+			continue
+		}
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
+			tier := effectiveTier(v)
+			reach := strings.ToLower(strings.TrimSpace(v.Reachability))
+			// Empty reachability = "called" (backward compat).
+			if reach == "" {
+				reach = "called"
+			}
+
+			var score float64
+			switch {
+			case (reach == "called") && tier == "CRITICAL":
+				score = 60
+			case (reach == "called") && tier == "HIGH":
+				score = 55
+			case reach == "imported" && tier == "CRITICAL":
+				score = 40
+			case reach == "imported" && tier == "HIGH":
+				score = 40
+			case reach == "required" && tier == "CRITICAL":
+				score = 40
+			default:
+				score = 0
+			}
+
+			if score > best.Score {
+				best.Score = score
+				best.DrivingDep = ds.Module
+				best.Reason = fmt.Sprintf("%s %s %s", reach, tier, v.ID)
+			}
+		}
+	}
+
+	return best
+}
+
+// selectHeadline returns the HeadlineCandidate with the highest Score.
+// Ties resolve in slice order (first wins). Returns zero-value when candidates
+// is empty.
+func selectHeadline(candidates []HeadlineCandidate) HeadlineCandidate {
+	if len(candidates) == 0 {
+		return HeadlineCandidate{}
+	}
+	winner := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.Score > winner.Score {
+			winner = c
+		}
+	}
+	return winner
 }
 
 // buildDebugScoring assembles the --debug-scoring payload.

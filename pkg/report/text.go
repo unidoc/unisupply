@@ -60,14 +60,18 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score (two-axis headline).
+	// Overall score (four-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
 	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
 		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
-	if ps.HeadlineDriver != "" {
-		fmt.Fprintf(w, "  Driver: %s  (mean=%d, severity_adjusted=%d)\n",
-			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
+	if ps.HeadlineCandidate != nil {
+		hc := ps.HeadlineCandidate
+		if hc.DrivingDep != "" && hc.Reason != "" {
+			fmt.Fprintf(w, "  Driver: %s — %s (%s)\n", hc.Name, hc.DrivingDep, hc.Reason)
+		} else {
+			fmt.Fprintf(w, "  Driver: %s\n", hc.Name)
+		}
 	}
 	if ps.WorstCVEID != "" {
 		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
@@ -79,6 +83,16 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	}
 	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
+
+	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
+	// undeniable visibility, even when the headline already reflects them.
+	if timeBombs := scorer.CollectTimeBombs(ps); len(timeBombs) > 0 {
+		fmt.Fprintf(w, "TIME-BOMBS (%d)\n", len(timeBombs))
+		for _, tb := range timeBombs {
+			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
+		}
+		fmt.Fprintf(w, "\n")
+	}
 
 	// Debug scoring block (--debug-scoring). NON-NORMATIVE.
 	if ps.DebugScoring != nil {

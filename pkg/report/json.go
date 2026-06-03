@@ -21,13 +21,19 @@ type JSONReport struct {
 	OverallRisk  int         `json:"overall_risk_score"`
 	OverallLevel string      `json:"overall_risk_level"`
 
-	// MeanDepRiskScore is the legacy weighted-mean axis (the pre-Task-10
-	// overall_risk_score). SeverityAdjustedVulnScore is the CVE-driven
-	// step-function axis. HeadlineDriver records which axis produced
-	// overall_risk_score: "mean" or "severity_adjusted".
+	// MeanDepRiskScore is the legacy weighted-mean axis (non-normative; retained
+	// for dashboards and trend lines). SeverityAdjustedVulnScore is the
+	// CVE-driven step-function axis. HeadlineDriver records which of the four
+	// candidates produced overall_risk_score: "severity_adjusted", "p95_dep_risk",
+	// "archived_floor", or "cve_floor".
 	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
 	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
 	HeadlineDriver            string `json:"headline_driver,omitempty"`
+
+	// Headline is the structured headline risk summary. It duplicates
+	// OverallRisk/OverallLevel for convenience and adds driver attribution.
+	// Backwards-compatible addition — existing consumers may ignore this field.
+	Headline JSONHeadline `json:"headline"`
 
 	// WorstCVEID + WorstCVESeverity surface the load-bearing CVE that drove the
 	// headline (post test-only downgrade). Empty when no CVEs are present.
@@ -52,6 +58,12 @@ type JSONReport struct {
 	CIFindings        []JSONFlatFinding `json:"ci_findings"`
 	BuildFileFindings []JSONFlatFinding `json:"build_file_findings"`
 	Takeovers         []JSONTakeover    `json:"takeover_candidates,omitempty"`
+
+	// TimeBombs lists every archived dependency and every CRITICAL CVE across
+	// all non-test dependencies, regardless of whether the headline score
+	// already reflects them. Emitted as an empty array (never null) when none
+	// are found.
+	TimeBombs []JSONTimeBomb `json:"time_bombs"`
 }
 
 // JSONDiagnostics mirrors scorer.Diagnostics in the JSON output. NON-NORMATIVE:
@@ -228,6 +240,42 @@ type JSONCIFinding struct {
 	Remediation string `json:"remediation"`
 }
 
+// JSONHeadline holds the project-level headline risk summary, including which
+// scoring candidate drove the overall score and its key driving dependency.
+type JSONHeadline struct {
+	Score       float64 `json:"score"`
+	Level       string  `json:"level"`
+	Driver      string  `json:"driver"`
+	DrivingItem string  `json:"driving_item,omitempty"`
+	Reason      string  `json:"reason,omitempty"`
+	// Candidates contains the winning candidate only. All four candidate scores
+	// will be included here once ProjectScore stores them all; for now use
+	// Driver/DrivingItem/Reason for the headline and per-dep data for the rest.
+	Candidates []JSONCandidate `json:"candidates"`
+}
+
+// JSONCandidate represents a single scoring candidate evaluated during headline
+// score selection.
+type JSONCandidate struct {
+	Name       string  `json:"name"`
+	Score      float64 `json:"score"`
+	DrivingDep string  `json:"driving_dep,omitempty"`
+	Reason     string  `json:"reason,omitempty"`
+}
+
+// JSONTimeBomb represents a dependency with an immediate, undeniable risk
+// (archived or CRITICAL CVE). Entries are emitted even when the headline score
+// already accounts for them — the goal is undeniable visibility.
+type JSONTimeBomb struct {
+	// Kind is one of "archived" or "critical_cve".
+	Kind string `json:"kind"`
+	// Module is the module path of the affected dependency.
+	Module string `json:"module"`
+	// Detail is a human-readable description (e.g. "archived 129 months" or
+	// "GO-2024-1234 (CRITICAL, called)").
+	Detail string `json:"detail"`
+}
+
 // JSONTakeover holds a takeover candidate.
 type JSONTakeover struct {
 	Owner           string `json:"owner"`
@@ -263,6 +311,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		},
 		OverallRisk:               ps.OverallScore,
 		OverallLevel:              string(ps.OverallLevel),
+		Headline:                  jsonHeadline(ps),
 		MeanDepRiskScore:          ps.MeanDepRiskScore,
 		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
 		HeadlineDriver:            ps.HeadlineDriver,
@@ -271,6 +320,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		DebugScoring:              ps.DebugScoring,
 		Diagnostics:               jsonDiagnostics(ps.Diagnostics),
 		Warnings:                  ps.Warnings,
+		TimeBombs:                 collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
 			CriticalRiskCount: ps.CriticalRiskCount,
 			HighRiskCount:     ps.HighRiskCount,
@@ -485,6 +535,45 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 // jsonDiagnostics maps the scorer's Diagnostics struct to its JSON form.
 // Returns nil when the source is nil so the JSON field is omitted.
+// collectJSONTimeBombs maps scorer.CollectTimeBombs output to the JSON report
+// type, always returning a non-nil slice so the JSON field serialises as []
+// rather than null.
+func collectJSONTimeBombs(ps *scorer.ProjectScore) []JSONTimeBomb {
+	raw := scorer.CollectTimeBombs(ps)
+	out := make([]JSONTimeBomb, len(raw))
+	for i, tb := range raw {
+		out[i] = JSONTimeBomb{
+			Kind:   tb.Kind,
+			Module: tb.Module,
+			Detail: tb.Detail,
+		}
+	}
+	return out
+}
+
+// jsonHeadline builds JSONHeadline from ProjectScore. When HeadlineCandidate is
+// nil (empty-graph scan), driver and candidates are left empty.
+func jsonHeadline(ps *scorer.ProjectScore) JSONHeadline {
+	h := JSONHeadline{
+		Score:      float64(ps.OverallScore),
+		Level:      string(ps.OverallLevel),
+		Candidates: []JSONCandidate{},
+	}
+	if ps.HeadlineCandidate != nil {
+		hc := ps.HeadlineCandidate
+		h.Driver = hc.Name
+		h.DrivingItem = hc.DrivingDep
+		h.Reason = hc.Reason
+		h.Candidates = []JSONCandidate{{
+			Name:       hc.Name,
+			Score:      hc.Score,
+			DrivingDep: hc.DrivingDep,
+			Reason:     hc.Reason,
+		}}
+	}
+	return h
+}
+
 func jsonDiagnostics(d *scorer.Diagnostics) *JSONDiagnostics {
 	if d == nil {
 		return nil

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,17 +92,17 @@ var calibrationCases = []calibrationCase{
 	},
 	{
 		fixture:        "gitea-master.json",
-		expectedLevel:  RiskLow,
-		scoreMin:       10,
-		scoreMax:       25,
-		expectedDriver: "mean",
+		expectedLevel:  RiskMedium,
+		scoreMin:       30,
+		scoreMax:       40,
+		expectedDriver: "p95_dep_risk",
 	},
 	{
 		fixture:        "unisupply-self.json",
-		expectedLevel:  RiskLow,
-		scoreMin:       0,
-		scoreMax:       20,
-		expectedDriver: "mean",
+		expectedLevel:  RiskMedium,
+		scoreMin:       35,
+		scoreMax:       45,
+		expectedDriver: "severity_adjusted",
 	},
 }
 
@@ -119,19 +120,23 @@ type fixtureMeta struct {
 // We can't import pkg/report here (that package depends on scorer), so we
 // declare the local shape inline.
 type fixtureVuln struct {
-	ID       string   `json:"id"`
-	Aliases  []string `json:"aliases"`
-	Severity string   `json:"severity"`
+	ID           string   `json:"id"`
+	Aliases      []string `json:"aliases"`
+	Severity     string   `json:"severity"`
+	Reachability string   `json:"reachability,omitempty"`
 }
 
 type fixtureDep struct {
-	Module    string        `json:"module"`
-	Version   string        `json:"version"`
-	Direct    bool          `json:"direct"`
-	TestOnly  *bool         `json:"test_only"`
-	RiskScore int           `json:"risk_score"`
-	RiskLevel string        `json:"risk_level"`
-	Vulns     []fixtureVuln `json:"vulnerabilities"`
+	Module      string        `json:"module"`
+	Version     string        `json:"version"`
+	Direct      bool          `json:"direct"`
+	TestOnly    *bool         `json:"test_only"`
+	RiskScore   int           `json:"risk_score"`
+	RiskLevel   string        `json:"risk_level"`
+	Vulns       []fixtureVuln `json:"vulnerabilities"`
+	Maintenance struct {
+		Archived bool `json:"archived"`
+	} `json:"maintenance"`
 }
 
 // fixtureBody is the subset of the report JSON that the test reads. Other
@@ -225,25 +230,31 @@ func loadFixture(t *testing.T, name string) (fixtureMeta, fixtureBody, []fixture
 
 // buildDeps reconstructs the per-dep score list needed by the Task-10
 // headline aggregators. Only fields touched by computeOverallScore and
-// severityAdjustedVulnScore are populated — the rest (Maintenance,
-// Maintainer, AIGenRisk, Resilience, TrustIndex, …) are left zero because
-// the headline math does not read them.
+// severityAdjustedVulnScore are populated — the rest (Maintainer, AIGenRisk,
+// Resilience, TrustIndex, …) are left zero because the headline math does not
+// read them. Maintenance.Archived is populated for archivedFloor.
 func buildDeps(in []fixtureDep) []*DependencyScore {
 	out := make([]*DependencyScore, 0, len(in))
 	for _, d := range in {
+		var maint *scanner.MaintenanceInfo
+		if d.Maintenance.Archived {
+			maint = &scanner.MaintenanceInfo{Archived: true}
+		}
 		ds := &DependencyScore{
-			Module:     d.Module,
-			Version:    d.Version,
-			Direct:     d.Direct,
-			RiskScore:  d.RiskScore,
-			RiskLevel:  RiskLevel(d.RiskLevel),
-			IsTestOnly: d.TestOnly,
+			Module:      d.Module,
+			Version:     d.Version,
+			Direct:      d.Direct,
+			RiskScore:   d.RiskScore,
+			RiskLevel:   RiskLevel(d.RiskLevel),
+			IsTestOnly:  d.TestOnly,
+			Maintenance: maint,
 		}
 		for _, v := range d.Vulns {
 			ds.Vulns = append(ds.Vulns, scanner.Vulnerability{
-				ID:       v.ID,
-				Aliases:  v.Aliases,
-				Severity: v.Severity,
+				ID:           v.ID,
+				Aliases:      v.Aliases,
+				Severity:     v.Severity,
+				Reachability: v.Reachability,
 			})
 		}
 		out = append(out, ds)
@@ -252,8 +263,8 @@ func buildDeps(in []fixtureDep) []*DependencyScore {
 }
 
 // rerunHeadline computes the same headline ScoreAll would have produced from
-// the recorded per-dep RiskScore + Vulns + IsTestOnly. Mirrors the second
-// half of ScoreAll in pkg/scorer/risk.go.
+// the recorded per-dep RiskScore + Vulns + IsTestOnly + Maintenance.
+// Mirrors the four-candidate logic in ScoreAll.
 func rerunHeadline(deps []*DependencyScore) (mean, sevAdj, overall int, level RiskLevel, driver, worstID, worstSev string) {
 	mean = computeOverallScore(deps)
 	sev := severityAdjustedVulnScore(time.Now(), deps)
@@ -261,17 +272,22 @@ func rerunHeadline(deps []*DependencyScore) (mean, sevAdj, overall int, level Ri
 	worstID = sev.worstID
 	worstSev = sev.worstSeverity
 
-	if sevAdj > mean {
-		overall = sevAdj
-		if len(deps) > 0 {
-			driver = "severity_adjusted"
-		}
-	} else {
-		overall = mean
-		if len(deps) > 0 {
-			driver = "mean"
-		}
+	// Build the four candidates.
+	candidates := []HeadlineCandidate{
+		{Name: "severity_adjusted", Score: float64(sevAdj)},
+		p95DepRiskCandidate(deps),
+		archivedFloor(deps),
+		cveFloor(deps),
 	}
+	winner := selectHeadline(candidates)
+	overall = int(math.Round(winner.Score))
+	driver = winner.Name
+
+	// Clear driver when no deps (mirrors ScoreAll behavior).
+	if len(deps) == 0 {
+		driver = ""
+	}
+
 	level = levelFromScore(overall)
 	return
 }
