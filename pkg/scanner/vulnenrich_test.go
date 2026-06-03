@@ -602,6 +602,130 @@ func TestValidateVulnID_BoundaryLength(t *testing.T) {
 	}
 }
 
+// --- Task 5: Cache durability ---
+
+// TestVulnEnrich_FailureCachedFor1h verifies that a failed enrichment is cached
+// for 1h: a second call within 1h makes zero HTTP calls and still reports
+// EnrichmentFailed=true with severity UNKNOWN.
+func TestVulnEnrich_FailureCachedFor1h(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, st, "", func() time.Time { return fixedTime })
+
+	// First call — all tiers fail, failure gets cached.
+	v1 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+
+	if !v1.EnrichmentFailed {
+		t.Fatal("First call: expected EnrichmentFailed=true")
+	}
+	callsAfterFirst := st.calls
+
+	// Second call 30 min later — must serve from failure cache, no HTTP calls.
+	v2 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	if st.calls != callsAfterFirst {
+		t.Errorf("Second call within 1h: expected %d total HTTP calls, got %d (cache not used)", callsAfterFirst, st.calls)
+	}
+	if !v2.EnrichmentFailed {
+		t.Error("Second call: EnrichmentFailed should still be true from cached failure")
+	}
+	if v2.Severity != "UNKNOWN" {
+		t.Errorf("Second call: Severity = %q, want UNKNOWN", v2.Severity)
+	}
+}
+
+// TestVulnEnrich_FailureCacheTTL_Expiry verifies that a cached failure expires
+// after 1h (not 24h), and the enricher re-fetches on the next call.
+func TestVulnEnrich_FailureCacheTTL_Expiry(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+
+	currentTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	clockFn := func() time.Time { return currentTime }
+	e := newEnricherWithTransport(t, st, "", clockFn)
+
+	// First call — failure cached.
+	v1 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+	callsAfterFirst := st.calls
+
+	// Advance 2 hours — past 1h failure TTL.
+	currentTime = currentTime.Add(2 * time.Hour)
+
+	// Second call after failure TTL expiry — must re-fetch.
+	v2 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	if st.calls <= callsAfterFirst {
+		t.Errorf("After failure TTL expiry: expected more HTTP calls than %d, got %d", callsAfterFirst, st.calls)
+	}
+}
+
+// TestVulnEnrich_CacheVersionMismatch verifies that an on-disk cache entry with
+// a different version is treated as a miss and triggers a fresh network lookup.
+func TestVulnEnrich_CacheVersionMismatch(t *testing.T) {
+	fixture := loadFixture(t, "osv-CVE-2024-23653.json")
+
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	// Write an old-version cache entry manually.
+	cacheDir := t.TempDir()
+	oldEntry := `{"version":0,"fetched_at":"2024-03-01T12:00:00Z","result":{"severity":"HIGH","source":"osv"}}`
+	cacheFile := filepath.Join(cacheDir, "CVE-2024-23653.json")
+	if err := os.WriteFile(cacheFile, []byte(oldEntry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &staticTransport{statusCode: 200, body: string(fixture)}
+	e := NewVulnEnricher(VulnEnricherOptions{
+		CacheDir: cacheDir,
+		clockFn:  func() time.Time { return fixedTime },
+	})
+	e.client.Transport = st
+
+	v := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v)
+
+	// The old-version entry must have been treated as a miss → network call made.
+	if st.calls == 0 {
+		t.Error("Expected network call due to cache version mismatch; got 0 calls")
+	}
+	// And result from the live call is used.
+	if v.Severity != "CRITICAL" {
+		t.Errorf("Severity = %q, want CRITICAL after version-mismatch re-fetch", v.Severity)
+	}
+}
+
+// TestVulnEnrich_NoUNKNOWNDisplayedAsLOW verifies the golden invariant: no CVE
+// with UNKNOWN severity produces "LOW" in the text report. The cached-failure
+// path is exercised here (second call uses the 1h-cached failure), ensuring the
+// display is correct even when enrichment results come from cache.
+func TestVulnEnrich_NoUNKNOWNDisplayedAsLOW(t *testing.T) {
+	st := &staticTransport{statusCode: 500, body: `{"error":"internal"}`}
+	fixedTime := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, st, "", func() time.Time { return fixedTime })
+
+	// First call — all tiers fail; failure cached.
+	v1 := &Vulnerability{ID: "CVE-2024-99999", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+
+	// Second call — served from 1h failure cache.
+	v2 := &Vulnerability{ID: "CVE-2024-99999", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v2)
+
+	// Neither the live nor the cached path should produce "LOW".
+	for _, v := range []*Vulnerability{v1, v2} {
+		if strings.EqualFold(v.Severity, "LOW") {
+			t.Errorf("CVE %s: Severity = %q — UNKNOWN must not be displayed as LOW", v.ID, v.Severity)
+		}
+		if !v.EnrichmentFailed {
+			t.Errorf("CVE %s: EnrichmentFailed should be true", v.ID)
+		}
+	}
+}
+
 // --- helpers ---
 
 // loadFixture reads a file from testdata/vulnenrich/ in the scanner package

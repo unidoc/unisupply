@@ -19,9 +19,14 @@ const (
 	enrichMaxBytes    = 512 * 1024 // 512 KB per spec
 	cacheSubDir       = "unisupply/vuln"
 	cacheTTL          = 24 * time.Hour
+	cacheFailTTL      = 1 * time.Hour
 	cacheFileMode     = 0o600
 	cacheDirMode      = 0o700
 	cacheFallbackBase = "unisupply-vuln-cache"
+	// currentCacheVersion must be incremented when the on-disk shape changes
+	// in a backward-incompatible way. Entries with a different version are
+	// treated as cache misses, providing a one-time self-healing invalidation.
+	currentCacheVersion = 1
 )
 
 // vulnIDPattern enforces the allowed character set for vulnerability IDs.
@@ -131,7 +136,17 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	// Try cache first.
 	if cached, ok := e.loadCache(v.ID); ok {
-		e.applyEnrichResult(v, cached)
+		if cached.Source == "none" || cached.Severity == "" {
+			// Cached failure — restore failure state identically to the live path.
+			markEnrichmentFailed(v)
+			if len(v.EnrichmentErrors) == 0 {
+				v.EnrichmentErrors = []string{
+					fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID),
+				}
+			}
+		} else {
+			e.applyEnrichResult(v, cached)
+		}
 		return warnings
 	}
 
@@ -183,13 +198,22 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		}
 	}
 
-	// All tiers failed.
-	v.EnrichmentFailed = true
-	v.SeveritySource = "none"
+	// All tiers failed — cache the failure for 1h so transient outages don't
+	// hammer four APIs on every scan, and apply the failure state to the vuln.
+	failureResult := &enrichResult{Source: "none"}
+	e.saveCache(v.ID, failureResult)
+	markEnrichmentFailed(v)
 	msg := fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID)
 	v.EnrichmentErrors = []string{msg}
 	warnings = append(warnings, msg)
 	return warnings
+}
+
+// markEnrichmentFailed sets the failure state on v. Centralising this ensures
+// the live path and the cached-failure path apply identical state.
+func markEnrichmentFailed(v *Vulnerability) {
+	v.EnrichmentFailed = true
+	v.SeveritySource = "none"
 }
 
 // enrichResult holds the data extracted from OSV or GHSA responses.
@@ -528,6 +552,7 @@ func parseCVSSScore(s string) (float64, bool) {
 
 // vulnCacheEntry is what gets written to / read from each vulnerability cache file.
 type vulnCacheEntry struct {
+	Version   int           `json:"version"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	Result    *enrichResult `json:"result"`
 }
@@ -544,8 +569,10 @@ func (e *VulnEnricher) ensureCacheDir() error {
 	return os.MkdirAll(e.cacheDir, cacheDirMode)
 }
 
-// loadCache returns a cached enrichResult if one exists and is still within the
-// 24h TTL. Returns (nil, false) on any miss or error.
+// loadCache returns a cached enrichResult if one exists and is still within its
+// TTL (24h for successes, 1h for failures). Returns (nil, false) on any miss or
+// error, including a version mismatch — which acts as a one-time self-healing
+// invalidation when the on-disk shape changes.
 func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 	path := e.cacheFilePath(id)
 	data, err := os.ReadFile(path)
@@ -558,7 +585,16 @@ func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 		return nil, false
 	}
 
-	if e.now().Sub(entry.FetchedAt) > cacheTTL {
+	if entry.Version != currentCacheVersion {
+		return nil, false
+	}
+
+	ttl := cacheTTL
+	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Severity == "" {
+		ttl = cacheFailTTL
+	}
+
+	if e.now().Sub(entry.FetchedAt) > ttl {
 		return nil, false
 	}
 
@@ -572,6 +608,7 @@ func (e *VulnEnricher) saveCache(id string, result *enrichResult) {
 	}
 
 	entry := vulnCacheEntry{
+		Version:   currentCacheVersion,
 		FetchedAt: e.now(),
 		Result:    result,
 	}
