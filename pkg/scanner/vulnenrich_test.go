@@ -622,7 +622,7 @@ func TestVulnEnrich_FailureCachedFor1h(t *testing.T) {
 	}
 	callsAfterFirst := st.calls
 
-	// Second call 30 min later — must serve from failure cache, no HTTP calls.
+	// Second call at same time — still within 1 h TTL, must serve from failure cache, no HTTP calls.
 	v2 := &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"}
 	e.Enrich(context.Background(), v2)
 
