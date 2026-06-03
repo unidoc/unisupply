@@ -2,10 +2,10 @@
   "_meta": {
     "content_sha256": "139afb893473a5f844a0c6f427835a322571f9ca13ab12608d816986303d029c",
     "recorded_at": "2026-06-03T17:20:35Z",
-    "rerecord_reason": "plan-45: headline = max(four candidates); archivedFloor/cveFloor/p95DepRisk now compete with severity_adjusted",
+    "rerecord_reason": "headline now uses max(four candidates); archivedFloor/cveFloor/p95DepRisk compete with severity_adjusted",
     "scanner_git_sha": "418a2dcced702da351efbe01dfbf84c2813af78a",
     "unisupply_version": "0.5.0-dev",
-    "upstream_pin": "HEAD"
+    "upstream_pin": "418a2dcced702da351efbe01dfbf84c2813af78a"
   },
   "build_file_findings": null,
   "ci_findings": null,

@@ -108,7 +108,8 @@ type ProjectScore struct {
 	HeadlineDriver string `json:"headline_driver,omitempty"`
 
 	// HeadlineCandidate records the winning candidate's full detail (score, driving dep, reason).
-	HeadlineCandidate HeadlineCandidate `json:"headline_candidate"`
+	// Nil when there are no dependencies (same condition that clears HeadlineDriver).
+	HeadlineCandidate *HeadlineCandidate `json:"headline_candidate,omitempty"`
 
 	// WorstCVEID is the ID of the most-severe enriched CVE on a production-path
 	// dep (after test-only downgrade). Surfaces the load-bearing finding at a
@@ -363,7 +364,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		cveFloor(ps.Dependencies),
 	}
 	winner := selectHeadline(candidates)
-	ps.HeadlineCandidate = winner
+	ps.HeadlineCandidate = &winner
 	ps.OverallScore = int(math.Round(winner.Score))
 	ps.HeadlineDriver = winner.Name
 
@@ -371,7 +372,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// score 0). Clear it so the json:omitempty tag produces a clean empty-graph report.
 	if len(ps.Dependencies) == 0 {
 		ps.HeadlineDriver = ""
-		ps.HeadlineCandidate = HeadlineCandidate{}
+		ps.HeadlineCandidate = nil
 	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
 
@@ -1396,9 +1397,17 @@ func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 //
 // Empty reachability is treated as "called" for backward compatibility (mirrors
 // reachabilityDowngrade convention).
+//
+// Design note: in the current scoring model, severityAdjustedVulnScore produces
+// values that meet or exceed cveFloor for the same CVE (e.g. called CRITICAL →
+// severity_adjusted=95 vs cveFloor=60; required CRITICAL → both give 40 but
+// severity_adjusted is first in the candidate slice). cveFloor therefore acts as
+// a documented semantic anchor — it makes the scoring contract explicit for each
+// reachability tier — and will become load-bearing if severity_adjusted weights
+// are adjusted or new reachability tiers are introduced.
 func cveFloor(deps []*DependencyScore) HeadlineCandidate {
-	// cve_floor scoring: called/imported CRITICAL→60, called HIGH→55,
-	// imported HIGH→40, required CRITICAL→40.
+	// cve_floor scoring: called CRITICAL→60, called HIGH→55,
+	// imported CRITICAL/HIGH→40, required CRITICAL→40.
 	best := HeadlineCandidate{Name: "cve_floor"}
 
 	for _, ds := range deps {

@@ -65,7 +65,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
 	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
 		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
-	if ps.HeadlineCandidate.Name != "" {
+	if ps.HeadlineCandidate != nil {
 		hc := ps.HeadlineCandidate
 		if hc.DrivingDep != "" && hc.Reason != "" {
 			fmt.Fprintf(w, "  Driver: %s — %s (%s)\n", hc.Name, hc.DrivingDep, hc.Reason)

@@ -136,7 +136,7 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 | `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
 | `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
 | `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
-| `cve_floor` | Floor based on post-reachability CVE tier: called/imported CRITICAL→60, called HIGH→55, imported HIGH→40, required CRITICAL→40 |
+| `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
 
 **Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
 

@@ -242,12 +242,15 @@ type JSONCIFinding struct {
 // JSONHeadline holds the project-level headline risk summary, including which
 // scoring candidate drove the overall score and its key driving dependency.
 type JSONHeadline struct {
-	Score       float64         `json:"score"`
-	Level       string          `json:"level"`
-	Driver      string          `json:"driver"`
-	DrivingItem string          `json:"driving_item,omitempty"`
-	Reason      string          `json:"reason,omitempty"`
-	Candidates  []JSONCandidate `json:"candidates"`
+	Score       float64 `json:"score"`
+	Level       string  `json:"level"`
+	Driver      string  `json:"driver"`
+	DrivingItem string  `json:"driving_item,omitempty"`
+	Reason      string  `json:"reason,omitempty"`
+	// Candidates contains the winning candidate only. All four candidate scores
+	// will be included here once ProjectScore stores them all; for now use
+	// Driver/DrivingItem/Reason for the headline and per-dep data for the rest.
+	Candidates []JSONCandidate `json:"candidates"`
 }
 
 // JSONCandidate represents a single scoring candidate evaluated during headline
@@ -305,23 +308,9 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			TransDeps:  transitiveCount,
 			TotalDeps:  directCount + transitiveCount,
 		},
-		OverallRisk:  ps.OverallScore,
-		OverallLevel: string(ps.OverallLevel),
-		Headline: JSONHeadline{
-			Score:       float64(ps.OverallScore),
-			Level:       string(ps.OverallLevel),
-			Driver:      ps.HeadlineCandidate.Name,
-			DrivingItem: ps.HeadlineCandidate.DrivingDep,
-			Reason:      ps.HeadlineCandidate.Reason,
-			Candidates: []JSONCandidate{
-				{
-					Name:       ps.HeadlineCandidate.Name,
-					Score:      ps.HeadlineCandidate.Score,
-					DrivingDep: ps.HeadlineCandidate.DrivingDep,
-					Reason:     ps.HeadlineCandidate.Reason,
-				},
-			},
-		},
+		OverallRisk:               ps.OverallScore,
+		OverallLevel:              string(ps.OverallLevel),
+		Headline:                  jsonHeadline(ps),
 		MeanDepRiskScore:          ps.MeanDepRiskScore,
 		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
 		HeadlineDriver:            ps.HeadlineDriver,
@@ -559,6 +548,29 @@ func collectJSONTimeBombs(ps *scorer.ProjectScore) []JSONTimeBomb {
 		}
 	}
 	return out
+}
+
+// jsonHeadline builds JSONHeadline from ProjectScore. When HeadlineCandidate is
+// nil (empty-graph scan), driver and candidates are left empty.
+func jsonHeadline(ps *scorer.ProjectScore) JSONHeadline {
+	h := JSONHeadline{
+		Score:      float64(ps.OverallScore),
+		Level:      string(ps.OverallLevel),
+		Candidates: []JSONCandidate{},
+	}
+	if ps.HeadlineCandidate != nil {
+		hc := ps.HeadlineCandidate
+		h.Driver = hc.Name
+		h.DrivingItem = hc.DrivingDep
+		h.Reason = hc.Reason
+		h.Candidates = []JSONCandidate{{
+			Name:       hc.Name,
+			Score:      hc.Score,
+			DrivingDep: hc.DrivingDep,
+			Reason:     hc.Reason,
+		}}
+	}
+	return h
 }
 
 func jsonDiagnostics(d *scorer.Diagnostics) *JSONDiagnostics {
