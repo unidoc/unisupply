@@ -1750,6 +1750,41 @@ func TestTwoAxis_MeanWinsWhenLargerThanSeverity(t *testing.T) {
 	}
 }
 
+// TestArchivedBackfill_NilMaintenance verifies that archived_floor and TIME-BOMBS
+// fire when the maintenance scanner produced no entry but MaintainerInfo.IsArchived
+// is true — the path where maint==nil before backfill.
+func TestArchivedBackfill_NilMaintenance(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/gone/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	input := twoAxisEmptyInput(graph)
+	// Deliberately no Maintenance entry — simulates maintenance scanner missing this module.
+	input.Maintainers["github.com/gone/pkg"] = &scanner.MaintainerInfo{
+		DataAvailable: true,
+		IsArchived:    true,
+	}
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver != "archived_floor" {
+		t.Errorf("HeadlineDriver = %q, want archived_floor", ps.HeadlineDriver)
+	}
+	if ps.OverallScore != 60 {
+		t.Errorf("OverallScore = %d, want 60 (direct archived → archived_floor=60)", ps.OverallScore)
+	}
+	bombs := CollectTimeBombs(ps)
+	hasArchived := false
+	for _, b := range bombs {
+		if b.Kind == "archived" {
+			hasArchived = true
+			break
+		}
+	}
+	if !hasArchived {
+		t.Error("expected an archived TIME-BOMB but none found")
+	}
+}
+
 // TestTwoAxis_DebugScoringOptIn verifies that DebugScoring is populated only
 // when ScoreInput.DebugMode is true. The block is non-normative.
 func TestTwoAxis_DebugScoringOptIn(t *testing.T) {

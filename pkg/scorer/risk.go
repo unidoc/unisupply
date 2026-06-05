@@ -360,8 +360,8 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		si := sevResult.stepInputs
 		total := si.Critical + si.High + si.Medium + si.Low
 		sevCandidate.Reason = fmt.Sprintf(
-			"portfolio: %d total CVEs (%d critical, %d high) → step=%d",
-			total, si.Critical, si.High, sevResult.score,
+			"%d high-severity CVE across %d total (%d critical) → score %d",
+			si.High, total, si.Critical, sevResult.score,
 		)
 	}
 
@@ -415,6 +415,19 @@ func scoreDependency(
 	trustIndex *scanner.TrustIndexEntry,
 	now time.Time,
 ) *DependencyScore {
+	// Backfill Maintenance.Archived from the maintainer scanner before building
+	// DependencyScore so ds.Maintenance always holds the updated pointer.
+	// The maintenance scanner uses the module proxy, which does not expose the
+	// archived flag. MaintainerInfo.IsArchived is populated from the GitHub API
+	// repo.Archived field and is the authoritative source.
+	if maintainerInfo != nil && maintainerInfo.IsArchived {
+		if maint == nil {
+			maint = &scanner.MaintenanceInfo{Archived: true}
+		} else if !maint.Archived {
+			maint.Archived = true
+		}
+	}
+
 	ds := &DependencyScore{
 		Module:         dep.Module.Path,
 		Version:        dep.Module.Version,
@@ -428,17 +441,6 @@ func scoreDependency(
 		Resilience:     resilience,
 		AIGenRisk:      aiGenRisk,
 		TrustIndex:     trustIndex,
-	}
-
-	// Backfill Maintenance.Archived from the maintainer scanner.
-	// The maintenance scanner uses the module proxy, which does not expose the
-	// archived flag. MaintainerInfo.IsArchived is populated from the GitHub API
-	// repo.Archived field and is the authoritative source. Use IsArchived
-	// directly (not TakeoverReason) because assessTakeover evaluates multiple
-	// conditions and the reason string may not say "repository archived" even
-	// when the repo is archived.
-	if maint != nil && maintainerInfo != nil && maintainerInfo.IsArchived && !maint.Archived {
-		maint.Archived = true
 	}
 
 	// 1. Vulnerability score (0-100).

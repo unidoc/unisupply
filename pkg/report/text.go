@@ -94,7 +94,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		for _, tb := range timeBombs {
 			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
 		}
-		if allRequiredReachability(timeBombs) {
+		if ps.HeadlineDriver == "severity_adjusted" && allRequiredReachability(timeBombs) {
 			fmt.Fprintf(w, "  Note: all above have reachability=required; headline reflects reachability-downgraded severity.\n")
 		}
 		fmt.Fprintf(w, "\n")
