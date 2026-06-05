@@ -11,8 +11,11 @@ type TimeBomb struct {
 	// Module is the module path of the affected dependency.
 	Module string
 	// Detail is a human-readable description of the risk (e.g. "archived 129 months"
-	// or "GO-2024-1234 (CRITICAL, called)").
+	// or "GO-2024-1234 (CRITICAL, required — not on call path)").
 	Detail string
+	// Reachability is populated for critical_cve entries (e.g. "required", "imported").
+	// Empty for archived entries.
+	Reachability string
 }
 
 // CollectTimeBombs returns all time-bomb entries for the given project score.
@@ -55,14 +58,23 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 			}
 			seenCVE[v.ID] = true
 
+			reachTag := v.Reachability
 			reachSuffix := ""
-			if v.Reachability != "" {
-				reachSuffix = ", " + v.Reachability
+			if reachTag != "" {
+				switch reachTag {
+				case "required":
+					reachSuffix = ", required — not on call path"
+				case "imported":
+					reachSuffix = ", imported — in package but not called"
+				default:
+					reachSuffix = ", " + reachTag
+				}
 			}
 			bombs = append(bombs, TimeBomb{
-				Kind:   "critical_cve",
-				Module: dep.Module,
-				Detail: fmt.Sprintf("%s (CRITICAL%s)", v.ID, reachSuffix),
+				Kind:         "critical_cve",
+				Module:       dep.Module,
+				Detail:       fmt.Sprintf("%s (CRITICAL%s)", v.ID, reachSuffix),
+				Reachability: reachTag,
 			})
 		}
 

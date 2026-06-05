@@ -70,6 +70,19 @@ type DependencyScore struct {
 	DepthScore       float64 `json:"-"`
 	MaintainerScore  float64 `json:"-"`
 	MaturityScore    float64 `json:"-"`
+
+	// Additive bonus terms applied after the weighted base (for verbose output).
+	ResilienceBonus float64 `json:"-"`
+	AIGenBonus      float64 `json:"-"`
+	TyposquatBonus  float64 `json:"-"`
+	// FlooredTo is non-zero when severityFloor overrode the weighted total.
+	// The gap is NOT additive — rendered as "floored→N".
+	FlooredTo int `json:"-"`
+	// MaintainerWeightExcluded is true when maintainer data was unavailable so
+	// the 0.10 maintainer weight was dropped and the remaining four weights were
+	// renormalized to sum to 1.0. The displayed component scores no longer equal
+	// their nominal ×weight contributions.
+	MaintainerWeightExcluded bool `json:"-"`
 }
 
 // ProjectScore holds the overall project risk assessment.
@@ -339,22 +352,17 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	ps.WorstCVESeverity = sevResult.worstSeverity
 	ps.WorstCVESourceSeverity = sevResult.worstSourceSeverity
 
-	// Build the severity_adjusted candidate. For DrivingDep, find the dep that
-	// owns WorstCVEID (if any).
+	// Build the severity_adjusted candidate. severity_adjusted is a portfolio
+	// step-function over all CVE counts — there is no single driving dep.
+	// DrivingDep is intentionally left empty; Reason summarises the aggregate.
 	sevCandidate := HeadlineCandidate{Name: "severity_adjusted", Score: float64(sevResult.score)}
-	if sevResult.worstID != "" {
-		for _, ds := range ps.Dependencies {
-			for _, v := range ds.Vulns {
-				if v.ID == sevResult.worstID {
-					sevCandidate.DrivingDep = ds.Module
-					sevCandidate.Reason = fmt.Sprintf("%s (%s)", sevResult.worstID, sevResult.worstSeverity)
-					break
-				}
-			}
-			if sevCandidate.DrivingDep != "" {
-				break
-			}
-		}
+	{
+		si := sevResult.stepInputs
+		total := si.Critical + si.High + si.Medium + si.Low
+		sevCandidate.Reason = fmt.Sprintf(
+			"portfolio: %d total CVEs (%d critical, %d high) → step=%d",
+			total, si.Critical, si.High, sevResult.score,
+		)
 	}
 
 	candidates := []HeadlineCandidate{
@@ -420,6 +428,17 @@ func scoreDependency(
 		Resilience:     resilience,
 		AIGenRisk:      aiGenRisk,
 		TrustIndex:     trustIndex,
+	}
+
+	// Backfill Maintenance.Archived from the maintainer scanner.
+	// The maintenance scanner uses the module proxy, which does not expose the
+	// archived flag. MaintainerInfo.IsArchived is populated from the GitHub API
+	// repo.Archived field and is the authoritative source. Use IsArchived
+	// directly (not TakeoverReason) because assessTakeover evaluates multiple
+	// conditions and the reason string may not say "repository archived" even
+	// when the repo is archived.
+	if maint != nil && maintainerInfo != nil && maintainerInfo.IsArchived && !maint.Archived {
+		maint.Archived = true
 	}
 
 	// 1. Vulnerability score (0-100).
@@ -519,6 +538,13 @@ func scoreDependency(
 	// When maintainerInfo != nil && !maintainerInfo.DataAvailable the
 	// maintainer component is silently excluded; denominator stays at 0.90
 	// and the division below rescales the remaining four weights to 1.0.
+	if maintainerInfo != nil && !maintainerInfo.DataAvailable {
+		ds.MaintainerWeightExcluded = true
+	}
+
+	ds.TyposquatBonus = typosquatBonus
+	ds.AIGenBonus = aiGenBonus
+	ds.ResilienceBonus = resilienceBonus
 
 	weighted := weightedBase/denominator +
 		typosquatBonus +
@@ -539,6 +565,7 @@ func scoreDependency(
 	if len(vulns) > 0 {
 		floor, promotedLevel := severityFloor(now, vulns)
 		if ds.RiskScore < floor {
+			ds.FlooredTo = floor
 			ds.RiskScore = floor
 		}
 
