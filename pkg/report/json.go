@@ -275,7 +275,9 @@ type JSONTimeBomb struct {
 	// "GO-2024-1234 (CRITICAL, called)").
 	Detail string `json:"detail"`
 	// Reachability is the reachability tier for critical_cve entries
-	// ("called", "imported", or "required"). Omitted for archived entries.
+	// ("called", "imported", or "required"). Omitted when empty — archived
+	// entries never set it, and critical_cve entries omit it when reachability
+	// is unknown.
 	Reachability string `json:"reachability,omitempty"`
 }
 
