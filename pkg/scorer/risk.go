@@ -1397,6 +1397,7 @@ func p95DepRiskCandidate(deps []*DependencyScore) HeadlineCandidate {
 // HIGH band starts at 51 (levelFromScore), so all HIGH floors use 51, not 50.
 func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 	best := HeadlineCandidate{Name: "archived_floor"}
+	var bestDs *DependencyScore
 
 	for _, ds := range deps {
 		if ds.IsTestOnly != nil && *ds.IsTestOnly {
@@ -1414,7 +1415,15 @@ func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 			score = 51
 		}
 
-		if score > best.Score {
+		// Primary: higher floor score wins (direct > indirect).
+		// Tie-break: higher RiskScore, then longer MonthsSinceRelease.
+		better := score > best.Score
+		if !better && score == best.Score && bestDs != nil {
+			better = ds.RiskScore > bestDs.RiskScore ||
+				(ds.RiskScore == bestDs.RiskScore && ds.Maintenance.MonthsSinceRelease > bestDs.Maintenance.MonthsSinceRelease)
+		}
+
+		if better {
 			reason := "archived"
 			if ds.Maintenance.MonthsSinceRelease > 0 {
 				reason = fmt.Sprintf("archived %d months", ds.Maintenance.MonthsSinceRelease)
@@ -1422,6 +1431,7 @@ func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 			best.Score = score
 			best.DrivingDep = ds.Module
 			best.Reason = reason
+			bestDs = ds
 		}
 	}
 
