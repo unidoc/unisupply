@@ -67,9 +67,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
 	if ps.HeadlineCandidate != nil {
 		hc := ps.HeadlineCandidate
-		if hc.DrivingDep != "" && hc.Reason != "" {
+		switch {
+		case hc.DrivingDep != "" && hc.Reason != "":
 			fmt.Fprintf(w, "  Driver: %s — %s (%s)\n", hc.Name, hc.DrivingDep, hc.Reason)
-		} else {
+		case hc.Reason != "":
+			fmt.Fprintf(w, "  Driver: %s — %s\n", hc.Name, hc.Reason)
+		default:
 			fmt.Fprintf(w, "  Driver: %s\n", hc.Name)
 		}
 	}
@@ -90,6 +93,9 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "TIME-BOMBS (%d)\n", len(timeBombs))
 		for _, tb := range timeBombs {
 			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
+		}
+		if ps.HeadlineDriver == "severity_adjusted" && allRequiredReachability(timeBombs) {
+			fmt.Fprintf(w, "  Note: all above have reachability=required; headline reflects reachability-downgraded severity.\n")
 		}
 		fmt.Fprintf(w, "\n")
 	}
@@ -222,8 +228,8 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "  Low risk:    %s\n", formatCount(len(low), total))
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
-	fmt.Fprintf(w, "  Unmaintained (>2yr):   %d dependencies\n", ps.Unmaintained2yr)
-	fmt.Fprintf(w, "  Unmaintained (>1yr):   %d dependencies\n", ps.Unmaintained1yr)
+	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
+	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Full report: unisupply -f pdf\n")
@@ -422,9 +428,24 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	}
 
 	// Risk score breakdown.
-	fmt.Fprintf(w, "  ├─ %s vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%\n",
-		c(colorDim, "Score breakdown:"),
+	breakdown := fmt.Sprintf("vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%",
 		ds.VulnScore, ds.MaintenanceScore, ds.DepthScore, ds.MaintainerScore, ds.MaturityScore)
+	if ds.ResilienceBonus > 0 {
+		breakdown += fmt.Sprintf(" +resilience=%.1f", ds.ResilienceBonus)
+	}
+	if ds.AIGenBonus > 0 {
+		breakdown += fmt.Sprintf(" +aigen=%.1f", ds.AIGenBonus)
+	}
+	if ds.TyposquatBonus > 0 {
+		breakdown += fmt.Sprintf(" +typosquat=%.1f", ds.TyposquatBonus)
+	}
+	if ds.FlooredTo > 0 {
+		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
+	}
+	if ds.MaintainerWeightExcluded {
+		breakdown += " [renorm: maintainer excl.]"
+	}
+	fmt.Fprintf(w, "  ├─ %s %s\n", c(colorDim, "Score breakdown:"), breakdown)
 
 	// Dependency path.
 	if len(ds.DependencyPath) > 0 {
@@ -695,6 +716,22 @@ func reachabilityTag(r string) string {
 		// "" (legacy / non-govulncheck) and "called" are both untagged.
 		return ""
 	}
+}
+
+// allRequiredReachability returns true when the TIME-BOMBS list contains at
+// least one critical_cve entry and every such entry has Reachability "required".
+// Used to print an explanatory note that the headline reflects downgraded severity.
+func allRequiredReachability(bombs []scorer.TimeBomb) bool {
+	hasCVE := false
+	for _, b := range bombs {
+		if b.Kind == "critical_cve" {
+			hasCVE = true
+			if b.Reachability != "required" {
+				return false
+			}
+		}
+	}
+	return hasCVE
 }
 
 // vulnReachabilityCountHeader builds the "X called, Y imported, Z required"
