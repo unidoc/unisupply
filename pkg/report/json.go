@@ -274,6 +274,11 @@ type JSONTimeBomb struct {
 	// Detail is a human-readable description (e.g. "archived 129 months" or
 	// "GO-2024-1234 (CRITICAL, called)").
 	Detail string `json:"detail"`
+	// Reachability is the reachability tier for critical_cve entries
+	// ("called", "imported", or "required"). Omitted when empty — archived
+	// entries never set it, and critical_cve entries omit it when reachability
+	// is unknown.
+	Reachability string `json:"reachability,omitempty"`
 }
 
 // JSONTakeover holds a takeover candidate.
@@ -543,9 +548,10 @@ func collectJSONTimeBombs(ps *scorer.ProjectScore) []JSONTimeBomb {
 	out := make([]JSONTimeBomb, len(raw))
 	for i, tb := range raw {
 		out[i] = JSONTimeBomb{
-			Kind:   tb.Kind,
-			Module: tb.Module,
-			Detail: tb.Detail,
+			Kind:         tb.Kind,
+			Module:       tb.Module,
+			Detail:       tb.Detail,
+			Reachability: tb.Reachability,
 		}
 	}
 	return out

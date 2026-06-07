@@ -661,3 +661,134 @@ func TestWriteJSON_Reachability(t *testing.T) {
 		t.Errorf("empty Reachability must be omitted from JSON (omitempty), but key is present with value %v", vuln4["reachability"])
 	}
 }
+
+// TestWriteJSON_TimeBombReachability verifies the time_bombs[].reachability contract:
+//   - critical_cve with known reachability → field present
+//   - critical_cve with empty reachability → field omitted (omitempty)
+//   - archived entries → field omitted
+func TestWriteJSON_TimeBombReachability(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/vuln/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+		testutil.DepSpec{Path: "github.com/old/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore: 80,
+		OverallLevel: scorer.RiskCritical,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:     "github.com/vuln/pkg",
+				Version:    "v1.0.0",
+				Direct:     true,
+				RiskScore:  80,
+				RiskLevel:  scorer.RiskCritical,
+				IsTestOnly: testutil.BoolPtr(false),
+				Vulns: []scanner.Vulnerability{
+					// CRITICAL with known reachability — must emit "reachability".
+					{ID: "GO-2024-0001", Severity: "CRITICAL", Reachability: "called"},
+					// CRITICAL with empty reachability — must omit "reachability".
+					{ID: "GO-2024-0002", Severity: "CRITICAL", Reachability: ""},
+				},
+			},
+			{
+				Module:      "github.com/old/pkg",
+				Version:     "v1.0.0",
+				Direct:      true,
+				RiskScore:   60,
+				RiskLevel:   scorer.RiskHigh,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: true, MonthsSinceRelease: 24},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var report JSONReport
+	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	// Verify the bombs were actually collected (guards against vacuous passes).
+	if len(report.TimeBombs) != 3 {
+		t.Fatalf("time_bombs length = %d, want 3 (2 critical_cve + 1 archived)", len(report.TimeBombs))
+	}
+
+	// Find each expected bomb by Kind+Module.
+	findBomb := func(kind, module string) *JSONTimeBomb {
+		for i := range report.TimeBombs {
+			b := &report.TimeBombs[i]
+			if b.Kind == kind && b.Module == module {
+				return b
+			}
+		}
+		return nil
+	}
+
+	// critical_cve with known reachability must carry the field.
+	if b := findBomb("critical_cve", "github.com/vuln/pkg"); b == nil {
+		t.Fatal("missing critical_cve bomb for github.com/vuln/pkg with GO-2024-0001")
+	}
+
+	// Use raw JSON to verify presence/absence of the "reachability" key precisely.
+	raw := struct {
+		Bombs []map[string]interface{} `json:"time_bombs"`
+	}{}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("raw unmarshal failed: %v", err)
+	}
+
+	findRawBomb := func(kind, module string) map[string]interface{} {
+		for _, b := range raw.Bombs {
+			if b["kind"] == kind && b["module"] == module {
+				return b
+			}
+		}
+		return nil
+	}
+
+	// GO-2024-0001 is "called" — reachability key must be present.
+	b1 := findRawBomb("critical_cve", "github.com/vuln/pkg")
+	if b1 == nil {
+		t.Fatal("raw: missing critical_cve bomb for github.com/vuln/pkg")
+	}
+	// The two critical_cve bombs for the same module: find the one whose detail contains GO-2024-0001.
+	var rawCalled, rawEmpty map[string]interface{}
+	for _, b := range raw.Bombs {
+		if b["kind"] != "critical_cve" || b["module"] != "github.com/vuln/pkg" {
+			continue
+		}
+		detail, _ := b["detail"].(string)
+		if len(detail) > 0 && detail[:len("GO-2024-0001")] == "GO-2024-0001" {
+			rawCalled = b
+		} else {
+			rawEmpty = b
+		}
+	}
+	if rawCalled == nil {
+		t.Fatal("raw: could not find bomb for GO-2024-0001")
+	}
+	if v, ok := rawCalled["reachability"]; !ok || v != "called" {
+		t.Errorf("GO-2024-0001 time_bomb reachability = %v (present=%v), want \"called\"", v, ok)
+	}
+
+	// GO-2024-0002 has empty reachability — key must be absent (omitempty).
+	if rawEmpty == nil {
+		t.Fatal("raw: could not find bomb for GO-2024-0002")
+	}
+	if v, present := rawEmpty["reachability"]; present {
+		t.Errorf("GO-2024-0002 time_bomb reachability key must be absent, got %v", v)
+	}
+
+	// archived entry must not have a reachability key.
+	rawArchived := findRawBomb("archived", "github.com/old/pkg")
+	if rawArchived == nil {
+		t.Fatal("raw: missing archived bomb for github.com/old/pkg")
+	}
+	if v, present := rawArchived["reachability"]; present {
+		t.Errorf("archived time_bomb reachability key must be absent, got %v", v)
+	}
+}

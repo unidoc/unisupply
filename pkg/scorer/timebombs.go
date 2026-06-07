@@ -13,8 +13,9 @@ type TimeBomb struct {
 	// Detail is a human-readable description of the risk (e.g. "archived 129 months"
 	// or "GO-2024-1234 (CRITICAL, required — not on call path)").
 	Detail string
-	// Reachability is populated for critical_cve entries (e.g. "required", "imported").
-	// Empty for archived entries.
+	// Reachability is populated for critical_cve entries (e.g. "called", "imported",
+	// "required"). Empty when unknown — archived entries never set it, and critical_cve
+	// entries omit it when reachability analysis was unavailable.
 	Reachability string
 }
 

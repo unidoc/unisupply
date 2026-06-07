@@ -2434,6 +2434,64 @@ func TestArchivedFloor(t *testing.T) {
 			t.Errorf("Score = %.0f, want 0 (no archived deps)", candidate.Score)
 		}
 	})
+
+	t.Run("tie-break by RiskScore (higher wins)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:      "github.com/old/low",
+				Direct:      true,
+				RiskScore:   40,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: true, MonthsSinceRelease: 12},
+			},
+			{
+				Module:      "github.com/old/high",
+				Direct:      true,
+				RiskScore:   80,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: true, MonthsSinceRelease: 12},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.DrivingDep != "github.com/old/high" {
+			t.Errorf("DrivingDep = %q, want github.com/old/high (higher RiskScore wins tie)", candidate.DrivingDep)
+		}
+		// Reversed order must yield the same winner (deterministic).
+		deps[0], deps[1] = deps[1], deps[0]
+		candidate2 := archivedFloor(deps)
+		if candidate2.DrivingDep != "github.com/old/high" {
+			t.Errorf("DrivingDep = %q after reversal, want github.com/old/high (tie-break must be deterministic)", candidate2.DrivingDep)
+		}
+	})
+
+	t.Run("tie-break by MonthsSinceRelease (longer wins)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:      "github.com/old/recent",
+				Direct:      true,
+				RiskScore:   50,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: true, MonthsSinceRelease: 6},
+			},
+			{
+				Module:      "github.com/old/stale",
+				Direct:      true,
+				RiskScore:   50,
+				IsTestOnly:  testutil.BoolPtr(false),
+				Maintenance: &scanner.MaintenanceInfo{Archived: true, MonthsSinceRelease: 36},
+			},
+		}
+		candidate := archivedFloor(deps)
+		if candidate.DrivingDep != "github.com/old/stale" {
+			t.Errorf("DrivingDep = %q, want github.com/old/stale (longer MonthsSinceRelease wins tie)", candidate.DrivingDep)
+		}
+		// Reversed order must yield the same winner (deterministic).
+		deps[0], deps[1] = deps[1], deps[0]
+		candidate2 := archivedFloor(deps)
+		if candidate2.DrivingDep != "github.com/old/stale" {
+			t.Errorf("DrivingDep = %q after reversal, want github.com/old/stale (tie-break must be deterministic)", candidate2.DrivingDep)
+		}
+	})
 }
 
 // TestCVEFloor tests the cveFloor function with various CVE reachability +
