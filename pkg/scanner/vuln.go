@@ -218,7 +218,7 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 		msg := strings.TrimSpace(stderrBuf.String())
 		if msg == "" {
 			msg = exitErr.Error()
-		} else if !strings.HasPrefix(msg, "govulncheck:"){
+		} else if !strings.HasPrefix(msg, "govulncheck:") {
 			msg = "govulncheck: " + msg
 		}
 		warnings = append(warnings, msg)
