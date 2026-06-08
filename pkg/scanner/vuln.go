@@ -195,15 +195,34 @@ func classifyReachability(trace []traceEntry) string {
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
 	var stdout bytes.Buffer
 
+	var stderrBuf bytes.Buffer
+
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
 	cmd.Stdout = &stdout
-	cmd.Stderr = &bytes.Buffer{} // suppress stderr
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("starting govulncheck: %w", err)
 	}
-	// govulncheck exits non-zero when vulns are found — not an error for us.
-	_ = cmd.Wait()
+	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that
+	// case via jsonHandler.Flush), so exitErr != nil only signals a real scan failure.
+	// scan.Command runs govulncheck in-process; errors come back through Wait() as Go
+	// error values, not written to stderr. Prefer stderrBuf when populated (future-proof),
+	// fall back to exitErr.Error() for the common in-process case.
+	exitErr := cmd.Wait()
+
+	if exitErr != nil {
+		// scan.Command runs govulncheck in-process; errors surface via Wait(), not stderr.
+		// The library already prefixes errors with "govulncheck:" (derrors.Wrap).
+		// Prefer stderrBuf when populated (future subprocess mode), but don't double-prefix.
+		msg := strings.TrimSpace(stderrBuf.String())
+		if msg == "" {
+			msg = exitErr.Error()
+		} else {
+			msg = "govulncheck: " + msg
+		}
+		warnings = append(warnings, msg)
+	}
 
 	if stdout.Len() == 0 {
 		warnings = append(warnings, "govulncheck produced no output")
