@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/progress"
 )
@@ -384,18 +386,10 @@ func moduleVersion(s string) string {
 	return s[at+1:]
 }
 
-// compareVersions does a basic string comparison of Go module versions.
-// This works for semver because "v1.2.3" < "v1.2.4" lexicographically
-// within the same major version. For pseudo-versions it's approximate
-// but sufficient for selecting a "higher" version.
+// compareVersions compares Go module versions using semver semantics.
+// Fixes the lexical compare bug where v1.9.0 > v1.10.0 incorrectly.
 func compareVersions(a, b string) int {
-	if a == b {
-		return 0
-	}
-	if a > b {
-		return 1
-	}
-	return -1
+	return semver.Compare(a, b)
 }
 
 func containsStr(ss []string, s string) bool {

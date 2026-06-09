@@ -144,6 +144,25 @@ func TestCompareVersions(t *testing.T) {
 			b:        "v1.0.0",
 			expected: 1,
 		},
+		// Regression: lexical compare incorrectly returns v1.9.0 > v1.10.0.
+		{
+			name:     "minor_double_digit_regression",
+			a:        "v1.9.0",
+			b:        "v1.10.0",
+			expected: -1,
+		},
+		{
+			name:     "minor_double_digit_greater",
+			a:        "v1.10.0",
+			b:        "v1.9.0",
+			expected: 1,
+		},
+		{
+			name:     "major_cross_double_digit",
+			a:        "v2.0.0",
+			b:        "v1.99.99",
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
