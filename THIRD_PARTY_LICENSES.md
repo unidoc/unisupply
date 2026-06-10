@@ -6,8 +6,13 @@ This file lists the direct dependencies of UniSupply and their licenses.
 
 | Module | License | Notes |
 |--------|---------|-------|
-| github.com/unidoc/unipdf/v3 | [UniDoc EULA](https://unidoc.io/eula/) (Commercial) | Used by `pkg/report/pdf` for PDF report generation. UniPDF is a commercial product and requires a license code to operate — set `UNIDOC_LICENSE_API_KEY` (free metered keys available at [unidoc.io](https://unidoc.io)). Library use of `pkg/report/pdf` in your own application is governed by the UniDoc EULA. |
-| github.com/unidoc/unitype | [UniDoc EULA](https://unidoc.io/eula/) (Commercial) | Indirect dependency, pulled in via UniPDF. Same terms as above. |
+| github.com/unidoc/unipdf/v3 | [UniDoc EULA](https://unidoc.io/eula/) (Commercial) | Used by `pkg/report/pdf` for PDF report generation. Requires a license key — set `UNIDOC_LICENSE_API_KEY` (see [unidoc.io](https://unidoc.io) for licensing options). Library use of `pkg/report/pdf` in your own application is governed by the UniDoc EULA. |
+
+### Transitively commercial (pulled in via UniPDF, same EULA applies)
+
+| Module | Notes |
+|--------|-------|
+| github.com/unidoc/unitype | Font rendering library bundled with UniPDF. |
 
 ## Permissive dependencies (Apache-2.0 / MIT / BSD)
 
