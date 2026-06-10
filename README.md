@@ -401,6 +401,17 @@ Environment variables:
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+The `unisupply` CLI binary is Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+
+**Library-use note:** The PDF report package (`pkg/report/pdf`) depends on
+[UniPDF](https://github.com/unidoc/unipdf), a commercial product governed by
+the [UniDoc EULA](https://unidoc.io/eula/). PDF generation requires a license
+key via `UNIDOC_LICENSE_API_KEY` — free metered keys are available at
+[unidoc.io](https://unidoc.io). Importing `pkg/report/pdf` in your own
+application is subject to the UniDoc EULA; the rest of UniSupply carries no
+such restriction.
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for a full dependency
+license inventory.
 
 Copyright © UniDoc ehf.
