@@ -395,6 +395,7 @@ Environment variables:
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards and enforcement
 - [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog 1.1)
 - [RELEASING.md](RELEASING.md) — maintainer release procedure
 - [LICENSE](LICENSE) — Apache License 2.0
