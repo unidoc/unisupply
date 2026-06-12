@@ -36,7 +36,11 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
+For this project, "community leaders" refers to UniDoc staff with maintainer access to the repository.
+
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at **conduct@unidoc.io**. All complaints will be reviewed and investigated promptly and fairly.
+
+If a complaint concerns a community leader, it may be escalated to a senior UniDoc staff member not directly involved in the project at **hr@unidoc.io**.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 
