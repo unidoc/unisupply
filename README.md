@@ -38,6 +38,9 @@ release-time decisions about third-party Go code.
 # Latest release (Go 1.25+ required)
 go install github.com/unidoc/unisupply/cmd/unisupply@latest
 
+# Pinned version (recommended for reproducible environments)
+go install github.com/unidoc/unisupply/cmd/unisupply@v0.4.0
+
 # Or download a prebuilt binary from the Releases page
 #   https://github.com/unidoc/unisupply/releases
 ```
