@@ -413,5 +413,6 @@ such restriction.
 
 See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for a full dependency
 license inventory.
+See [NOTICE](NOTICE) for required upstream attribution notices.
 
 Copyright © UniDoc ehf.
