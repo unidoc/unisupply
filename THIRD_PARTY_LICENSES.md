@@ -33,3 +33,7 @@ For a machine-readable full list, run:
 ```bash
 go-licenses report github.com/unidoc/unisupply/cmd/unisupply
 ```
+
+<!-- Apache NOTICE audit (2026-06-13): all direct and indirect deps in go.mod checked;
+     only yaml.v3 v3.0.1 ships a NOTICE file — preserved in repo-root NOTICE.
+     Re-check when adding or upgrading deps. -->
