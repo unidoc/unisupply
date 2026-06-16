@@ -387,6 +387,10 @@ func run(cfg *runConfig) error {
 	}
 
 	if cfg.policyFile != "" || cfg.policyPreset != "" {
+		if cfg.policyFile != "" && cfg.policyPreset != "" {
+			fmt.Fprintf(os.Stderr, "warning: --policy-preset %q ignored — --policy %q takes precedence\n",
+				cfg.policyPreset, cfg.policyFile)
+		}
 		rep.Stage("Evaluating policy")
 		var pol *policy.Policy
 
