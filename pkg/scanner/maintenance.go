@@ -83,6 +83,7 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 
 	var firstErr error
 	var errOnce sync.Once
+	var failCount atomic.Int64
 	var done int64
 
 	for _, dep := range graph.Dependencies {
@@ -97,9 +98,8 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if err != nil {
-				errOnce.Do(func() {
-					firstErr = fmt.Errorf("checking maintenance for %s: %w", d.Module.Path, err)
-				})
+				failCount.Add(1)
+				errOnce.Do(func() { firstErr = err })
 				return
 			}
 
@@ -110,7 +110,10 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 	}
 
 	wg.Wait()
-	return results, firstErr
+	if n := failCount.Load(); n > 0 {
+		return results, fmt.Errorf("%d of %d module(s) failed maintenance lookup (first: %w)", n, total, firstErr)
+	}
+	return results, nil
 }
 
 func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version string) (*MaintenanceInfo, error) {
@@ -124,8 +127,8 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 	info := &MaintenanceInfo{}
 
 	// Get version info for the specific version used.
-	versionInfo, err := ms.fetchVersionInfo(ctx, modPath, version)
-	if err == nil && versionInfo != nil {
+	versionInfo, versionErr := ms.fetchVersionInfo(ctx, modPath, version)
+	if versionErr == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
 		info.MonthsSinceRelease = monthsSince(ms.ScanStart, versionInfo.Time)
 	}
@@ -138,6 +141,11 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 			info.LastRelease = latestTime
 			info.MonthsSinceRelease = monthsSince(ms.ScanStart, latestTime)
 		}
+	}
+
+	// Both lookups failed — we have no data at all; propagate the error.
+	if versionErr != nil && latestVersion == "" {
+		return nil, fmt.Errorf("maintenance lookup for %s: %w", modPath, versionErr)
 	}
 
 	// Check for deprecation via the @latest endpoint.

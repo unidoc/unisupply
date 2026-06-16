@@ -308,26 +308,26 @@ func TestMaintenanceScanner_CheckModule_Deprecated(t *testing.T) {
 	}
 }
 
-// TestMaintenanceScanner_CheckModule_ProxyError verifies handling of proxy errors.
-func TestMaintenanceScanner_CheckModule_ProxyError(t *testing.T) {
+// TestMaintenanceScanner_CheckModule_PartialProxyError verifies that a fetchVersionInfo
+// error is tolerated when fetchLatestVersion succeeds (partial data is returned, no error).
+func TestMaintenanceScanner_CheckModule_PartialProxyError(t *testing.T) {
 	server, _ := newMockProxy(t)
 	defer server.Close()
 
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	// Fetch a version that will trigger a 500 error
-	info, _ := ms.checkModule(context.Background(), "github.com/foo/bar", "v0.error")
-
-	// Error handling: the scanner's fetchVersionInfo may return an error,
-	// but checkModule continues and returns a MaintenanceInfo with zero values.
-	if info == nil {
-		t.Fatalf("checkModule returned nil (should not panic, but returned MaintenanceInfo)")
+	// v0.error triggers a 500 on fetchVersionInfo, but @latest succeeds.
+	info, err := ms.checkModule(context.Background(), "github.com/foo/bar", "v0.error")
+	if err != nil {
+		t.Fatalf("checkModule returned unexpected error: %v", err)
 	}
-
-	// The info should have safe zero values
-	if info.MonthsSinceRelease < 0 {
-		t.Errorf("MonthsSinceRelease should be >= 0, got %d", info.MonthsSinceRelease)
+	if info == nil {
+		t.Fatalf("checkModule returned nil info")
+	}
+	// Latest version is still populated from the @latest endpoint.
+	if info.LatestVersion == "" {
+		t.Errorf("LatestVersion should be populated from @latest, got empty")
 	}
 }
 
