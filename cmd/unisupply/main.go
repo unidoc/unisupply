@@ -170,6 +170,11 @@ func run(cfg *runConfig) error {
 		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
 	}
 
+	if cfg.policyFile != "" && cfg.policyPreset != "" {
+		fmt.Fprintf(os.Stderr, "warning: --policy-preset %q ignored — --policy %q takes precedence\n",
+			cfg.policyPreset, cfg.policyFile)
+	}
+
 	// Compute scan-start time once and floor it to the start of the UTC day.
 	// All scanner age/activity classifications use this value so that two runs
 	// on the same calendar day yield identical band results for the same module.

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +91,53 @@ func TestRequireGithubToken_WithToken(t *testing.T) {
 	// acceptable here — the key invariant is that it is NOT 3).
 	if exitCode == 3 {
 		t.Errorf("--require-github-token with --github-token present: exit code = 3, want != 3 (token precondition should pass)")
+	}
+}
+
+// TestPolicyFlagConflict_Warning verifies that passing both --policy and
+// --policy-preset prints a warning on stderr naming the ignored preset.
+func TestPolicyFlagConflict_Warning(t *testing.T) {
+	bin := buildBinary(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	moduleRoot := filepath.Join(cwd, "..", "..")
+	policyFile := filepath.Join(moduleRoot, "examples", "policy-custom.json")
+
+	var stderr bytes.Buffer
+	cmd := exec.Command(bin, "--policy", policyFile, "--policy-preset", "strict", moduleRoot)
+	cmd.Stderr = &stderr
+	_ = cmd.Run() // exit code varies with policy result; not what we're testing
+
+	if !strings.Contains(stderr.String(), `--policy-preset "strict" ignored`) {
+		t.Errorf("expected conflict warning on stderr, got:\n%s", stderr.String())
+	}
+}
+
+// TestPolicyFlagConflict_NoSpuriousWarning verifies that supplying only one
+// policy flag does not produce the conflict warning.
+func TestPolicyFlagConflict_NoSpuriousWarning(t *testing.T) {
+	bin := buildBinary(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	moduleRoot := filepath.Join(cwd, "..", "..")
+
+	for _, args := range [][]string{
+		{"--policy-preset", "strict", moduleRoot},
+	} {
+		var stderr bytes.Buffer
+		cmd := exec.Command(bin, args...)
+		cmd.Stderr = &stderr
+		_ = cmd.Run()
+
+		if strings.Contains(stderr.String(), "ignored") {
+			t.Errorf("unexpected conflict warning with args %v:\n%s", args, stderr.String())
+		}
 	}
 }
 
