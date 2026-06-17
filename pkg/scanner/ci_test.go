@@ -1082,3 +1082,32 @@ func TestCIScanner_FindFiles_MultipleDockerfiles(t *testing.T) {
 		t.Errorf("expected at least 3 findings for 3 Dockerfiles, got %d", len(findings))
 	}
 }
+
+// TestFindFiles_SkipsSymlink confirms findFiles never returns symlink paths.
+func TestFindFiles_SkipsSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	real := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(real, []byte("FROM alpine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dir, "Dockerfile.link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks not supported on this platform:", err)
+	}
+
+	got := findFiles(dir, "Dockerfile*")
+	for _, f := range got {
+		fi, err := os.Lstat(f)
+		if err != nil {
+			t.Fatalf("Lstat(%s): %v", f, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("findFiles returned symlink %s", f)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("expected 1 real file, got %d: %v", len(got), got)
+	}
+}
