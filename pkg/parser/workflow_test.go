@@ -1039,6 +1039,22 @@ func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsSubstring(s, substr)))
 }
 
+// TestParseWorkflow_Oversized confirms files larger than 1 MB are rejected.
+func TestParseWorkflow_Oversized(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "big.yml")
+
+	data := make([]byte, maxWorkflowSize+1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseWorkflow(path)
+	if err == nil {
+		t.Fatal("expected error for oversized file, got nil")
+	}
+}
+
 // containsSubstring checks if s contains substr as a substring.
 func containsSubstring(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {

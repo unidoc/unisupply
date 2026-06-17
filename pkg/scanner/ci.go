@@ -543,5 +543,13 @@ func findFiles(dir, pattern string) []string {
 	if err != nil {
 		return nil
 	}
-	return matches
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		fi, err := os.Lstat(m)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }

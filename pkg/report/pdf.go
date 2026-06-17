@@ -32,8 +32,7 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 
 	// Set UniPDF license (metered/API key from env, or unlicensed for open source).
 	if err := initLicense(); err != nil {
-		// Continue without license — will have watermark.
-		_ = err
+		fmt.Fprintln(os.Stderr, "warning: UNIDOC_LICENSE_API_KEY not set — PDF output will include a watermark")
 	}
 
 	c := creator.New()

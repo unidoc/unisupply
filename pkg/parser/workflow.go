@@ -76,11 +76,16 @@ type rawStep struct {
 	Env  map[string]string `yaml:"env"`
 }
 
+const maxWorkflowSize = 1 << 20 // 1 MB
+
 // ParseWorkflow parses a single GitHub Actions workflow YAML file.
 func ParseWorkflow(path string) (*Workflow, error) {
 	data, err := os.ReadFile(path) //#nosec G304 -- caller-supplied workflow file path is the parser's input contract
 	if err != nil {
 		return nil, fmt.Errorf("reading workflow %s: %w", path, err)
+	}
+	if len(data) > maxWorkflowSize {
+		return nil, fmt.Errorf("workflow file %q exceeds 1 MB limit (%d bytes): refusing to parse", path, len(data))
 	}
 
 	var raw rawWorkflow
