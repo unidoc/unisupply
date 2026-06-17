@@ -151,7 +151,7 @@ func ParseAllWorkflows(dir string) ([]*Workflow, []string, error) {
 	for _, f := range files {
 		wf, err := ParseWorkflow(f)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("skipping workflow %q: %v", filepath.Base(f), err))
+			warnings = append(warnings, fmt.Sprintf("skipping workflow: %v", err))
 			continue
 		}
 		workflows = append(workflows, wf)
