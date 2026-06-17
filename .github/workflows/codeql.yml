@@ -1,0 +1,36 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master, development]
+  pull_request:
+    branches: [master, development]
+  schedule:
+    - cron: '0 3 * * 1'  # weekly Monday 03:00 UTC
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: github/codeql-action/init@v3  # pin: replace with SHA (see actions/checkout pattern in ci.yml)
+        with:
+          languages: go
+
+      - uses: github/codeql-action/autobuild@v3  # pin: replace with SHA
+
+      - uses: github/codeql-action/analyze@v3  # pin: replace with SHA
+        with:
+          category: /language:go

@@ -2,19 +2,11 @@
 
 > Go supply chain risk assessment — vulnerabilities, maintainer health, typosquatting, AI-generated code risk, CI/CD audit, SBOM, policy enforcement.
 
-<!--
-TODO (PR 11 / M5.5): the repository is currently private. When it goes public,
-replace this comment block with the live badge row below.
-
 [![CI](https://github.com/unidoc/unisupply/actions/workflows/ci.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/ci.yml)
 [![Release](https://github.com/unidoc/unisupply/actions/workflows/release.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/release.yml)
+[![CodeQL](https://github.com/unidoc/unisupply/actions/workflows/codeql.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/codeql.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/unidoc/unisupply)](https://goreportcard.com/report/github.com/unidoc/unisupply)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
-Coverage badge intentionally omitted — no Codecov / Coveralls integration yet.
-Do not surface an integrity signal that is not backed by a verification
-mechanism (OWASP SCVS V4.1).
--->
 
 ## What it does
 
