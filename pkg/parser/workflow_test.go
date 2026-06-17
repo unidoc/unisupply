@@ -551,7 +551,7 @@ jobs:
 }
 
 // TestParseAllWorkflows_OversizedWarning confirms a >1 MB file is skipped and
-// its path appears in the returned warnings.
+// its filename appears somewhere in the warning string (via the error from ParseWorkflow).
 func TestParseAllWorkflows_OversizedWarning(t *testing.T) {
 	tmpDir := t.TempDir()
 
