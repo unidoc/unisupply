@@ -127,11 +127,13 @@ func ParseWorkflow(path string) (*Workflow, error) {
 }
 
 // ParseAllWorkflows parses all workflow files in a directory.
-func ParseAllWorkflows(dir string) ([]*Workflow, error) {
+// The second return value contains a warning string for each file that was
+// skipped (e.g. oversized or malformed YAML) so callers can surface them.
+func ParseAllWorkflows(dir string) ([]*Workflow, []string, error) {
 	pattern := filepath.Join(dir, "*.yml")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
-		return nil, fmt.Errorf("globbing workflows: %w", err)
+		return nil, nil, fmt.Errorf("globbing workflows: %w", err)
 	}
 
 	// Also check .yaml extension.
@@ -141,20 +143,21 @@ func ParseAllWorkflows(dir string) ([]*Workflow, error) {
 	}
 
 	if len(files) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var workflows []*Workflow
+	var warnings []string
 	for _, f := range files {
 		wf, err := ParseWorkflow(f)
 		if err != nil {
-			// Skip unparseable files with a warning.
+			warnings = append(warnings, fmt.Sprintf("skipping workflow %q: %v", filepath.Base(f), err))
 			continue
 		}
 		workflows = append(workflows, wf)
 	}
 
-	return workflows, nil
+	return workflows, warnings, nil
 }
 
 // ParseActionRef parses an action reference string into its components.

@@ -68,9 +68,12 @@ func (cs *CIScanner) ScanWorkflows(ctx context.Context, workflowDir string) (*CI
 	report := &CIReport{}
 
 	rep.Step("parsing workflows in %s", workflowDir)
-	workflows, err := parser.ParseAllWorkflows(workflowDir)
+	workflows, parseWarnings, err := parser.ParseAllWorkflows(workflowDir)
 	if err != nil {
 		return nil, fmt.Errorf("parsing workflows: %w", err)
+	}
+	for _, w := range parseWarnings {
+		rep.Warn("%s", w)
 	}
 
 	if len(workflows) == 0 {
