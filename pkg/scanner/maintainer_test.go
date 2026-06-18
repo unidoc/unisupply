@@ -1537,6 +1537,63 @@ func TestMaintainerScanner_ActivityPatternDetection(t *testing.T) {
 // Helper: testTransport for mocking HTTP requests
 // ============================================================================
 
+func TestEnrichMaintainersFromTrustIndex(t *testing.T) {
+	tests := []struct {
+		name         string
+		maintainers  map[string]*MaintainerInfo
+		trustIndex   map[string]*TrustIndexEntry
+		wantVerified map[string]bool
+	}{
+		{
+			name: "trust index verified overrides org-check true",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: true},
+			},
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+		{
+			name: "trust index unverified downgrades org-check true",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: false},
+			},
+			wantVerified: map[string]bool{"github.com/foo/bar": false},
+		},
+		{
+			name: "module absent from trust index keeps org-check fallback",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex:   map[string]*TrustIndexEntry{},
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+		{
+			name: "nil trust index is a no-op",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex:   nil,
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			EnrichMaintainersFromTrustIndex(tt.maintainers, tt.trustIndex)
+			for mod, want := range tt.wantVerified {
+				if got := tt.maintainers[mod].OwnerVerified; got != want {
+					t.Errorf("module %s: OwnerVerified = %v, want %v", mod, got, want)
+				}
+			}
+		})
+	}
+}
+
 type testTransport struct {
 	baseURL      string
 	requestCount map[string]int
