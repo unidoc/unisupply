@@ -34,6 +34,7 @@ For a machine-readable full list, run:
 go-licenses report github.com/unidoc/unisupply/cmd/unisupply
 ```
 
-<!-- Apache NOTICE audit (2026-06-13): all direct and indirect deps in go.mod checked;
+<!-- Apache NOTICE audit (2026-06-13): binary import set (go list -deps ./cmd/unisupply/) checked;
      only yaml.v3 v3.0.1 ships a NOTICE file — preserved in repo-root NOTICE.
+     Non-shipped deps in go.mod (test-only, graph-only) are not in scope.
      CI now enforces this automatically via check-licenses.sh (issue #50). -->

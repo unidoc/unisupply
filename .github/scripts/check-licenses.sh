@@ -5,6 +5,7 @@
 # Requires: go-licenses v2 (go install github.com/google/go-licenses/v2@v2.0.1)
 # Uses `report` (CSV output). go-licenses exits 0 even for Unknown licenses
 # (logged to stderr); Unknown rows are caught by the allowlist check below.
+((BASH_VERSINFO[0] >= 4)) || { echo "bash 4+ required (mapfile); macOS users: brew install bash" >&2; exit 1; }
 set -euo pipefail
 
 ALLOWLIST="MIT BSD-2-Clause BSD-3-Clause Apache-2.0 ISC"
@@ -110,6 +111,9 @@ for entry in "${MOD_ENTRIES[@]}"; do
   [[ "$dir" == "$REPO_ROOT" ]] && continue
 
   notice_file=""
+  # Deliberate scope: these three names cover all practical cases in the Go
+  # ecosystem. Apache 2.0 §4(d) mandates "the NOTICE file" with no required
+  # extension — not extended speculatively (e.g. NOTICE.rst) to avoid false positives.
   for candidate in NOTICE NOTICE.txt NOTICE.md; do
     [[ -f "$dir/$candidate" ]] && notice_file="$dir/$candidate" && break
   done
