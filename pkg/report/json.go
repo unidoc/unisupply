@@ -167,23 +167,24 @@ type JSONMaintainer struct {
 	// DataAvailable is false when the GitHub API was unreachable or rate-limited.
 	// When false, numeric fields (Stars, BusFactor, etc.) are zero and must not
 	// be interpreted as real measurements.
-	DataAvailable    bool     `json:"data_available"`
-	OwnerName        string   `json:"owner_name,omitempty"`
-	OwnerLocation    string   `json:"owner_location,omitempty"`
-	OwnerCompany     string   `json:"owner_company,omitempty"`
-	OwnerURL         string   `json:"owner_url,omitempty"`
-	IsOrg            bool     `json:"is_org,omitempty"`
-	BusinessModel    string   `json:"business_model,omitempty"`
-	License          string   `json:"license,omitempty"`
-	ContributorCount int      `json:"contributor_count,omitempty"`
-	TopContributors  []string `json:"top_contributors,omitempty"`
-	BusFactor        int      `json:"bus_factor,omitempty"`
-	ActivityPattern  string   `json:"activity_pattern,omitempty"`
-	LastCommitDate   string   `json:"last_commit_date,omitempty"`
-	Stars            *int     `json:"stars,omitempty"`
-	Forks            *int     `json:"forks,omitempty"`
-	OpenIssues       *int     `json:"open_issues,omitempty"`
-	SubDependencies  int      `json:"sub_dependencies,omitempty"`
+	DataAvailable     bool     `json:"data_available"`
+	UnavailableReason string   `json:"unavailable_reason,omitempty"`
+	OwnerName         string   `json:"owner_name,omitempty"`
+	OwnerLocation     string   `json:"owner_location,omitempty"`
+	OwnerCompany      string   `json:"owner_company,omitempty"`
+	OwnerURL          string   `json:"owner_url,omitempty"`
+	IsOrg             bool     `json:"is_org,omitempty"`
+	BusinessModel     string   `json:"business_model,omitempty"`
+	License           string   `json:"license,omitempty"`
+	ContributorCount  int      `json:"contributor_count,omitempty"`
+	TopContributors   []string `json:"top_contributors,omitempty"`
+	BusFactor         int      `json:"bus_factor,omitempty"`
+	ActivityPattern   string   `json:"activity_pattern,omitempty"`
+	LastCommitDate    string   `json:"last_commit_date,omitempty"`
+	Stars             *int     `json:"stars,omitempty"`
+	Forks             *int     `json:"forks,omitempty"`
+	OpenIssues        *int     `json:"open_issues,omitempty"`
+	SubDependencies   int      `json:"sub_dependencies,omitempty"`
 }
 
 // JSONScoreBreakdown shows how the risk score was computed.
@@ -391,7 +392,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		if ds.MaintainerInfo != nil {
 			mi := ds.MaintainerInfo
 			jm := &JSONMaintainer{
-				DataAvailable: mi.DataAvailable,
+				DataAvailable:     mi.DataAvailable,
+				UnavailableReason: mi.UnavailableReason,
 			}
 			// Only populate measurement fields when the API call succeeded.
 			// When DataAvailable is false the GitHub API was unreachable or

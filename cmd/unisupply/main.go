@@ -239,7 +239,7 @@ func run(cfg *runConfig) error {
 
 	if cfg.githubToken == "" {
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — unauthenticated limit is 60 req/hr (~20 deps); maintainer data may be truncated", n)
+			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
 		}
 	}
 
@@ -333,6 +333,10 @@ func run(cfg *runConfig) error {
 	if stdlibList, ok := vulns["stdlib"]; ok {
 		stdlibVulns = stdlibList
 		delete(vulns, "stdlib")
+	}
+
+	if ctx.Err() != nil {
+		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
 	}
 
 	// Generate output.
