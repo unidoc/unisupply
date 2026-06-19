@@ -5,6 +5,7 @@
 # Requires: go-licenses v2 (go install github.com/google/go-licenses/v2@v2.0.1)
 # Uses `report` (CSV output). go-licenses exits 0 even for Unknown licenses
 # (logged to stderr); Unknown rows are caught by the allowlist check below.
+((BASH_VERSINFO[0] >= 4)) || { echo "bash 4+ required (mapfile); macOS users: brew install bash" >&2; exit 1; }
 set -euo pipefail
 
 ALLOWLIST="MIT BSD-2-Clause BSD-3-Clause Apache-2.0 ISC"
@@ -71,5 +72,67 @@ for entry in "${INVENTORY_MODULES[@]}"; do
     echo "STALE INVENTORY ENTRY: $entry is listed in $INVENTORY but not found in the dep graph" >&2
   fi
 done
+
+# ---------------------------------------------------------------------------
+# NOTICE file sweep (Apache 2.0 §4(d) compliance)
+#
+# Walk the binary's actual import set (not go list -m all, which includes
+# test-only and graph-only modules we don't ship) and fail if any dep ships
+# a NOTICE file that isn't covered in the repo-root NOTICE, with an exact
+# path+version match to catch upgrades as well as additions.
+# ---------------------------------------------------------------------------
+REPO_NOTICE="NOTICE"
+[[ -f "$REPO_NOTICE" ]] || { echo "ERROR: repo-root $REPO_NOTICE not found" >&2; exit 1; }
+
+# Collect "dir canonical-path version" triples for every module in the compiled
+# binary. Using go list to extract path and version avoids the filesystem
+# case-encoding issue where e.g. github.com/Azure/... is stored on disk as
+# github.com/!azure/... — the canonical form is what belongs in the repo NOTICE.
+# Omit 2>/dev/null so resolution errors fail loud rather than silently
+# producing an empty list that would pass the check incorrectly.
+mapfile -t MOD_ENTRIES < <(
+  go list -deps -f '{{with .Module}}{{if .Dir}}{{.Dir}} {{.Path}} {{.Version}}{{end}}{{end}}' ./cmd/unisupply/ \
+    | sort -u | grep -v '^$'
+)
+if [[ ${#MOD_ENTRIES[@]} -eq 0 ]]; then
+  echo "ERROR: go list produced no module entries — check module resolution" >&2
+  exit 1
+fi
+
+REPO_ROOT=$(pwd)
+NOTICE_FAILED=0
+for entry in "${MOD_ENTRIES[@]}"; do
+  dir="${entry%% *}"
+  rest="${entry#* }"
+  mod_path="${rest%% *}"
+  mod_version="${rest##* }"
+
+  # Skip the repo itself.
+  [[ "$dir" == "$REPO_ROOT" ]] && continue
+
+  notice_file=""
+  # Deliberate scope: these three names cover all practical cases in the Go
+  # ecosystem. Apache 2.0 §4(d) mandates "the NOTICE file" with no required
+  # extension — not extended speculatively (e.g. NOTICE.rst) to avoid false positives.
+  for candidate in NOTICE NOTICE.txt NOTICE.md; do
+    [[ -f "$dir/$candidate" ]] && notice_file="$dir/$candidate" && break
+  done
+  [[ -z "$notice_file" ]] && continue
+
+  # The repo NOTICE must contain a single line with both the canonical module
+  # path and version (e.g. "gopkg.in/yaml.v3 v3.0.1"). A same-line match
+  # catches both missing entries and version drift from upgrades.
+  if ! grep -qF "$mod_path $mod_version" "$REPO_NOTICE"; then
+    echo "UNCOVERED NOTICE: $mod_path $mod_version ships a NOTICE file not reflected in repo-root NOTICE" >&2
+    NOTICE_FAILED=1
+  fi
+done
+
+if [[ $NOTICE_FAILED -eq 1 ]]; then
+  echo "" >&2
+  echo "Update the repo-root NOTICE file to include the module path and version listed above." >&2
+  echo "See the \"Apache NOTICE compliance\" section in CONTRIBUTING.md for guidance." >&2
+  exit 1
+fi
 
 echo "License check passed."
