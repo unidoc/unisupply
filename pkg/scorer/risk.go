@@ -868,6 +868,8 @@ func maintainerRiskScore(info *scanner.MaintainerInfo, modPath string) float64 {
 		return 50 // Single maintainer.
 	}
 
+	// TODO: when info.OwnerVerified is true (set by EnrichMaintainersFromTrustIndex),
+	// consider reducing the score to reward UniTrust-curated verified maintainers.
 	return 0 // Multiple maintainers.
 }
 

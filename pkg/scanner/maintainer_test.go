@@ -1580,6 +1580,14 @@ func TestEnrichMaintainersFromTrustIndex(t *testing.T) {
 			trustIndex:   nil,
 			wantVerified: map[string]bool{"github.com/foo/bar": true},
 		},
+		{
+			name:        "trust index entry with no matching maintainer is a no-op",
+			maintainers: map[string]*MaintainerInfo{},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: true},
+			},
+			wantVerified: map[string]bool{},
+		},
 	}
 
 	for _, tt := range tests {
