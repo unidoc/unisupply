@@ -238,6 +238,7 @@ func run(cfg *runConfig) error {
 	rep.Done("")
 
 	if cfg.githubToken == "" {
+		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
 			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
 		}

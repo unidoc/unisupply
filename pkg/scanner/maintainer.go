@@ -221,7 +221,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 		if errors.Is(err, errRateLimited) {
 			rep := progress.From(ctx)
 			ms.rateLimitWarnOnce.Do(func() {
-				rep.Warn("GitHub rate limit exceeded (%s) — maintainer data will be unavailable for remaining deps; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
+				rep.Warn("GitHub API rate limit hit — %s; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
 			})
 		}
 		ms.mu.Lock()
