@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
@@ -185,7 +187,9 @@ func run(cfg *runConfig) error {
 		return err
 	}
 	rep := progress.New(mode)
-	ctx := progress.WithReporter(context.Background(), rep)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx = progress.WithReporter(ctx, rep)
 
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(cfg.path)
@@ -232,6 +236,12 @@ func run(cfg *runConfig) error {
 		rep.Warn("Some maintenance checks failed: %v", err)
 	}
 	rep.Done("")
+
+	if cfg.githubToken == "" {
+		if n := scanner.CountGitHubDeps(graph); n > 20 {
+			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — unauthenticated limit is 60 req/hr (~20 deps); maintainer data may be truncated", n)
+		}
+	}
 
 	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
