@@ -1557,8 +1557,8 @@ func TestGitHubRateLimit_SetsUnavailableReason(t *testing.T) {
 	if info.DataAvailable {
 		t.Fatal("expected DataAvailable=false on rate limit")
 	}
-	if !strings.Contains(info.UnavailableReason, "rate limit") {
-		t.Errorf("UnavailableReason %q does not mention rate limit", info.UnavailableReason)
+	if info.UnavailableReason != "rate_limited" {
+		t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, "rate_limited")
 	}
 }
 

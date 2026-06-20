@@ -76,7 +76,7 @@ type MaintainerScanner struct {
 	ScanStart time.Time
 
 	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
-	// per scan, even when many goroutines hit the limit simultaneously.
+	// per scanner instance, even when many goroutines hit the limit simultaneously.
 	rateLimitWarnOnce sync.Once
 }
 
@@ -217,12 +217,14 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 	// leave DataAvailable as false so callers know zero-values are not real.
 	repoData, err := ms.fetchRepo(ctx, owner, repo)
 	if err != nil {
-		info.UnavailableReason = err.Error()
 		if errors.Is(err, errRateLimited) {
+			info.UnavailableReason = "rate_limited"
 			rep := progress.From(ctx)
 			ms.rateLimitWarnOnce.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
 			})
+		} else {
+			info.UnavailableReason = "github_api_error"
 		}
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
@@ -379,8 +381,12 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte,
 			resp.Header.Get("X-RateLimit-Remaining") == "0" {
 			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 				resetAt := time.Unix(resetUnix, 0).UTC()
+				untilReset := time.Until(resetAt).Round(time.Second)
+				if untilReset < 0 {
+					untilReset = 0
+				}
 				return nil, fmt.Errorf("%w: resets at %s (%s from now)",
-					errRateLimited, resetAt.Format(time.RFC3339), time.Until(resetAt).Round(time.Second))
+					errRateLimited, resetAt.Format(time.RFC3339), untilReset)
 			}
 			return nil, fmt.Errorf("%w", errRateLimited)
 		}
