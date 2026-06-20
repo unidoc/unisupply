@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
@@ -185,7 +187,9 @@ func run(cfg *runConfig) error {
 		return err
 	}
 	rep := progress.New(mode)
-	ctx := progress.WithReporter(context.Background(), rep)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx = progress.WithReporter(ctx, rep)
 
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(cfg.path)
@@ -232,6 +236,13 @@ func run(cfg *runConfig) error {
 		rep.Warn("Some maintenance checks failed: %v", err)
 	}
 	rep.Done("")
+
+	if cfg.githubToken == "" {
+		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
+		if n := scanner.CountGitHubDeps(graph); n > 20 {
+			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
+		}
+	}
 
 	rep.Stage("Analyzing maintainers (GitHub API)")
 	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
@@ -324,6 +335,10 @@ func run(cfg *runConfig) error {
 	if stdlibList, ok := vulns["stdlib"]; ok {
 		stdlibVulns = stdlibList
 		delete(vulns, "stdlib")
+	}
+
+	if ctx.Err() != nil {
+		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
 	}
 
 	// Generate output.

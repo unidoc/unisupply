@@ -3,8 +3,10 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,10 @@ import (
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
+// errRateLimited is returned by githubGet when the GitHub API rate limit is
+// exhausted (X-RateLimit-Remaining: 0 on a 403 or 429 response).
+var errRateLimited = errors.New("github rate limit exceeded")
+
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
 	// DataAvailable is false when the GitHub API was unreachable, returned a
@@ -21,7 +27,8 @@ type MaintainerInfo struct {
 	// missing for an authenticated-only endpoint. When false, all numeric
 	// fields (Stars, BusFactor, etc.) are zero-valued and MUST NOT be
 	// interpreted as real measurements.
-	DataAvailable bool `json:"data_available"`
+	DataAvailable     bool   `json:"data_available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 
 	Owner            string    `json:"owner"`
 	Repo             string    `json:"repo"`
@@ -79,6 +86,24 @@ type MaintainerScanner struct {
 	// Defaults to time.Now().UTC().Truncate(24*time.Hour) when the scanner is
 	// constructed. Override in tests or from the CLI entry point.
 	ScanStart time.Time
+
+	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
+	// per scanner instance, even when many goroutines hit the limit simultaneously.
+	rateLimitWarnOnce sync.Once
+}
+
+// CountGitHubDeps returns the number of dependencies in graph whose module path
+// resolves to a GitHub-hosted repository. Used to estimate API call volume
+// before scanning so callers can warn when the unauthenticated rate limit
+// (60 req/hr, ~20 deps at 3 calls each) is likely to be exceeded.
+func CountGitHubDeps(graph *resolver.Graph) int {
+	n := 0
+	for _, dep := range graph.Dependencies {
+		if owner, repo := parseGitHubPath(dep.Module.Path); owner != "" && repo != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // NewMaintainerScanner creates a new maintainer scanner with a disk-backed
@@ -204,6 +229,15 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 	// leave DataAvailable as false so callers know zero-values are not real.
 	repoData, err := ms.fetchRepo(ctx, owner, repo)
 	if err != nil {
+		if errors.Is(err, errRateLimited) {
+			info.UnavailableReason = "rate_limited"
+			rep := progress.From(ctx)
+			ms.rateLimitWarnOnce.Do(func() {
+				rep.Warn("GitHub API rate limit hit — %s; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
+			})
+		} else {
+			info.UnavailableReason = "github_api_error"
+		}
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
 		ms.mu.Unlock()
@@ -355,6 +389,19 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte,
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
+			resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+				resetAt := time.Unix(resetUnix, 0).UTC()
+				untilReset := time.Until(resetAt).Round(time.Second)
+				if untilReset < 0 {
+					untilReset = 0
+				}
+				return nil, fmt.Errorf("%w: resets at %s (%s from now)",
+					errRateLimited, resetAt.Format(time.RFC3339), untilReset)
+			}
+			return nil, fmt.Errorf("%w", errRateLimited)
+		}
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
 

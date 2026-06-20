@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -1534,6 +1538,77 @@ func TestMaintainerScanner_ActivityPatternDetection(t *testing.T) {
 }
 
 // ============================================================================
+// Rate-limit handling tests
+// ============================================================================
+
+func TestGitHubRateLimit_SetsUnavailableReason(t *testing.T) {
+	resetAt := time.Now().Add(30 * time.Minute).Unix()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	ms := newTestMaintainerScanner(srv.URL)
+	info := ms.analyzeRepo(context.Background(), "someowner", "somerepo")
+
+	if info.DataAvailable {
+		t.Fatal("expected DataAvailable=false on rate limit")
+	}
+	if info.UnavailableReason != "rate_limited" {
+		t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, "rate_limited")
+	}
+}
+
+func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
+	resetAt := time.Now().Add(5 * time.Minute).Unix()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	var warnCount int64
+	rec := &countingReporter{match: "rate limit", count: &warnCount}
+	ctx := progress.WithReporter(context.Background(), rec)
+
+	ms := newTestMaintainerScanner(srv.URL)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ms.analyzeRepo(ctx, fmt.Sprintf("owner%d", i), "repo")
+		}(i)
+	}
+	wg.Wait()
+
+	if warnCount != 1 {
+		t.Errorf("expected rate-limit warning exactly once, got %d", warnCount)
+	}
+}
+
+func TestNonRateLimitError_SetsUnavailableReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	ms := newTestMaintainerScanner(srv.URL)
+	info := ms.analyzeRepo(context.Background(), "ghost", "missing")
+
+	if info.DataAvailable {
+		t.Fatal("expected DataAvailable=false on 404")
+	}
+	if info.UnavailableReason == "" {
+		t.Error("expected UnavailableReason to be set on 404")
+	}
+}
+
 // Helper: testTransport for mocking HTTP requests
 // ============================================================================
 
@@ -1600,6 +1675,36 @@ func TestEnrichMaintainersFromTrustIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+// countingReporter is a progress.Reporter that counts Warn calls containing match.
+type countingReporter struct {
+	match string
+	count *int64
+}
+
+func (r *countingReporter) Stage(name string)               {}
+func (r *countingReporter) Step(format string, args ...any) {}
+func (r *countingReporter) Progress(current, total int)     {}
+func (r *countingReporter) Done(format string, args ...any) {}
+func (r *countingReporter) Warn(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, r.match) {
+		atomic.AddInt64(r.count, 1)
+	}
+}
+
+// newTestMaintainerScanner creates a MaintainerScanner whose HTTP calls are
+// redirected to serverURL (an httptest.Server base URL).
+func newTestMaintainerScanner(serverURL string) *MaintainerScanner {
+	ms := &MaintainerScanner{
+		client:    NewClient(ClientOptions{Timeout: 5 * time.Second}),
+		cache:     make(map[string]*MaintainerInfo),
+		userCache: make(map[string]*githubUser),
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
+	}
+	ms.client.Transport = &testTransport{baseURL: serverURL}
+	return ms
 }
 
 type testTransport struct {
