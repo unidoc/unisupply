@@ -13,6 +13,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Risk headline now uses `max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)` instead of
   the mean. Projects with reachable CVEs or archived deps will see higher scores. Per-dep scores unchanged.
+- `owner_verified` in JSON output now reflects UniTrust's curated `maintainer_verified` when
+  `--trust-index-url` is used; falls back to GitHub org-type check otherwise. JSON consumers
+  that previously treated `owner_verified` as a synonym for `is_org` should update their logic.
+- Maintainer risk score for a single-maintainer module is reduced from 50 to 25 when UniTrust
+  has verified the maintainer's identity (`owner_verified: true`).
 
 ### Security
 

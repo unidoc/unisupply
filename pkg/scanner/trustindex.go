@@ -35,15 +35,22 @@ func init() {
 
 // TrustIndexEntry holds Trust Index data for a module (from unitrust API).
 type TrustIndexEntry struct {
-	Module             string `json:"module"`
-	TrustScore         int    `json:"trust_score"`
-	MaintainerTrust    int    `json:"maintainer_trust"`
-	ResilienceScore    int    `json:"resilience_score"`
-	SecurityScore      int    `json:"security_score"`
-	CommunityScore     int    `json:"community_score"`
-	MaintainerName     string `json:"maintainer_name"`
-	MaintainerOrg      string `json:"maintainer_org"`
-	MaintainerCountry  string `json:"maintainer_country"`
+	Module            string `json:"module"`
+	TrustScore        int    `json:"trust_score"`
+	MaintainerTrust   int    `json:"maintainer_trust"`
+	ResilienceScore   int    `json:"resilience_score"`
+	SecurityScore     int    `json:"security_score"`
+	CommunityScore    int    `json:"community_score"`
+	MaintainerName    string `json:"maintainer_name"`
+	MaintainerOrg     string `json:"maintainer_org"`
+	MaintainerCountry string `json:"maintainer_country"`
+	// MaintainerVerified is true when UniTrust has curated and confirmed the
+	// maintainer's identity. False means the entry is curated and the maintainer
+	// is explicitly not verified — not "no opinion". UniTrust only returns entries
+	// for modules it has an explicit record for; absent modules are omitted from
+	// the response, so EnrichMaintainersFromTrustIndex never writes this value
+	// for uncurated modules. String fields such as MaintainerCountry follow the
+	// same convention: empty string means the field was not set in the DB.
 	MaintainerVerified bool   `json:"maintainer_verified"`
 	StewardshipStatus  string `json:"stewardship_status"`
 	SaferAlternative   string `json:"safer_alternative"`

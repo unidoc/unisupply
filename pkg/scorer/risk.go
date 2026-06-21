@@ -865,11 +865,15 @@ func maintainerRiskScore(info *scanner.MaintainerInfo, modPath string) float64 {
 	}
 
 	if info.BusFactor == 1 {
-		return 50 // Single maintainer.
+		// UniTrust-verified identity halves the single-maintainer risk: the bus
+		// factor is unchanged, but a curated, confirmed identity is lower-risk
+		// than an anonymous solo maintainer.
+		if info.OwnerVerified {
+			return 25
+		}
+		return 50 // Single maintainer, unverified.
 	}
 
-	// TODO: when info.OwnerVerified is true (set by EnrichMaintainersFromTrustIndex),
-	// consider reducing the score to reward UniTrust-curated verified maintainers.
 	return 0 // Multiple maintainers.
 }
 
