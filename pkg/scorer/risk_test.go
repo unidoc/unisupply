@@ -309,6 +309,16 @@ func TestMaintainerRiskScore(t *testing.T) {
 			expected: 50,
 		},
 		{
+			name:    "bus factor 1 with UniTrust-verified owner returns 25",
+			modPath: "github.com/random/pkg",
+			info: &scanner.MaintainerInfo{
+				DataAvailable: true,
+				BusFactor:     1,
+				OwnerVerified: true,
+			},
+			expected: 25,
+		},
+		{
 			name:     "bus factor 2 returns 0",
 			modPath:  "github.com/random/pkg",
 			info:     testutil.MakeMaintainerInfo(2, 5, false),

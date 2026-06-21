@@ -59,6 +59,23 @@ type MaintainerInfo struct {
 	TakeoverReason    string `json:"takeover_reason,omitempty"`
 }
 
+// EnrichMaintainersFromTrustIndex overwrites OwnerVerified for any module that
+// has a Trust Index entry. When UniTrust is authoritative (entry present),
+// MaintainerVerified replaces the GitHub org-type fallback set during scanning.
+// Modules absent from trustIndex are left unchanged.
+//
+// UniTrust omits modules it has not curated, so a false MaintainerVerified on a
+// returned entry means the maintainer was reviewed and explicitly not verified —
+// not merely "no opinion". It is therefore safe to treat the value as
+// authoritative for any module present in trustIndex.
+func EnrichMaintainersFromTrustIndex(maintainers map[string]*MaintainerInfo, trustIndex map[string]*TrustIndexEntry) {
+	for mod, entry := range trustIndex {
+		if mi, ok := maintainers[mod]; ok {
+			mi.OwnerVerified = entry.MaintainerVerified
+		}
+	}
+}
+
 // MaintainerScanner analyzes module maintainership via the GitHub API.
 type MaintainerScanner struct {
 	client    *Client

@@ -280,6 +280,7 @@ func run(cfg *runConfig) error {
 			rep.Warn("Trust Index lookup failed: %v", tiErr)
 		}
 		rep.Done("%d entries", len(trustIndex))
+		scanner.EnrichMaintainersFromTrustIndex(maintainers, trustIndex)
 	}
 
 	rep.Stage("Computing risk scores")
