@@ -23,14 +23,14 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
 
-      - uses: github/codeql-action/init@v3  # pin: replace with SHA (see actions/checkout pattern in ci.yml)
+      - uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357  # v3.36.2
         with:
           languages: go
 
-      - uses: github/codeql-action/autobuild@v3  # pin: replace with SHA
+      - uses: github/codeql-action/autobuild@dd903d2e4f5405488e5ef1422510ee31c8b32357  # v3.36.2
 
-      - uses: github/codeql-action/analyze@v3  # pin: replace with SHA
+      - uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357  # v3.36.2
         with:
           category: /language:go
