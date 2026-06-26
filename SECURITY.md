@@ -111,5 +111,6 @@ is documented in [README.md § Privacy and network access](README.md#privacy-and
 
 In brief: the binary reads local files only (`go.mod`, `go.sum`, workflow and
 build files) and contacts public Go infrastructure (`proxy.golang.org`,
-`vuln.go.dev`) plus optionally the GitHub API and a user-supplied Trust Index
-URL. No usage tracking. No crash reporter. No beacon.
+`vuln.go.dev`, `api.osv.dev`, `services.nvd.nist.gov`), always-on GitHub API
+calls (`api.github.com`), and optionally a user-supplied Trust Index URL. No
+usage tracking. No crash reporter. No beacon.

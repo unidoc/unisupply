@@ -397,9 +397,11 @@ the same data already public in your `go.mod`.
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
-| `api.osv.dev` | CVE ID | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
-| `services.nvd.nist.gov` | CVE ID | Severity enrichment fallback when OSV has no data | always runs (no-op when no vulns) |
-| `api.github.com` | Repo owner/name | Maintainer and resilience scanners | always runs; token affects rate limits only |
+| `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*) | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
+| `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV has no data | always runs (no-op if no CVE alias) |
+| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
+| `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
+| `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | UniDoc license API | License key only | PDF report generation | opt-in — omit `--format pdf` |
 
