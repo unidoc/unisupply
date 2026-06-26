@@ -102,3 +102,14 @@ We practice coordinated disclosure:
 
 We do not require reporters to sign an NDA, and we will not pursue legal
 action against good-faith security research conducted within the scope above.
+
+## Privacy and network access
+
+`unisupply` collects no telemetry and never uploads source code or scan
+results. The full list of external hosts it contacts, what is sent, and when
+is documented in [README.md § Privacy and network access](README.md#privacy-and-network-access).
+
+In brief: the binary reads local files only (`go.mod`, `go.sum`, workflow and
+build files) and contacts public Go infrastructure (`proxy.golang.org`,
+`vuln.go.dev`) plus optionally the GitHub API and a user-supplied Trust Index
+URL. No usage tracking. No crash reporter. No beacon.

@@ -385,6 +385,33 @@ Environment variables:
 | `GITHUB_TOKEN`    | Higher GitHub API rate limits and access to private repositories |
 | `UNIDOC_LICENSE_API_KEY` | UniDoc license key (required for PDF report generation)   |
 
+## Privacy and network access
+
+`unisupply` collects **no telemetry**. It reads local files (`go.mod`,
+`go.sum`, `.github/workflows/*.yml`, `Dockerfile`, `Makefile`, shell scripts)
+and never uploads source code, scan results, or any project-identifying data.
+The only information transmitted are the minimal identifiers listed below —
+the same data already public in your `go.mod`.
+
+| Host | What is sent | When | Disable |
+| ---- | ------------ | ---- | ------- |
+| `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
+| `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
+| `api.osv.dev` | CVE ID | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
+| `services.nvd.nist.gov` | CVE ID | Severity enrichment fallback when OSV has no data | always runs (no-op when no vulns) |
+| `api.github.com` | Repo owner/name | Maintainer and resilience scanners | always runs; token affects rate limits only |
+| `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
+| UniDoc license API | License key only | PDF report generation | opt-in — omit `--format pdf` |
+
+**Trust Index disclosure.** The `--trust-index-url` call sends the full list
+of discovered module paths — equivalent to your published `go.mod`. No
+versions, no source. The feature is opt-in and off by default; see the
+[Trust Index section](#trust-index-integration) for full details.
+
+**Air-gapped environments.** Allow only the hosts above at your network
+boundary; each scanner degrades gracefully with explicit warnings when a
+host is unreachable.
+
 ## Documentation
 
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
