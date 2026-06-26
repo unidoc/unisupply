@@ -11,6 +11,13 @@
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/check-licenses.sh"
 
 setup() {
+  # Skip on bash < 4: check-licenses.sh requires bash 4+ (mapfile). Without this
+  # guard, tests 2-5 pass vacuously on stock macOS bash 3.2 because the script's
+  # version check exits 1 before any NOTICE sweep logic runs.
+  if (( BASH_VERSINFO[0] < 4 )); then
+    skip "bash 4+ required to run check-licenses.sh (got ${BASH_VERSION})"
+  fi
+
   # Scratch dir for this test; bats cleans it up automatically.
   WORK="$BATS_TEST_TMPDIR/work"
   mkdir -p "$WORK"
@@ -41,7 +48,8 @@ if [[ "${1-}" == "list" ]]; then
   printf '%s\n' "${GO_LIST_OUTPUT:-}"
   exit 0
 fi
-exec /usr/bin/env go "$@"
+echo "go stub: unexpected subcommand '$*' — update the stub if check-licenses.sh gains new go calls" >&2
+exit 1
 EOF
   chmod +x "$STUBS/go"
 
