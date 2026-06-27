@@ -7,6 +7,20 @@
 #
 # All calls to `go` and `go-licenses` are intercepted by stub scripts placed
 # at the front of PATH — no real module resolution or network access required.
+#
+# Stub contract — go: check-licenses.sh calls
+#   go list -deps -f '{{with .Module}}{{if .Dir}}{{.Dir}} {{.Path}} {{.Version}}{{end}}{{end}}' ./cmd/unisupply/
+# and parses '<dir> <path> <version>' triples from the output.
+# The stub returns whatever GO_LIST_OUTPUT contains when $1 == "list".
+# If check-licenses.sh changes its go invocation (format template, package
+# selector, flags), the stub must be updated to match.
+#
+# Stub contract — go-licenses: check-licenses.sh calls
+#   go-licenses report github.com/unidoc/unisupply/cmd/unisupply
+# and parses '<module>,<url>,<license>' CSV rows.
+# The stub ignores all arguments and always emits the row(s) set up by each
+# test. If check-licenses.sh changes its go-licenses subcommand or package
+# path, the stub must be updated to match.
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/check-licenses.sh"
 
@@ -160,4 +174,92 @@ EOF
   run bash "$SCRIPT"
   [ "$status" -eq 1 ]
   [[ "$output" == *"repo-root NOTICE not found"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 6. THIRD_PARTY_LICENSES.md is missing entirely.
+# ---------------------------------------------------------------------------
+@test "fails when THIRD_PARTY_LICENSES.md is missing" {
+  # setup() creates THIRD_PARTY_LICENSES.md — remove it to hit the guard at
+  # the top of the script before any license scanning begins.
+  rm "$WORK/THIRD_PARTY_LICENSES.md"
+
+  cd "$WORK"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"THIRD_PARTY_LICENSES.md not found"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 7. go-licenses produces no output — installation or module error.
+# ---------------------------------------------------------------------------
+@test "fails when go-licenses produces no output" {
+  # Override the go-licenses stub to emit nothing.
+  cat > "$BATS_TEST_TMPDIR/stubs/go-licenses" <<'EOF'
+#!/usr/bin/env bash
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/stubs/go-licenses"
+
+  cat > "$WORK/NOTICE" <<'EOF'
+unisupply
+Copyright © UniDoc ehf
+EOF
+
+  cd "$WORK"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"go-licenses produced no output"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 8. Dep carries a non-allowlist license not covered by the inventory.
+# ---------------------------------------------------------------------------
+@test "fails when dep has a non-allowlist license not in inventory" {
+  # Override go-licenses stub to emit a GPL-3.0 row for a module that is not
+  # in the inventory (inventory only lists github.com/some/lib).
+  cat > "$BATS_TEST_TMPDIR/stubs/go-licenses" <<'EOF'
+#!/usr/bin/env bash
+echo "github.com/evil/pkg,https://example.com/LICENSE,GPL-3.0"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/stubs/go-licenses"
+
+  cat > "$WORK/NOTICE" <<'EOF'
+unisupply
+Copyright © UniDoc ehf
+EOF
+
+  cd "$WORK"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"UNLISTED OR UNKNOWN LICENSE"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 9. Inventory lists a module no longer in the dep graph — stale warning.
+# ---------------------------------------------------------------------------
+@test "warns on stale inventory entry (exits 0)" {
+  # go-licenses returns github.com/other/pkg (MIT, in allowlist) but NOT
+  # github.com/some/lib, which is in THIRD_PARTY_LICENSES.md. The script
+  # emits a STALE INVENTORY ENTRY warning but does not fail.
+  cat > "$BATS_TEST_TMPDIR/stubs/go-licenses" <<'EOF'
+#!/usr/bin/env bash
+echo "github.com/other/pkg,https://example.com/LICENSE,MIT"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/stubs/go-licenses"
+
+  # Point go list at a mod dir with no NOTICE file so the NOTICE sweep
+  # passes (no NOTICE → nothing to cover, loop skips it).
+  mod_dir="$BATS_TEST_TMPDIR/mods/stale"
+  mkdir -p "$mod_dir"
+  export GO_LIST_OUTPUT="$mod_dir github.com/other/pkg v1.0.0"
+
+  cat > "$WORK/NOTICE" <<'EOF'
+unisupply
+Copyright © UniDoc ehf
+EOF
+
+  cd "$WORK"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STALE INVENTORY ENTRY"* ]]
 }
