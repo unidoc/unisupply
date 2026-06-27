@@ -112,5 +112,7 @@ is documented in [README.md § Privacy and network access](README.md#privacy-and
 In brief: the binary reads local files only (`go.mod`, `go.sum`, workflow and
 build files) and contacts public Go infrastructure (`proxy.golang.org`,
 `vuln.go.dev`, `api.osv.dev`, `services.nvd.nist.gov`), always-on GitHub API
-calls (`api.github.com`), and optionally a user-supplied Trust Index URL. No
-usage tracking. No crash reporter. No beacon.
+calls (`api.github.com`), an optional user-supplied Trust Index URL, and
+optionally `cloud.unidoc.io` (UniDoc metered license API — only when
+`UNIDOC_LICENSE_API_KEY` is set and `--format pdf` is used). No unisupply
+telemetry. No crash reporter. No beacon.

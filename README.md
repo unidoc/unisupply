@@ -403,7 +403,9 @@ the same data already public in your `go.mod`.
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
 | `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
-| UniDoc license API | License key only | PDF report generation | opt-in — omit `--format pdf` |
+| `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
+
+**Not contacted:** `sum.golang.org` (checksum verification is the user's responsibility at `go mod download` time, outside unisupply), `pkg.go.dev` (web UI only; not used as an API), no analytics beacon, crash reporter, or telemetry endpoint.
 
 **Trust Index disclosure.** The `--trust-index-url` call sends the full list
 of discovered module paths — equivalent to your published `go.mod`. No
