@@ -1,15 +1,20 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
@@ -104,7 +109,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       250,
 						Forks:       50,
 						OpenIssues:  10,
-						PushedAt:    time.Now().Add(-18 * 30 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(0, -18, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-1000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -144,7 +149,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       500,
 						Forks:       100,
 						OpenIssues:  0,
-						PushedAt:    time.Now().Add(-3 * 365 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(-3, 0, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-2000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -164,7 +169,7 @@ func newMockGitHub() *httptest.Server {
 						Stars:       5000,
 						Forks:       1000,
 						OpenIssues:  200,
-						PushedAt:    time.Now().Add(-24 * 30 * 24 * time.Hour).Format(time.RFC3339),
+						PushedAt:    time.Now().AddDate(-2, 0, 0).Format(time.RFC3339),
 						CreatedAt:   time.Now().Add(-3000 * 24 * time.Hour).Format(time.RFC3339),
 						Owner:       ownStruct,
 					}
@@ -449,61 +454,70 @@ func TestParseGitHubPath(t *testing.T) {
 
 // TestClassifyActivity verifies activity classification based on last commit time.
 func TestClassifyActivity(t *testing.T) {
-	now := time.Now()
+	// Use a fixed reference date anchored to the first of a month. classifyActivity
+	// is driven by calendar-month math (monthsSince), and AddDate normalizes
+	// overflow days forward — so a reference like May 31 minus 3 months yields
+	// March 2 (Feb has 28 days), which monthsSince counts as 2 months, not 3.
+	// Anchoring to day 1 avoids that normalization and keeps the test stable
+	// regardless of the wall-clock date it runs on.
+	now := time.Date(2025, time.July, 1, 0, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name             string
 		lastCommit       time.Time
 		expectedClassify string
 	}{
-		// Active (< 3 months)
+		// Active (< 3 months). classifyActivity uses calendar-month math
+		// (monthsSince), so use AddDate to express offsets in the same units
+		// — otherwise day-count arithmetic drifts across months of varying
+		// length and causes flakes near band boundaries.
 		{
 			name:             "active_one_week",
-			lastCommit:       now.Add(-7 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, 0, -7),
 			expectedClassify: "active",
 		},
 		{
 			name:             "active_one_month",
-			lastCommit:       now.Add(-30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -1, 0),
 			expectedClassify: "active",
 		},
 		{
 			name:             "active_two_months",
-			lastCommit:       now.Add(-60 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -2, 0),
 			expectedClassify: "active",
 		},
 
 		// Sporadic (3-12 months)
 		{
 			name:             "sporadic_three_months",
-			lastCommit:       now.Add(-3 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -3, 0),
 			expectedClassify: "sporadic",
 		},
 		{
 			name:             "sporadic_six_months",
-			lastCommit:       now.Add(-6 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -6, 0),
 			expectedClassify: "sporadic",
 		},
 		{
 			name:             "sporadic_eleven_months",
-			lastCommit:       now.Add(-11 * 30 * 24 * time.Hour),
+			lastCommit:       now.AddDate(0, -11, 0),
 			expectedClassify: "sporadic",
 		},
 
-		// Inactive (> 12 months)
+		// Inactive (>= 12 months)
 		{
 			name:             "inactive_one_year",
-			lastCommit:       now.Add(-365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-1, 0, 0),
 			expectedClassify: "inactive",
 		},
 		{
 			name:             "inactive_two_years",
-			lastCommit:       now.Add(-2 * 365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-2, 0, 0),
 			expectedClassify: "inactive",
 		},
 		{
 			name:             "inactive_five_years",
-			lastCommit:       now.Add(-5 * 365 * 24 * time.Hour),
+			lastCommit:       now.AddDate(-5, 0, 0),
 			expectedClassify: "inactive",
 		},
 
@@ -517,12 +531,67 @@ func TestClassifyActivity(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyActivity(tt.lastCommit)
+			got := classifyActivity(now, tt.lastCommit)
 			if got != tt.expectedClassify {
 				t.Errorf("classifyActivity(%v) = %q, want %q", tt.lastCommit, got, tt.expectedClassify)
 			}
 		})
 	}
+}
+
+// TestClassifyActivity_StableAcrossClockJitter verifies that band classifications
+// are identical across 100 calls when scanStart is jittered by ±5 minutes within
+// the same UTC day. This is the core determinism guarantee: two scans on the same
+// calendar day must see identical classifications for the same lastCommit.
+func TestClassifyActivity_StableAcrossClockJitter(t *testing.T) {
+	// Use a fixed base day far from clock edges.
+	baseDay := time.Date(2025, time.March, 15, 0, 0, 0, 0, time.UTC)
+	const jitterIterations = 100
+	const maxJitter = 5 * time.Minute
+
+	t.Run("12_month_boundary", func(t *testing.T) {
+		// lastCommit sits just inside the "inactive" band: exactly 12 calendar
+		// months before baseDay, so monthsSince(baseDay, lastCommit) == 12 →
+		// classification is "inactive". The point of the jitter loop is that
+		// small clock wobble must not push the classification across the
+		// sporadic/inactive boundary.
+		lastCommit := baseDay.AddDate(0, -12, 0)
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			// Jitter within ±5 minutes but stay on the same UTC day.
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter // range: [-5m, +5m)
+			jitteredNow := baseDay.Add(jitter)
+			// Truncating to a day must collapse back to baseDay.
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
+
+	t.Run("3_month_boundary", func(t *testing.T) {
+		// lastCommit sits just inside the "sporadic" band: exactly 3 calendar
+		// months before baseDay, so monthsSince(baseDay, lastCommit) == 3 →
+		// classification is "sporadic". Jitter must not flip it to "active".
+		lastCommit := baseDay.AddDate(0, -3, 0)
+		want := classifyActivity(baseDay, lastCommit)
+
+		for i := range jitterIterations {
+			jitter := time.Duration(i) * (maxJitter * 2 / jitterIterations)
+			jitter -= maxJitter
+			jitteredNow := baseDay.Add(jitter)
+			scanStart := jitteredNow.UTC().Truncate(24 * time.Hour)
+			got := classifyActivity(scanStart, lastCommit)
+			if got != want {
+				t.Errorf("iteration %d (jitter=%v): classifyActivity=%q, want %q",
+					i, jitter, got, want)
+			}
+		}
+	})
 }
 
 // ============================================================================
@@ -928,7 +997,7 @@ func TestMaintainerScanner_AnalyzeRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -971,7 +1040,7 @@ func TestMaintainerScanner_AnalyzeRepo_SingleMaintainer(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("single", "maintainer")
+	info := ms.analyzeRepo(context.Background(), "single", "maintainer")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -996,7 +1065,7 @@ func TestMaintainerScanner_AnalyzeRepo_NoLicense(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("no", "license")
+	info := ms.analyzeRepo(context.Background(), "no", "license")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1015,7 +1084,7 @@ func TestMaintainerScanner_AnalyzeRepo_APIError(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("error", "repo")
+	info := ms.analyzeRepo(context.Background(), "error", "repo")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil (should return partial info on API error)")
@@ -1028,6 +1097,66 @@ func TestMaintainerScanner_AnalyzeRepo_APIError(t *testing.T) {
 	if info.Repo != "repo" {
 		t.Errorf("Repo = %q, want %q", info.Repo, "repo")
 	}
+	// DataAvailable must be false when the API returned a non-200 status.
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false for 404 API response")
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_FalseOn403 verifies that a 403 response
+// from the GitHub API sets DataAvailable to false. This covers the unauthenticated
+// rate-limit scenario where stars/bus-factor would otherwise be read as zero.
+func TestMaintainerScanner_DataAvailable_FalseOn403(t *testing.T) {
+	// Serve a 403 for all /repos/ requests.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "" /* no token */)
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo(context.Background(), "docker", "docker")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false when GitHub API returns 403")
+	}
+	// Zero-valued fields must not be treated as real measurements.
+	if info.Stars != 0 {
+		t.Errorf("Stars = %d on 403 response, want 0 (zero-valued, not real)", info.Stars)
+	}
+	if info.BusFactor != 0 {
+		t.Errorf("BusFactor = %d on 403 response, want 0 (zero-valued, not real)", info.BusFactor)
+	}
+}
+
+// TestMaintainerScanner_DataAvailable_TrueOnSuccess verifies that a successful
+// GitHub API response sets DataAvailable to true.
+func TestMaintainerScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
+	server := newMockGitHub()
+	defer server.Close()
+
+	ms := NewMaintainerScanner(5*time.Second, "test-token")
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
+
+	if info == nil {
+		t.Fatal("analyzeRepo returned nil")
+	}
+	if !info.DataAvailable {
+		t.Errorf("DataAvailable = false, want true for successful API response")
+	}
+	if info.Stars == 0 {
+		t.Errorf("Stars = 0 with DataAvailable=true, want real star count")
+	}
 }
 
 // TestMaintainerScanner_Cache verifies caching of repo data.
@@ -1039,13 +1168,13 @@ func TestMaintainerScanner_Cache(t *testing.T) {
 	ms.client.Transport = &testTransport{baseURL: server.URL, requestCount: make(map[string]int)}
 
 	// First call
-	info1 := ms.analyzeRepo("golang", "go")
+	info1 := ms.analyzeRepo(context.Background(), "golang", "go")
 	if info1 == nil {
 		t.Fatal("first analyzeRepo returned nil")
 	}
 
 	// Second call (should come from cache)
-	info2 := ms.analyzeRepo("golang", "go")
+	info2 := ms.analyzeRepo(context.Background(), "golang", "go")
 	if info2 == nil {
 		t.Fatal("second analyzeRepo returned nil")
 	}
@@ -1075,7 +1204,7 @@ func TestMaintainerScanner_ScanAll_NonGitHub(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll returned %d results for non-GitHub modules, want 0", len(results))
@@ -1101,7 +1230,7 @@ func TestMaintainerScanner_ScanAll_WithGitHub(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 1 {
 		t.Errorf("ScanAll returned %d results, want 1", len(results))
@@ -1140,7 +1269,7 @@ func TestMaintainerScanner_ScanAll_TransitiveDeps(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(g)
+	results := ms.ScanAll(context.Background(), g)
 
 	result := results["github.com/golang/go"]
 	if result == nil {
@@ -1160,7 +1289,7 @@ func TestMaintainerScanner_TopContributors(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1182,7 +1311,7 @@ func TestMaintainerScanner_ArchivedRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("archived", "old")
+	info := ms.analyzeRepo(context.Background(), "archived", "old")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1204,7 +1333,7 @@ func TestMaintainerScanner_ForkRepo(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("fork", "clone")
+	info := ms.analyzeRepo(context.Background(), "fork", "clone")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1223,7 +1352,7 @@ func TestMaintainerScanner_WidelyUsedInactive(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("widely", "used")
+	info := ms.analyzeRepo(context.Background(), "widely", "used")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1249,13 +1378,13 @@ func TestMaintainerScanner_UserCache(t *testing.T) {
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
 	// First call should fetch
-	user1 := ms.fetchUser("golang")
+	user1 := ms.fetchUser(context.Background(), "golang")
 	if user1 == nil {
 		t.Fatal("fetchUser returned nil")
 	}
 
 	// Second call should use cache
-	user2 := ms.fetchUser("golang")
+	user2 := ms.fetchUser(context.Background(), "golang")
 	if user2 == nil {
 		t.Fatal("fetchUser returned nil on cache hit")
 	}
@@ -1274,7 +1403,7 @@ func TestMaintainerScanner_FetchContributors(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	contribs := ms.fetchContributors("golang", "go")
+	contribs := ms.fetchContributors(context.Background(), "golang", "go")
 
 	if len(contribs) == 0 {
 		t.Errorf("fetchContributors returned empty slice")
@@ -1315,7 +1444,7 @@ func TestMaintainerScanner_EmptyGraph(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 0 {
 		t.Errorf("ScanAll on empty graph = %d results, want 0", len(results))
@@ -1349,7 +1478,7 @@ func TestMaintainerScanner_MixedDependencies(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	results := ms.ScanAll(graph)
+	results := ms.ScanAll(context.Background(), graph)
 
 	if len(results) != 2 {
 		t.Errorf("ScanAll returned %d GitHub results, want 2", len(results))
@@ -1372,7 +1501,7 @@ func TestMaintainerScanner_BusinessModelDetection(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1394,7 +1523,7 @@ func TestMaintainerScanner_ActivityPatternDetection(t *testing.T) {
 	ms := NewMaintainerScanner(5*time.Second, "test-token")
 	ms.client.Transport = &testTransport{baseURL: server.URL}
 
-	info := ms.analyzeRepo("golang", "go")
+	info := ms.analyzeRepo(context.Background(), "golang", "go")
 
 	if info == nil {
 		t.Fatal("analyzeRepo returned nil")
@@ -1409,8 +1538,174 @@ func TestMaintainerScanner_ActivityPatternDetection(t *testing.T) {
 }
 
 // ============================================================================
+// Rate-limit handling tests
+// ============================================================================
+
+func TestGitHubRateLimit_SetsUnavailableReason(t *testing.T) {
+	resetAt := time.Now().Add(30 * time.Minute).Unix()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	ms := newTestMaintainerScanner(srv.URL)
+	info := ms.analyzeRepo(context.Background(), "someowner", "somerepo")
+
+	if info.DataAvailable {
+		t.Fatal("expected DataAvailable=false on rate limit")
+	}
+	if info.UnavailableReason != "rate_limited" {
+		t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, "rate_limited")
+	}
+}
+
+func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
+	resetAt := time.Now().Add(5 * time.Minute).Unix()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	var warnCount int64
+	rec := &countingReporter{match: "rate limit", count: &warnCount}
+	ctx := progress.WithReporter(context.Background(), rec)
+
+	ms := newTestMaintainerScanner(srv.URL)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ms.analyzeRepo(ctx, fmt.Sprintf("owner%d", i), "repo")
+		}(i)
+	}
+	wg.Wait()
+
+	if warnCount != 1 {
+		t.Errorf("expected rate-limit warning exactly once, got %d", warnCount)
+	}
+}
+
+func TestNonRateLimitError_SetsUnavailableReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	ms := newTestMaintainerScanner(srv.URL)
+	info := ms.analyzeRepo(context.Background(), "ghost", "missing")
+
+	if info.DataAvailable {
+		t.Fatal("expected DataAvailable=false on 404")
+	}
+	if info.UnavailableReason == "" {
+		t.Error("expected UnavailableReason to be set on 404")
+	}
+}
+
 // Helper: testTransport for mocking HTTP requests
 // ============================================================================
+
+func TestEnrichMaintainersFromTrustIndex(t *testing.T) {
+	tests := []struct {
+		name         string
+		maintainers  map[string]*MaintainerInfo
+		trustIndex   map[string]*TrustIndexEntry
+		wantVerified map[string]bool
+	}{
+		{
+			name: "trust index verified overrides org-check true",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: true},
+			},
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+		{
+			name: "trust index unverified downgrades org-check true",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: false},
+			},
+			wantVerified: map[string]bool{"github.com/foo/bar": false},
+		},
+		{
+			name: "module absent from trust index keeps org-check fallback",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex:   map[string]*TrustIndexEntry{},
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+		{
+			name: "nil trust index is a no-op",
+			maintainers: map[string]*MaintainerInfo{
+				"github.com/foo/bar": {IsOrg: true, OwnerVerified: true},
+			},
+			trustIndex:   nil,
+			wantVerified: map[string]bool{"github.com/foo/bar": true},
+		},
+		{
+			name:        "trust index entry with no matching maintainer is a no-op",
+			maintainers: map[string]*MaintainerInfo{},
+			trustIndex: map[string]*TrustIndexEntry{
+				"github.com/foo/bar": {MaintainerVerified: true},
+			},
+			wantVerified: map[string]bool{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			EnrichMaintainersFromTrustIndex(tt.maintainers, tt.trustIndex)
+			for mod, want := range tt.wantVerified {
+				if got := tt.maintainers[mod].OwnerVerified; got != want {
+					t.Errorf("module %s: OwnerVerified = %v, want %v", mod, got, want)
+				}
+			}
+		})
+	}
+}
+
+// countingReporter is a progress.Reporter that counts Warn calls containing match.
+type countingReporter struct {
+	match string
+	count *int64
+}
+
+func (r *countingReporter) Stage(name string)               {}
+func (r *countingReporter) Step(format string, args ...any) {}
+func (r *countingReporter) Progress(current, total int)     {}
+func (r *countingReporter) Done(format string, args ...any) {}
+func (r *countingReporter) Warn(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if strings.Contains(msg, r.match) {
+		atomic.AddInt64(r.count, 1)
+	}
+}
+
+// newTestMaintainerScanner creates a MaintainerScanner whose HTTP calls are
+// redirected to serverURL (an httptest.Server base URL).
+func newTestMaintainerScanner(serverURL string) *MaintainerScanner {
+	ms := &MaintainerScanner{
+		client:    NewClient(ClientOptions{Timeout: 5 * time.Second}),
+		cache:     make(map[string]*MaintainerInfo),
+		userCache: make(map[string]*githubUser),
+		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
+	}
+	ms.client.Transport = &testTransport{baseURL: serverURL}
+	return ms
+}
 
 type testTransport struct {
 	baseURL      string

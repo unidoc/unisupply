@@ -1,5 +1,8 @@
 # Contributing to unisupply
 
+By participating in this project, you agree to abide by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 Thanks for your interest in `unisupply`. This document covers everything you
 need to land a change — local setup, day-to-day workflow, code style, and the
 PR process.
@@ -126,6 +129,29 @@ A scanner typically:
 If your scanner needs a network call, add a `--<name>-timeout` flag and
 respect the existing global `--timeout`. If it needs a token or API key,
 follow the `GITHUB_TOKEN` pattern: env var first, flag second.
+
+## Apache NOTICE compliance
+
+Some dependencies ship their own `NOTICE` file (required by Apache 2.0 §4(d)).
+When they do, their attribution must appear in the repo-root `NOTICE` file with
+both the module path **and** the resolved version string (e.g.
+`gopkg.in/yaml.v3 v3.0.1`). CI enforces this automatically via the
+`license-check` job.
+
+**If CI fails with `UNCOVERED NOTICE`:** open the `NOTICE` file of the flagged
+module in your module cache (`$(go env GOMODCACHE)`), copy its contents into the
+repo-root `NOTICE` under a `---` separator, and add a header line with the
+module path and version. Re-check locally with:
+
+```bash
+bash .github/scripts/check-licenses.sh
+```
+
+> **Note:** the script requires bash 4+ (`mapfile`). macOS ships bash 3.2 — install a newer version via Homebrew (`brew install bash`) or run the check in CI.
+
+**If you upgrade a dep** that already appears in the repo-root `NOTICE`, update
+the version string there too — the check matches path *and* version, so a stale
+version fails the same way as a missing entry.
 
 ## Questions
 

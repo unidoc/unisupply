@@ -1,10 +1,12 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -457,7 +459,7 @@ func TestResilienceScanner_AnalyzeModule_MockProxy(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/testmodule")
+	info := scanner.analyzeModule(context.Background(), "example.com/testmodule")
 
 	if info.TotalReleases != 3 {
 		t.Errorf("expected 3 releases, got %d", info.TotalReleases)
@@ -531,14 +533,16 @@ func (rs *ResilienceScanner) checkGovernanceFilesWithBase(base, owner, repo stri
 		{"CODE_OF_CONDUCT.md", &info.HasCodeOfConduct},
 	}
 
+	host := ""
+	if u, err := url.Parse(base); err == nil {
+		host = u.Host
+	}
+
 	for _, f := range files {
-		url := fmt.Sprintf("%s/repos/%s/%s/contents/%s", base, owner, repo, f.path)
-		resp, err := rs.client.Head(url)
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				*f.flag = true
-			}
+		fileURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", base, owner, repo, f.path)
+		resp, err := rs.client.Head(context.Background(), fileURL, GetOptions{Host: host})
+		if err == nil && resp.StatusCode == http.StatusOK {
+			*f.flag = true
 		}
 	}
 }
@@ -569,11 +573,11 @@ func TestResilienceScanner_Cache(t *testing.T) {
 	modPath := "example.com/cached"
 
 	// First call should hit the proxy
-	info1 := scanner.analyzeModule(modPath)
+	info1 := scanner.analyzeModule(context.Background(), modPath)
 	firstCallCount := callCount
 
 	// Second call should use cache
-	info2 := scanner.analyzeModule(modPath)
+	info2 := scanner.analyzeModule(context.Background(), modPath)
 	secondCallCount := callCount
 
 	// Should not have made additional proxy calls on second invocation
@@ -627,7 +631,7 @@ func TestResilienceScanner_ScanAll(t *testing.T) {
 		"github.com/test/module2": {BusFactor: 2},
 	}
 
-	results := scanner.ScanAll(graph, maintainers)
+	results := scanner.ScanAll(context.Background(), graph, maintainers)
 
 	if len(results) != 2 {
 		t.Errorf("expected 2 results, got %d", len(results))
@@ -660,7 +664,7 @@ func TestResilienceScanner_EmptyGraph(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results := scanner.ScanAll(graph, make(map[string]*MaintainerInfo))
+	results := scanner.ScanAll(context.Background(), graph, make(map[string]*MaintainerInfo))
 
 	if len(results) != 0 {
 		t.Errorf("expected empty results for empty graph, got %d", len(results))
@@ -676,7 +680,7 @@ func TestResilienceScanner_ProxyError(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/failed")
+	info := scanner.analyzeModule(context.Background(), "example.com/failed")
 
 	// Should return empty info without panicking
 	if info == nil {
@@ -686,6 +690,68 @@ func TestResilienceScanner_ProxyError(t *testing.T) {
 
 	if info.TotalReleases != 0 {
 		t.Errorf("expected 0 releases on proxy error, got %d", info.TotalReleases)
+	}
+	// DataAvailable must be false when the proxy returned a non-200 status.
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false when proxy returns 500")
+	}
+}
+
+// TestResilienceScanner_DataAvailable_FalseOnNetworkError verifies that a
+// network-level failure (connection refused) sets DataAvailable to false.
+func TestResilienceScanner_DataAvailable_FalseOnNetworkError(t *testing.T) {
+	// Point at a closed server so the TCP connection is immediately refused.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // Closed immediately — all requests will fail.
+
+	sc := NewResilienceScanner(5 * time.Second)
+	sc.proxyURL = srv.URL
+
+	info := sc.analyzeModule(context.Background(), "example.com/network-fail")
+
+	if info == nil {
+		t.Fatal("analyzeModule returned nil")
+	}
+	if info.DataAvailable {
+		t.Errorf("DataAvailable = true, want false on network error")
+	}
+	if info.TotalReleases != 0 {
+		t.Errorf("TotalReleases = %d on network error, want 0", info.TotalReleases)
+	}
+}
+
+// TestResilienceScanner_DataAvailable_TrueOnSuccess verifies that a successful
+// proxy response sets DataAvailable to true.
+func TestResilienceScanner_DataAvailable_TrueOnSuccess(t *testing.T) {
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/@v/list") {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, "v1.0.0\n")
+		} else if strings.Contains(r.URL.Path, "/@v/v1.0.0.info") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"Version": "v1.0.0",
+				"Time":    "2023-01-01T00:00:00Z",
+			})
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxyServer.Close()
+
+	sc := NewResilienceScanner(5 * time.Second)
+	sc.proxyURL = proxyServer.URL
+
+	info := sc.analyzeModule(context.Background(), "example.com/success")
+
+	if info == nil {
+		t.Fatal("analyzeModule returned nil")
+	}
+	if !info.DataAvailable {
+		t.Errorf("DataAvailable = false, want true on successful proxy response")
+	}
+	if info.TotalReleases == 0 {
+		t.Errorf("TotalReleases = 0 with DataAvailable=true, want > 0")
 	}
 }
 
@@ -703,7 +769,7 @@ func TestResilienceScanner_NoVersions(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/noversions")
+	info := scanner.analyzeModule(context.Background(), "example.com/noversions")
 
 	if info.TotalReleases != 0 {
 		t.Errorf("expected 0 releases, got %d", info.TotalReleases)
@@ -752,7 +818,7 @@ func TestResilienceInfo_StableReleaseDetection(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/stable")
+	info := scanner.analyzeModule(context.Background(), "example.com/stable")
 
 	if !info.HasStableRelease {
 		t.Error("expected HasStableRelease to be true for v1.2.3")
@@ -780,7 +846,7 @@ func TestResilienceInfo_MajorVersionCount(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/multiversion")
+	info := scanner.analyzeModule(context.Background(), "example.com/multiversion")
 
 	if info.MajorVersions != 3 {
 		t.Errorf("expected 3 major versions, got %d", info.MajorVersions)
@@ -809,7 +875,7 @@ func TestResilienceInfo_VersionSchemeDetection(t *testing.T) {
 	scanner := NewResilienceScanner(5 * time.Second)
 	scanner.proxyURL = proxyServer.URL
 
-	info := scanner.analyzeModule("example.com/mixedversions")
+	info := scanner.analyzeModule(context.Background(), "example.com/mixedversions")
 
 	if info.VersionScheme != "mixed" {
 		t.Errorf("expected mixed version scheme, got %s", info.VersionScheme)

@@ -60,13 +60,50 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score.
+	// Overall score (four-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
-	fmt.Fprintf(w, "OVERALL SUPPLY CHAIN RISK SCORE: %s\n",
+	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
 		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	if ps.HeadlineCandidate != nil {
+		hc := ps.HeadlineCandidate
+		switch {
+		case hc.DrivingDep != "" && hc.Reason != "":
+			fmt.Fprintf(w, "  Driver: %s — %s (%s)\n", hc.Name, hc.DrivingDep, hc.Reason)
+		case hc.Reason != "":
+			fmt.Fprintf(w, "  Driver: %s — %s\n", hc.Name, hc.Reason)
+		default:
+			fmt.Fprintf(w, "  Driver: %s\n", hc.Name)
+		}
+	}
+	if ps.WorstCVEID != "" {
+		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+			fmt.Fprintf(w, "  Worst CVE: %s (scored %s, source %s)\n",
+				ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+		} else {
+			fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
+		}
+	}
 	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
+
+	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
+	// undeniable visibility, even when the headline already reflects them.
+	if timeBombs := scorer.CollectTimeBombs(ps); len(timeBombs) > 0 {
+		fmt.Fprintf(w, "TIME-BOMBS (%d)\n", len(timeBombs))
+		for _, tb := range timeBombs {
+			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
+		}
+		if ps.HeadlineDriver == "severity_adjusted" && allRequiredReachability(timeBombs) {
+			fmt.Fprintf(w, "  Note: all above have reachability=required; headline reflects reachability-downgraded severity.\n")
+		}
+		fmt.Fprintf(w, "\n")
+	}
+
+	// Debug scoring block (--debug-scoring). NON-NORMATIVE.
+	if ps.DebugScoring != nil {
+		writeDebugScoring(w, c, ps.DebugScoring)
+	}
 
 	// Sort dependencies by risk score descending.
 	sorted := make([]*scorer.DependencyScore, len(ps.Dependencies))
@@ -154,8 +191,9 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintln(w)
 	}
 
-	// CI/CD Risk Assessment section.
-	if opts.CIReport != nil && (len(opts.CIReport.Workflows) > 0 || len(opts.CIReport.BuildFindings) > 0) {
+	// CI/CD and build-file sections are always rendered when the scanner was invoked,
+	// so reviewers can confirm the scanner ran even when there are no findings.
+	if opts.CIReport != nil {
 		writeCIReportText(w, opts.CIReport, c)
 	}
 
@@ -190,8 +228,8 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "  Low risk:    %s\n", formatCount(len(low), total))
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
-	fmt.Fprintf(w, "  Unmaintained (>2yr):   %d dependencies\n", ps.Unmaintained2yr)
-	fmt.Fprintf(w, "  Unmaintained (>1yr):   %d dependencies\n", ps.Unmaintained1yr)
+	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
+	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Full report: unisupply -f pdf\n")
@@ -205,6 +243,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	label := "transitive"
 	if ds.Direct {
 		label = "direct"
+	}
+	// Append [test-only] when the classification is confirmed. When IsTestOnly
+	// is nil (unknown, go list failed) we show nothing — silence is better than
+	// a wrong label.
+	if ds.IsTestOnly != nil && *ds.IsTestOnly {
+		label += ", test-only"
 	}
 
 	fmt.Fprintf(w, "● %s %s  %s  (%s)\n",
@@ -220,14 +264,45 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	fmt.Fprintf(w, "  ├─ %s\n", c(colorDim, depExplanation(ds)))
 
 	// Vulnerabilities.
-	for _, v := range ds.Vulns {
-		aliases := strings.Join(v.Aliases, ", ")
-		if aliases == "" {
-			aliases = v.ID
+	if len(ds.Vulns) > 0 {
+		// Compute per-tier counts. Empty Reachability is treated as "called"
+		// for backward compatibility with non-govulncheck CVE sources.
+		var nCalled, nImported, nRequired int
+		for _, v := range ds.Vulns {
+			switch v.Reachability {
+			case "imported":
+				nImported++
+			case "required":
+				nRequired++
+			default:
+				nCalled++ // "called" or ""
+			}
 		}
-		fmt.Fprintf(w, "  ├─ ⚠ %s (%s) — %s\n", v.ID, v.Severity, aliases)
-		if v.FixedVersion != "" {
-			fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+		// Emit combined count header only when reachability is mixed; the
+		// simple "N vulnerabilities" phrasing is implicit from the bullet list
+		// when all are called (avoids noise on the common case).
+		if nImported > 0 || nRequired > 0 {
+			fmt.Fprintf(w, "  ├─ %s %s\n",
+				c(colorDim, "Vulnerabilities:"),
+				vulnReachabilityCountHeader(nCalled, nImported, nRequired))
+		}
+		for _, v := range ds.Vulns {
+			aliases := strings.Join(v.Aliases, ", ")
+			if aliases == "" {
+				aliases = v.ID
+			}
+			tag := reachabilityTag(v.Reachability)
+			displaySev := v.Severity
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				displaySev = "UNKNOWN"
+			}
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, displaySev, tag, aliases)
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
+			}
+			if v.FixedVersion != "" {
+				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+			}
 		}
 	}
 
@@ -353,9 +428,24 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	}
 
 	// Risk score breakdown.
-	fmt.Fprintf(w, "  ├─ %s vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%\n",
-		c(colorDim, "Score breakdown:"),
+	breakdown := fmt.Sprintf("vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%",
 		ds.VulnScore, ds.MaintenanceScore, ds.DepthScore, ds.MaintainerScore, ds.MaturityScore)
+	if ds.ResilienceBonus > 0 {
+		breakdown += fmt.Sprintf(" +resilience=%.1f", ds.ResilienceBonus)
+	}
+	if ds.AIGenBonus > 0 {
+		breakdown += fmt.Sprintf(" +aigen=%.1f", ds.AIGenBonus)
+	}
+	if ds.TyposquatBonus > 0 {
+		breakdown += fmt.Sprintf(" +typosquat=%.1f", ds.TyposquatBonus)
+	}
+	if ds.FlooredTo > 0 {
+		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
+	}
+	if ds.MaintainerWeightExcluded {
+		breakdown += " [renorm: maintainer excl.]"
+	}
+	fmt.Fprintf(w, "  ├─ %s %s\n", c(colorDim, "Score breakdown:"), breakdown)
 
 	// Dependency path.
 	if len(ds.DependencyPath) > 0 {
@@ -374,6 +464,9 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 	fmt.Fprintf(w, "  Third-party actions: %d\n", ciReport.ThirdPartyActions)
 	fmt.Fprintf(w, "  Total findings:      %d\n\n", ciReport.TotalFindings)
 
+	// ## CI/CD section — always rendered so reviewers know the scanner ran.
+	fmt.Fprintf(w, "## CI/CD\n")
+	ciCount := 0
 	for _, wr := range ciReport.Workflows {
 		if len(wr.Findings) == 0 {
 			continue
@@ -385,13 +478,18 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 			sColor := ciRiskColor(f.Severity)
 			fmt.Fprintf(w, "    %s %s\n", c(sColor, "["+severity+"]"), f.Description)
 			fmt.Fprintf(w, "    %s %s\n", c(colorDim, "  Fix:"), f.Remediation)
+			ciCount++
 		}
 		fmt.Fprintln(w)
 	}
+	if ciCount == 0 {
+		fmt.Fprintf(w, "  No findings\n")
+	}
+	fmt.Fprintln(w)
 
-	// Build findings.
+	// ## Build files section — always rendered so reviewers know the scanner ran.
+	fmt.Fprintf(w, "## Build files\n")
 	if len(ciReport.BuildFindings) > 0 {
-		fmt.Fprintf(w, "  %s\n", c(colorBold, "Build Pipeline Findings"))
 		for _, f := range ciReport.BuildFindings {
 			sColor := ciRiskColor(f.Severity)
 			loc := f.File
@@ -401,8 +499,10 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 			fmt.Fprintf(w, "    %s %s (%s)\n", c(sColor, "["+string(f.Severity)+"]"), f.Description, loc)
 			fmt.Fprintf(w, "    %s %s\n", c(colorDim, "  Fix:"), f.Remediation)
 		}
-		fmt.Fprintln(w)
+	} else {
+		fmt.Fprintf(w, "  No findings\n")
 	}
+	fmt.Fprintln(w)
 }
 
 func writeTakeoverText(w io.Writer, takeovers []*scanner.MaintainerInfo, c func(string, string) string) {
@@ -547,4 +647,106 @@ func depExplanation(ds *scorer.DependencyScore) string {
 
 	// Join first two reasons for conciseness.
 	return reasons[0] + "; " + reasons[1]
+}
+
+// writeDebugScoring emits the --debug-scoring diagnostic block in text form.
+// NON-NORMATIVE: layout may change between releases; do not parse this block.
+func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.DebugScoring) {
+	fmt.Fprintf(w, "%s\n", c(colorDim, "── debug_scoring (non-normative) ─────────────────"))
+	fmt.Fprintf(w, "  mean=%d  severity_adjusted=%d  driver=%s\n",
+		d.MeanDepRiskScore, d.SeverityAdjustedVulnScore, d.HeadlineDriver)
+	fmt.Fprintf(w, "  step_function_inputs: CRITICAL=%d HIGH=%d MEDIUM=%d LOW=%d\n",
+		d.StepFunctionInputs.Critical, d.StepFunctionInputs.High,
+		d.StepFunctionInputs.Medium, d.StepFunctionInputs.Low)
+
+	if len(d.EnrichedCVEs) > 0 {
+		fmt.Fprintf(w, "  enriched_cves (%d):\n", len(d.EnrichedCVEs))
+		for _, cve := range d.EnrichedCVEs {
+			testOnly := "?"
+			if cve.TestOnly != nil {
+				if *cve.TestOnly {
+					testOnly = "test_only"
+				} else {
+					testOnly = "production"
+				}
+			}
+			downgrade := ""
+			if cve.DowngradedTier != "" {
+				downgrade = fmt.Sprintf(" → %s", cve.DowngradedTier)
+			}
+			enrich := ""
+			if cve.EnrichmentFailed {
+				enrich = " [enrichment_failed]"
+			}
+			reachInfo := ""
+			if cve.Reachability != "" {
+				reachInfo = fmt.Sprintf(" reach=%s", cve.Reachability)
+			}
+			if cve.ReachabilityDowngrade != "" {
+				reachInfo += fmt.Sprintf(" (%s)", cve.ReachabilityDowngrade)
+			}
+			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s%s\n",
+				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich, reachInfo)
+		}
+	}
+
+	if len(d.PerDepInputs) > 0 {
+		fmt.Fprintf(w, "  per_dep_inputs (%d):\n", len(d.PerDepInputs))
+		for _, p := range d.PerDepInputs {
+			amp := ""
+			if p.FixAgeAmplifier {
+				amp = " amp"
+			}
+			fmt.Fprintf(w, "    %s: worst=%s high+_count=%d floor=%d%s vuln_score=%d risk=%d/%s\n",
+				p.Module, p.WorstSeverity, p.HighOrAboveCount, p.FloorApplied, amp,
+				p.FinalVulnScore, p.FinalRiskScore, p.FinalRiskLevel)
+		}
+	}
+	fmt.Fprintf(w, "%s\n\n", c(colorDim, "──────────────────────────────────────────────────"))
+}
+
+// reachabilityTag returns the bracket tag to append after a CVE ID for
+// non-called reachability levels.  Empty string or "called" both return ""
+// (backward-compat: suppress the tag on the common case).
+func reachabilityTag(r string) string {
+	switch r {
+	case "imported", "required":
+		return fmt.Sprintf(" [%s]", r)
+	default:
+		// "" (legacy / non-govulncheck) and "called" are both untagged.
+		return ""
+	}
+}
+
+// allRequiredReachability returns true when the TIME-BOMBS list contains at
+// least one critical_cve entry and every such entry has Reachability "required".
+// Used to print an explanatory note that the headline reflects downgraded severity.
+func allRequiredReachability(bombs []scorer.TimeBomb) bool {
+	hasCVE := false
+	for _, b := range bombs {
+		if b.Kind == "critical_cve" {
+			hasCVE = true
+			if b.Reachability != "required" {
+				return false
+			}
+		}
+	}
+	return hasCVE
+}
+
+// vulnReachabilityCountHeader builds the "X called, Y imported, Z required"
+// summary string for the per-dep vulnerability section header.  Only called
+// when at least one of imported or required is > 0.
+func vulnReachabilityCountHeader(called, imported, required int) string {
+	parts := make([]string, 0, 3)
+	if called > 0 {
+		parts = append(parts, fmt.Sprintf("%d called", called))
+	}
+	if imported > 0 {
+		parts = append(parts, fmt.Sprintf("%d imported", imported))
+	}
+	if required > 0 {
+		parts = append(parts, fmt.Sprintf("%d required", required))
+	}
+	return strings.Join(parts, ", ")
 }

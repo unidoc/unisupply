@@ -3,12 +3,16 @@ package resolver
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/progress"
 )
 
 // Dependency represents a resolved dependency with graph info.
@@ -19,6 +23,19 @@ type Dependency struct {
 	UsedBy         []string // module paths that depend on this
 	Replaced       bool     // whether this module is replaced in go.mod
 	TransitiveDeps int      // how many dependencies this module itself pulls in
+
+	// IsTestOnly is a three-state field indicating whether this module is
+	// exclusively required for testing:
+	//
+	//   nil          — unknown; go list -m -json -test failed or was not run.
+	//                  Task 10's test-only severity discount MUST NOT fire when
+	//                  this is nil — under-discounting is safer than a silent
+	//                  wrong discount on an unverified classification.
+	//   &false       — confirmed production dependency (appears in non-test
+	//                  import graph of the main module).
+	//   &true        — confirmed test-only dependency (go list reports Test:true,
+	//                  meaning it only appears via test imports of the main module).
+	IsTestOnly *bool
 }
 
 // Graph holds the resolved dependency graph.
@@ -30,7 +47,9 @@ type Graph struct {
 
 // Resolve resolves the full dependency graph. It tries `go mod graph` first,
 // falling back to parsing go.mod/go.sum if the Go toolchain is unavailable.
-func Resolve(gomodPath string, directOnly bool) (*Graph, []string, error) {
+func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []string, error) {
+	rep := progress.From(ctx)
+	rep.Step("reading %s", gomodPath)
 	gomod, err := parser.ParseGoMod(gomodPath)
 	if err != nil {
 		return nil, nil, err
@@ -69,7 +88,8 @@ func Resolve(gomodPath string, directOnly bool) (*Graph, []string, error) {
 	}
 
 	// Try `go mod graph` for full transitive resolution.
-	err = resolveWithGoModGraph(gomodPath, graph, gomod, directPaths)
+	rep.Step("running go mod graph")
+	err = resolveWithGoModGraph(ctx, gomodPath, graph, gomod, directPaths)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))
 		// Fall back: add everything from go.mod.
@@ -90,6 +110,14 @@ func Resolve(gomodPath string, directOnly bool) (*Graph, []string, error) {
 		}
 	}
 
+	// Classify test-only deps via `go list -m -json -test all`. This is a
+	// best-effort enrichment: if it fails (air-gapped CI, vendor-only mode,
+	// network issue), IsTestOnly stays nil on all deps and a warning is
+	// appended so the caller knows the discount cannot be applied.
+	if listWarn := classifyTestOnlyDeps(ctx, filepath.Dir(gomodPath), graph); listWarn != "" {
+		warnings = append(warnings, listWarn)
+	}
+
 	return graph, warnings, nil
 }
 
@@ -100,9 +128,9 @@ func depthFromIndirect(indirect bool) int {
 	return 0
 }
 
-func resolveWithGoModGraph(gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
+func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
 	dir := filepath.Dir(gomodPath)
-	cmd := exec.Command("go", "mod", "graph")
+	cmd := exec.CommandContext(ctx, "go", "mod", "graph")
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
@@ -223,6 +251,94 @@ func resolveWithGoModGraph(gomodPath string, graph *Graph, gomod *parser.GoMod, 
 	return nil
 }
 
+// classifyTestOnlyDeps determines which modules are used exclusively in test
+// code by comparing two `go list` package graphs:
+//
+//  1. Production package graph: `go list -f '{{if .Module}}{{.Module.Path}}{{end}}' all`
+//     — modules required to build the main module without any test code.
+//  2. Full package graph (including tests): same with the -test flag added.
+//
+// A module present only in set 2 (and not in set 1) is test-only. A module in
+// both sets is a production dependency.
+//
+// The function sets Dependency.IsTestOnly on each module in graph and returns a
+// non-empty warning string if either `go list` call fails. In that case every
+// dep's IsTestOnly remains nil — the scorer (Task 10) must not apply a
+// test-only discount when the field is nil (unknown). Under-discounting is
+// safer than a silent wrong discount on an unverified classification.
+func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string {
+	// Collect production (non-test) module paths.
+	prodMods, err := listModulePaths(ctx, dir, false)
+	if err != nil {
+		return fmt.Sprintf("go list (production) failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
+	}
+
+	// Collect module paths including test imports.
+	allMods, err := listModulePaths(ctx, dir, true)
+	if err != nil {
+		return fmt.Sprintf("go list -test failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
+	}
+
+	// Require at least one module path from each call — an empty result means
+	// the go list call succeeded but produced nothing meaningful (e.g. vendor
+	// mode with incomplete vendor directory). Treat this as unavailable rather
+	// than incorrectly classifying every dep as production.
+	if len(prodMods) == 0 && len(allMods) == 0 {
+		return "go list returned no module paths; test-only classification unavailable"
+	}
+
+	// Classify each dep in the graph.
+	classified := 0
+	for modPath, dep := range graph.Dependencies {
+		_, inProd := prodMods[modPath]
+		_, inAll := allMods[modPath]
+
+		if !inProd && !inAll {
+			// Module is not in either graph (e.g. from go.sum only). Leave nil.
+			continue
+		}
+
+		isTest := inAll && !inProd
+		dep.IsTestOnly = &isTest
+		classified++
+	}
+
+	if classified == 0 {
+		return "go list produced no matching modules for the dependency graph; test-only classification unavailable"
+	}
+
+	return ""
+}
+
+// listModulePaths runs `go list -f {{if .Module}}{{.Module.Path}}{{end}} all`
+// in dir (with -test if withTest is true) and returns the unique set of module
+// paths referenced by the package graph. An error is returned when go list
+// fails (non-zero exit, unavailable Go toolchain, network timeout, etc.).
+func listModulePaths(ctx context.Context, dir string, withTest bool) (map[string]struct{}, error) {
+	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}"}
+	if withTest {
+		args = append(args, "-test")
+	}
+	args = append(args, "all")
+
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = dir
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]struct{})
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			result[line] = struct{}{}
+		}
+	}
+	return result, nil
+}
+
 func addFromGoSum(sumPath string, graph *Graph, gomod *parser.GoMod) error {
 	entries, err := parser.ParseGoSum(sumPath)
 	if err != nil {
@@ -270,18 +386,10 @@ func moduleVersion(s string) string {
 	return s[at+1:]
 }
 
-// compareVersions does a basic string comparison of Go module versions.
-// This works for semver because "v1.2.3" < "v1.2.4" lexicographically
-// within the same major version. For pseudo-versions it's approximate
-// but sufficient for selecting a "higher" version.
+// compareVersions compares Go module versions using semver semantics.
+// Fixes the lexical compare bug where v1.9.0 > v1.10.0 incorrectly.
 func compareVersions(a, b string) int {
-	if a == b {
-		return 0
-	}
-	if a > b {
-		return 1
-	}
-	return -1
+	return semver.Compare(a, b)
 }
 
 func containsStr(ss []string, s string) bool {

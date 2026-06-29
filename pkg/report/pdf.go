@@ -1,6 +1,7 @@
 package report
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/unidoc/unipdf/v3/model"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -25,11 +27,12 @@ type PDFOptions struct {
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
-func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) error {
+func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) error {
+	rep := progress.From(ctx)
+
 	// Set UniPDF license (metered/API key from env, or unlicensed for open source).
 	if err := initLicense(); err != nil {
-		// Continue without license — will have watermark.
-		_ = err
+		fmt.Fprintf(os.Stderr, "warning: UniDoc license error (%v) — PDF output will include a watermark\n", err)
 	}
 
 	c := creator.New()
@@ -51,32 +54,35 @@ func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) e
 		_ = block.Draw(p)
 	})
 
-	// === Page 1: Cover Page ===
+	rep.Step("cover page")
 	writeCoverPage(c, graph, ps, helvetica, helveticaBold)
 
-	// === Page 2: Executive Summary ===
+	rep.Step("executive summary")
 	writeExecutiveSummary(c, graph, ps, opts, helvetica, helveticaBold)
 
-	// === Page 3+: High Risk Dependencies ===
+	rep.Step("critical risk section")
+	writeCriticalRiskSection(c, ps, helvetica, helveticaBold)
+
+	rep.Step("high risk section")
 	writeHighRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === Medium Risk Dependencies ===
+	rep.Step("medium risk section")
 	writeMediumRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === Low Risk Dependencies ===
+	rep.Step("low risk section")
 	writeLowRiskSection(c, ps, helvetica, helveticaBold)
 
-	// === CI/CD Risk Assessment (if available) ===
-	if opts.CIReport != nil && len(opts.CIReport.Workflows) > 0 {
+	if opts.CIReport != nil {
+		rep.Step("CI/CD section")
 		writeCISection(c, opts.CIReport, helvetica, helveticaBold)
 	}
 
-	// === Takeover Candidates (if any) ===
 	if len(opts.Takeovers) > 0 {
+		rep.Step("takeover candidates section")
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
-	// === Methodology ===
+	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
 
 	outputPath := opts.OutputPath
@@ -84,13 +90,20 @@ func WritePDF(graph *resolver.Graph, ps *scorer.ProjectScore, opts PDFOptions) e
 		outputPath = "unisupply-report.pdf"
 	}
 
+	rep.Step("writing %s", outputPath)
 	return c.WriteToFile(outputPath)
 }
 
 func initLicense() error {
 	// Try metered API key from environment.
 	// If not set, UniPDF will run in demo mode with watermark.
-	return license.SetMeteredKey(os.Getenv("UNIDOC_LICENSE_API_KEY"))
+	if os.Getenv("UNIDOC_LICENSE_API_KEY") != "" {
+		return license.SetMeteredKey(os.Getenv("UNIDOC_LICENSE_API_KEY"))
+	}
+	// Make unlicensed key to avoid errors, but will have watermark.
+	lk := license.MakeUnlicensedKey()
+
+	return license.SetLicenseKey("", lk.CustomerName)
 }
 
 func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
@@ -125,16 +138,37 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 	project.SetMargins(0, 0, 20, 10)
 	_ = c.Draw(project)
 
-	// Overall risk score — large indicator.
+	// Supply-chain risk score — large indicator.
 	scoreColor := pdfRiskColor(ps.OverallLevel)
 	scorePara := c.NewStyledParagraph()
-	sChunk := scorePara.Append(fmt.Sprintf("Overall Risk Score: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
+	sChunk := scorePara.Append(fmt.Sprintf("Supply-Chain Risk: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
 	sChunk.Style.Font = bold
 	sChunk.Style.FontSize = 24
 	sChunk.Style.Color = scoreColor
 	scorePara.SetTextAlignment(creator.TextAlignmentCenter)
-	scorePara.SetMargins(0, 0, 40, 20)
+	scorePara.SetMargins(0, 0, 40, 10)
 	_ = c.Draw(scorePara)
+
+	// Headline driver + worst CVE sub-line (small, dim).
+	if ps.HeadlineDriver != "" {
+		driverPara := c.NewStyledParagraph()
+		txt := fmt.Sprintf("Driver: %s   (mean=%d, severity_adjusted=%d)",
+			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
+		if ps.WorstCVEID != "" {
+			if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+				txt += fmt.Sprintf("\nWorst CVE: %s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+			} else {
+				txt += fmt.Sprintf("\nWorst CVE: %s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+			}
+		}
+		dChunk := driverPara.Append(txt)
+		dChunk.Style.Font = regular
+		dChunk.Style.FontSize = 11
+		dChunk.Style.Color = creator.ColorRGBFromHex("#666666")
+		driverPara.SetTextAlignment(creator.TextAlignmentCenter)
+		driverPara.SetMargins(0, 0, 0, 10)
+		_ = c.Draw(driverPara)
+	}
 
 	// Date.
 	datePara := c.NewStyledParagraph()
@@ -180,7 +214,19 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Direct Dependencies", fmt.Sprintf("%d", directCount), regular, bold)
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
-	addTableRow(c, table, "Overall Risk Score", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	addTableRow(c, table, "Supply-Chain Risk", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	if ps.HeadlineDriver != "" {
+		addTableRow(c, table, "Headline Driver", ps.HeadlineDriver, regular, bold)
+		addTableRow(c, table, "Mean Dep Risk", fmt.Sprintf("%d", ps.MeanDepRiskScore), regular, bold)
+		addTableRow(c, table, "Severity-Adjusted Vuln", fmt.Sprintf("%d", ps.SeverityAdjustedVulnScore), regular, bold)
+	}
+	if ps.WorstCVEID != "" {
+		worstCVEVal := fmt.Sprintf("%s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
+		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
+			worstCVEVal = fmt.Sprintf("%s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+		}
+		addTableRow(c, table, "Worst CVE", worstCVEVal, regular, bold)
+	}
 	_ = c.Draw(table)
 
 	// Risk distribution.
@@ -194,8 +240,9 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	}
 
 	addTableHeader(c, distTable, []string{"Risk Level", "Count", "Percentage"}, bold)
-	addTableRow3(c, distTable, "High/Critical (76-100)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
-	addTableRow3(c, distTable, "Medium (26-75)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
+	addTableRow3(c, distTable, "Critical (76-100)", fmt.Sprintf("%d", ps.CriticalRiskCount), pctStr(ps.CriticalRiskCount, total), regular)
+	addTableRow3(c, distTable, "High (51-75)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
+	addTableRow3(c, distTable, "Medium (26-50)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
 	addTableRow3(c, distTable, "Low (0-25)", fmt.Sprintf("%d", ps.LowRiskCount), pctStr(ps.LowRiskCount, total), regular)
 	_ = c.Draw(distTable)
 
@@ -209,15 +256,75 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>2yr): %d", ps.Unmaintained2yr), regular)
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>1yr): %d", ps.Unmaintained1yr), regular)
 	_ = c.Draw(findings)
+
+	// Data-quality notes: list vulns where enrichment was attempted but failed.
+	var failedVulns []scanner.Vulnerability
+	for _, ds := range ps.Dependencies {
+		for _, v := range ds.Vulns {
+			if v.EnrichmentFailed {
+				failedVulns = append(failedVulns, v)
+			}
+		}
+	}
+	if len(failedVulns) > 0 {
+		subheading(c, "Data-quality Notes", bold)
+		notePara := c.NewStyledParagraph()
+		notePara.SetMargins(0, 0, 5, 0)
+		notePara.SetLineHeight(1.6)
+		noteIntro := notePara.Append(fmt.Sprintf(
+			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
+				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
+			len(failedVulns),
+		))
+		noteIntro.Style.Font = regular
+		noteIntro.Style.FontSize = 11
+		for _, v := range failedVulns {
+			scored := scorer.ScoredSeverity(v)
+			line := fmt.Sprintf("  • %s — scored %s", v.ID, scored)
+			if len(v.EnrichmentErrors) > 0 {
+				line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
+			}
+			chunk := notePara.Append(line + "\n")
+			chunk.Style.Font = regular
+			chunk.Style.FontSize = 10
+		}
+		_ = c.Draw(notePara)
+	}
+}
+
+// filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).
+// A maxScore of 0 means "no upper bound".
+func filterRiskBucket(deps []*scorer.DependencyScore, minScore, maxScore int) []*scorer.DependencyScore {
+	var out []*scorer.DependencyScore
+	for _, ds := range deps {
+		if ds.RiskScore < minScore {
+			continue
+		}
+		if maxScore > 0 && ds.RiskScore >= maxScore {
+			continue
+		}
+		out = append(out, ds)
+	}
+	return out
+}
+
+func writeCriticalRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	critRisk := filterRiskBucket(ps.Dependencies, 76, 0)
+
+	if len(critRisk) == 0 {
+		return
+	}
+
+	c.NewPage()
+	heading(c, fmt.Sprintf("Critical Risk Dependencies (%d)", len(critRisk)), bold)
+
+	for _, ds := range critRisk {
+		writeDependencyBlock(c, ds, regular, bold, true)
+	}
 }
 
 func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var highRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore >= 76 {
-			highRisk = append(highRisk, ds)
-		}
-	}
+	highRisk := filterRiskBucket(ps.Dependencies, 51, 76)
 
 	if len(highRisk) == 0 {
 		return
@@ -232,12 +339,7 @@ func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, 
 }
 
 func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var medRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore >= 26 && ds.RiskScore < 76 {
-			medRisk = append(medRisk, ds)
-		}
-	}
+	medRisk := filterRiskBucket(ps.Dependencies, 26, 51)
 
 	if len(medRisk) == 0 {
 		return
@@ -268,12 +370,7 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 }
 
 func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	var lowRisk []*scorer.DependencyScore
-	for _, ds := range ps.Dependencies {
-		if ds.RiskScore < 26 {
-			lowRisk = append(lowRisk, ds)
-		}
-	}
+	lowRisk := filterRiskBucket(ps.Dependencies, 0, 26)
 
 	if len(lowRisk) == 0 {
 		return
@@ -320,18 +417,17 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 	addBullet(stats, fmt.Sprintf("Total findings: %d", ciReport.TotalFindings), regular)
 	_ = c.Draw(stats)
 
-	// Per-workflow breakdown.
-	for _, wr := range ciReport.Workflows {
-		subheading(c, fmt.Sprintf("Workflow: %s", wr.Name), bold)
+	// ## CI/CD — per-workflow findings. Always present so reviewers can confirm the
+	// scanner ran even when there are no workflow findings.
+	subheading(c, "## CI/CD", bold)
 
+	ciCount := 0
+	for _, wr := range ciReport.Workflows {
 		if len(wr.Findings) == 0 {
-			p := c.NewStyledParagraph()
-			ch := p.Append("No issues found.")
-			ch.Style.Font = regular
-			ch.Style.FontSize = 10
-			_ = c.Draw(p)
 			continue
 		}
+
+		subheading(c, fmt.Sprintf("Workflow: %s", wr.Name), bold)
 
 		table := c.NewTable(3)
 		table.SetMargins(0, 0, 5, 10)
@@ -343,9 +439,48 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 
 		for _, f := range wr.Findings {
 			addTableRow3(c, table, string(f.Severity), f.Description, f.Remediation, regular)
+			ciCount++
 		}
 
 		_ = c.Draw(table)
+	}
+
+	if ciCount == 0 {
+		p := c.NewStyledParagraph()
+		ch := p.Append("No findings")
+		ch.Style.Font = regular
+		ch.Style.FontSize = 10
+		_ = c.Draw(p)
+	}
+
+	// ## Build files — build pipeline findings. Always present so reviewers can
+	// confirm the scanner ran even when there are no build-file findings.
+	subheading(c, "## Build files", bold)
+
+	if len(ciReport.BuildFindings) > 0 {
+		table := c.NewTable(4)
+		table.SetMargins(0, 0, 5, 10)
+		if err := table.SetColumnWidths(0.15, 0.35, 0.25, 0.25); err != nil {
+			fmt.Printf("Error setting column widths: %v\n", err)
+			return
+		}
+		addTableHeader(c, table, []string{"Severity", "Description", "File", "Remediation"}, bold)
+
+		for _, f := range ciReport.BuildFindings {
+			loc := f.File
+			if f.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+			}
+			addTableRow4(c, table, string(f.Severity), f.Description, loc, f.Remediation, regular)
+		}
+
+		_ = c.Draw(table)
+	} else {
+		p := c.NewStyledParagraph()
+		ch := p.Append("No findings")
+		ch.Style.Font = regular
+		ch.Style.FontSize = 10
+		_ = c.Draw(p)
 	}
 }
 
@@ -511,10 +646,22 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regular, bold *model.PdfFont, detailed bool) {
 	color := pdfRiskColor(ds.RiskLevel)
 
+	// Build the classification label for the module header.
+	classLabel := "transitive"
+	if ds.Direct {
+		classLabel = "direct"
+	}
+	// Append [test-only] when the classification is confirmed (IsTestOnly == &true).
+	// When IsTestOnly is nil (unknown) we omit the label — silence is safer than
+	// a wrong label.
+	if ds.IsTestOnly != nil && *ds.IsTestOnly {
+		classLabel += ", test-only"
+	}
+
 	// Module header.
 	header := c.NewStyledParagraph()
 	header.SetMargins(0, 0, 5, 3)
-	ch := header.Append(fmt.Sprintf("%s %s — Risk: %d/100", ds.Module, ds.Version, ds.RiskScore))
+	ch := header.Append(fmt.Sprintf("%s %s — Risk: %d/100 (%s)", ds.Module, ds.Version, ds.RiskScore, classLabel))
 	ch.Style.Font = bold
 	ch.Style.FontSize = 11
 	ch.Style.Color = color
@@ -531,7 +678,15 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	// Vulnerabilities.
 	for _, v := range ds.Vulns {
 		aliases := strings.Join(v.Aliases, ", ")
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s) — %s", v.ID, v.Severity, aliases), regular)
+		// Append an inline reachability tag when the tier is not "called" (the
+		// most-severe tier).  Empty Reachability is treated as called for
+		// backward compatibility with non-govulncheck CVE sources.
+		reachTag := ""
+		switch v.Reachability {
+		case "imported", "required":
+			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
+		}
+		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s — %s", v.ID, v.Severity, reachTag, aliases), regular)
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}

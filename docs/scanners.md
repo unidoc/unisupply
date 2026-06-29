@@ -43,13 +43,93 @@ Risk Score (0–100) =
 Weights are defined in `pkg/scorer/risk.go` (`Weight*` constants). The final
 value is rounded and clamped to `[0, 100]`.
 
+### Vulnerability reachability
+
+`unisupply` inherits govulncheck's call-graph analysis and classifies each
+finding into one of three reachability tiers based on how deeply the vulnerable
+symbol appears in the trace. The govulncheck
+[`Frame`](https://pkg.go.dev/golang.org/x/vuln/internal/govulncheck) struct
+models each step in a call trace as `{Module}`, `{Module, Package}`, or
+`{Module, Package, Function}` — the reachability tier reflects which fields are
+populated:
+
+| Tier       | Meaning                                                                                   |
+| ---------- | ----------------------------------------------------------------------------------------- |
+| `called`   | The vulnerable function appears at the end of a resolved call-graph path — `{module, package, function}` all present. |
+| `imported` | The vulnerable package is imported by a package in your build, but no call path to the vulnerable function was found — `{module, package}` present, no `function`. |
+| `required` | The module containing the vulnerability is required by your module graph, but no package from it is imported in the build — `{module}` only. |
+
+An absent `reachability` field (empty string) on a finding that did not come
+from govulncheck is treated as `called` for scoring purposes — it is the most
+conservative default.
+
+#### Scoring effect
+
+Reachability adjusts the vulnerability contribution at two levels:
+
+**Project-level headline** (`severityAdjustedVulnScore`): the worst observed
+CVE severity is downgraded before computing the headline score —
+- `imported`: the worst CVE's severity tier is dropped one level
+  (CRITICAL → HIGH, HIGH → MEDIUM, MEDIUM → LOW).
+- `required`: the worst CVE's severity tier is dropped two levels
+  (CRITICAL → MEDIUM, HIGH → LOW, MEDIUM → LOW).
+
+This downgrade is applied first; the existing test-only downgrade is applied on
+top of it.
+
+**Per-dependency weight multiplier** (inside `vulnScore`): each CVE's raw
+severity weight is scaled by a reachability factor before accumulation —
+- `called` (or absent): ×1.0 — full weight.
+- `imported`: ×0.7 — moderate discount.
+- `required`: ×0.3 — heavy discount.
+
+**Severity floor and level promotion**: a `required`-only CVE does **not**
+raise the per-dependency `risk_level` to HIGH (no floor of 51), and does not
+count toward the HIGH-and-above promotion logic. A `called` or `imported`
+CRITICAL or HIGH CVE still triggers the HIGH floor (score ≥ 51).
+
+#### Static-analysis caveat
+
+> **Important:** "not called" does NOT mean "not exploitable."
+
+Go's call-graph analysis — and therefore govulncheck's reachability
+classification — cannot follow:
+
+- **Reflection** (`reflect.Value.Call`, `reflect.Method`, dynamic dispatch
+  through `interface{}` values whose concrete type is not statically known).
+- **Plugin loading** (`plugin.Open` — loaded symbols are invisible to the
+  static analyzer).
+- **Runtime type dispatch** through opaque interfaces: if a call goes through
+  an interface whose concrete implementor is only known at runtime, the edge
+  may be missing from the graph.
+- **Build-tag-gated code** not compiled during the analysis build: a
+  `//go:build linux` file is skipped on a macOS CI runner.
+- **Code generated at build time** (protobuf stubs, mock generators, etc.) that
+  is not present when the analyzer runs.
+- **Indirect calls through `interface{}` boundaries** where type information
+  is erased.
+
+Treat reachability as a **confidence calibrator**, not a filter. A finding
+classified `imported` or `required` is *less likely* to be on a hot exploit
+path, but it is not proven safe. For projects that use heavy reflection
+frameworks (dependency injection containers, ORMs, RPC stubs) or load plugins
+at runtime, `imported`-only findings should be weighted as if they were
+`called`.
+
+See the upstream documentation for further precision-limit details:
+[Go Vulnerability Management](https://go.dev/security/vuln/) ·
+[govulncheck reference](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
+
 ### Vulnerability floor
 
-Any dependency with at least one known CVE has its score floored to **51**
-(HIGH). The rationale lives in `pkg/scorer/risk.go`:
+Any dependency with at least one `called` or `imported` CVE has its score
+floored to **51** (HIGH). The rationale lives in `pkg/scorer/risk.go`:
 
 > A known CVE with a fix available is actionable and must not be buried in
 > MEDIUM/LOW where it looks safe.
+
+`required`-only CVEs do not trigger this floor — the module is in the graph
+but no package from it is compiled into your binary.
 
 ### Component scoring
 

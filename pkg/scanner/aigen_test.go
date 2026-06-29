@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -9,13 +10,34 @@ import (
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
+// aigenTestNow is the fixed clock reference used by every test in this file.
+// Anchoring to day-15 of a mid-year month makes time.AddDate end-of-month-safe
+// (e.g. "May 31 minus 3 months" → March 3 normalization never bites), which
+// matters because the aigen scanner gates on monthsSince(s.ScanStart,
+// FirstReleaseDate). Tests that depend on real wall-clock time silently drift
+// across band boundaries as the calendar moves; pinning a fixed date keeps
+// assertions deterministic regardless of when the test happens to run.
+func aigenTestNow() time.Time {
+	return time.Date(2025, time.July, 15, 0, 0, 0, 0, time.UTC)
+}
+
+// newAIGenScannerForTest constructs an AIGenScanner whose ScanStart is pinned
+// to the supplied now. The production NewAIGenScanner reads time.Now() — for
+// determinism tests must override it so the scanner reads the same clock the
+// test fixtures were built against.
+func newAIGenScannerForTest(now time.Time) *AIGenScanner {
+	s := NewAIGenScanner()
+	s.ScanStart = now
+	return s
+}
+
 // TestAIGenScanner_NoRisk tests a clean module with no AI-generated code indicators.
 // Old module (years old), IsOrg=true, many releases → score=0, level="none"
 func TestAIGenScanner_NoRisk(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	// Create a very old dependency (5 years old)
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-5, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -65,9 +87,9 @@ func TestAIGenScanner_NoRisk(t *testing.T) {
 // TestAIGenScanner_RecentModule tests a module created 3 months ago.
 // Should add 15 points for "module_created_recently" + 5 for generic name "utils"
 func TestAIGenScanner_RecentModule(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	threeMonthsAgo := now.AddDate(0, -3, 0)
 
 	dep := &resolver.Dependency{
@@ -108,9 +130,9 @@ func TestAIGenScanner_RecentModule(t *testing.T) {
 // TestAIGenScanner_VeryNewModule tests a module created 10 days ago.
 // Should add 30 (recent + last_30_days) + 10 (very_few) + 5 (no_governance) + 20 (single_anonymous) = 65
 func TestAIGenScanner_VeryNewModule(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	tenDaysAgo := now.AddDate(0, 0, -10)
 
 	dep := &resolver.Dependency{
@@ -158,9 +180,9 @@ func TestAIGenScanner_VeryNewModule(t *testing.T) {
 // TestAIGenScanner_FewReleases tests a module with only 1 release.
 // Should add 10 points for "very_few_releases" + 5 for generic name "helper"
 func TestAIGenScanner_FewReleases(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	twoYearsAgo := now.AddDate(-2, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -198,9 +220,9 @@ func TestAIGenScanner_FewReleases(t *testing.T) {
 // TestAIGenScanner_FewReleasesTwo tests a module with 2 releases (boundary).
 // Should add 10 points for "very_few_releases"
 func TestAIGenScanner_FewReleasesTwo(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -235,9 +257,9 @@ func TestAIGenScanner_FewReleasesTwo(t *testing.T) {
 // TestAIGenScanner_NoGovernance tests a module with no governance files.
 // Should add 5 points for "no_governance_files"
 func TestAIGenScanner_NoGovernance(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -276,9 +298,9 @@ func TestAIGenScanner_NoGovernance(t *testing.T) {
 // Should NOT add 5 points for no_governance (because TotalReleases == 0)
 // But may get points for single_anonymous_maintainer if contributor count is 1
 func TestAIGenScanner_NoGovernanceNoReleases(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -316,9 +338,9 @@ func TestAIGenScanner_NoGovernanceNoReleases(t *testing.T) {
 // TestAIGenScanner_SingleAnonymous tests a single maintainer with no profile info.
 // Should add 10 for single_anonymous + 10 for empty_maintainer_profile = 20 total
 func TestAIGenScanner_SingleAnonymous(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -360,9 +382,9 @@ func TestAIGenScanner_SingleAnonymous(t *testing.T) {
 // Should add 10 for single_anonymous but NOT for empty_maintainer_profile
 // Note: "mylib" doesn't match any special names, so no extra points
 func TestAIGenScanner_SingleMaintainerWithProfile(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -424,10 +446,10 @@ func TestAIGenScanner_GenericNames(t *testing.T) {
 		"go-tools",
 	}
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	for _, name := range genericNames {
 		t.Run(name, func(t *testing.T) {
@@ -476,10 +498,10 @@ func TestAIGenScanner_NonGenericNames(t *testing.T) {
 		"gorm",
 	}
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	for _, name := range nonGenericNames {
 		t.Run(name, func(t *testing.T) {
@@ -518,10 +540,10 @@ func TestAIGenScanner_NonGenericNames(t *testing.T) {
 func TestAIGenScanner_UnofficialOfficial(t *testing.T) {
 	officialPrefixes := []string{"go-", "golang-", "google-", "aws-", "azure-", "k8s-"}
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	for _, prefix := range officialPrefixes {
 		t.Run(prefix, func(t *testing.T) {
@@ -570,9 +592,9 @@ func TestAIGenScanner_UnofficialOfficial(t *testing.T) {
 
 // TestAIGenScanner_UnofficialOfficialInOrgAccount tests that org account doesn't trigger the check.
 func TestAIGenScanner_UnofficialOfficialInOrgAccount(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -606,9 +628,9 @@ func TestAIGenScanner_UnofficialOfficialInOrgAccount(t *testing.T) {
 // TestAIGenScanner_PseudoVersionOnly tests a module with only pseudo-versions.
 // Should add 10 points for "pseudo_version_only" + 10 for single_anonymous + 10 for empty_profile
 func TestAIGenScanner_PseudoVersionOnly(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -649,9 +671,9 @@ func TestAIGenScanner_PseudoVersionOnly(t *testing.T) {
 // TestAIGenScanner_HighRiskComposite tests stacking multiple indicators.
 // Score should be capped at 100 even if indicators add up to more.
 func TestAIGenScanner_HighRiskComposite(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	tenDaysAgo := now.AddDate(0, 0, -10)
 
 	dep := &resolver.Dependency{
@@ -719,7 +741,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 			"score_0",
 			func(dep *resolver.Dependency, mi *MaintainerInfo, ri *ResilienceInfo) {
 				// Old module, multiple contributors, all governance files
-				ri.FirstReleaseDate = time.Now().AddDate(-5, 0, 0)
+				ri.FirstReleaseDate = aigenTestNow().AddDate(-5, 0, 0)
 				ri.TotalReleases = 50
 				ri.HasSecurityPolicy = true
 				ri.HasContribGuide = true
@@ -734,7 +756,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 			"score_low",
 			func(dep *resolver.Dependency, mi *MaintainerInfo, ri *ResilienceInfo) {
 				// Recent module (3 months)
-				ri.FirstReleaseDate = time.Now().AddDate(0, -3, 0)
+				ri.FirstReleaseDate = aigenTestNow().AddDate(0, -3, 0)
 				ri.TotalReleases = 5
 				mi.IsOrg = true
 				mi.ContributorCount = 5
@@ -746,7 +768,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 			"score_medium",
 			func(dep *resolver.Dependency, mi *MaintainerInfo, ri *ResilienceInfo) {
 				// Recent + very few releases (15 + 10 = 25)
-				ri.FirstReleaseDate = time.Now().AddDate(0, -3, 0)
+				ri.FirstReleaseDate = aigenTestNow().AddDate(0, -3, 0)
 				ri.TotalReleases = 1
 				mi.IsOrg = true
 				mi.ContributorCount = 5
@@ -758,7 +780,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 			"score_high",
 			func(dep *resolver.Dependency, mi *MaintainerInfo, ri *ResilienceInfo) {
 				// Very new (30) + few releases (10) + no governance (5) + single anon (20) = 65 >= 50
-				ri.FirstReleaseDate = time.Now().AddDate(0, 0, -10)
+				ri.FirstReleaseDate = aigenTestNow().AddDate(0, 0, -10)
 				ri.TotalReleases = 1
 				ri.HasSecurityPolicy = false
 				ri.HasContribGuide = false
@@ -773,7 +795,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 		},
 	}
 
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -793,7 +815,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 			}
 
 			resilienceInfo := &ResilienceInfo{
-				FirstReleaseDate:  time.Now().AddDate(-1, 0, 0),
+				FirstReleaseDate:  aigenTestNow().AddDate(-1, 0, 0),
 				TotalReleases:     5,
 				HasSecurityPolicy: true,
 				HasContribGuide:   true,
@@ -814,7 +836,7 @@ func TestAIGenScanner_RiskLevelClassification(t *testing.T) {
 
 // TestAIGenScanner_ScanAll integration test with multiple dependencies.
 func TestAIGenScanner_ScanAll(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	// Create a graph with 3 dependencies
 	graph := &resolver.Graph{
@@ -848,7 +870,7 @@ func TestAIGenScanner_ScanAll(t *testing.T) {
 	}
 
 	// Create maintainer info map
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 	recentDate := now.AddDate(0, 0, -10)
 
@@ -898,7 +920,7 @@ func TestAIGenScanner_ScanAll(t *testing.T) {
 		},
 	}
 
-	results := scanner.ScanAll(graph, maintainers, resilience)
+	results := scanner.ScanAll(context.Background(), graph, maintainers, resilience)
 
 	// Clean module should not be in results (score 0) since it's old with governance
 	if _, ok := results["github.com/clean/lib"]; ok {
@@ -936,9 +958,9 @@ func TestAIGenScanner_ScanAll(t *testing.T) {
 // TestAIGenScanner_NilMaintainerInfo tests handling of nil maintainer info.
 // Note: generic name "utils" will still trigger, so score won't be 0.
 func TestAIGenScanner_NilMaintainerInfo(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
-	now := time.Now()
+	now := aigenTestNow()
 	oldDate := now.AddDate(-1, 0, 0)
 
 	dep := &resolver.Dependency{
@@ -969,7 +991,7 @@ func TestAIGenScanner_NilMaintainerInfo(t *testing.T) {
 // TestAIGenScanner_NilResilienceInfo tests handling of nil resilience info.
 // Note: generic name "utils" will still trigger, so score won't be 0.
 func TestAIGenScanner_NilResilienceInfo(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	dep := &resolver.Dependency{
 		Module: parser.Module{
@@ -998,7 +1020,7 @@ func TestAIGenScanner_NilResilienceInfo(t *testing.T) {
 
 // TestAIGenScanner_BothNil tests handling of both nil inputs.
 func TestAIGenScanner_BothNil(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	dep := &resolver.Dependency{
 		Module: parser.Module{
@@ -1024,7 +1046,7 @@ func TestAIGenScanner_BothNil(t *testing.T) {
 
 // TestAIGenScanner_ModuleFieldSet tests that the Module field is set correctly.
 func TestAIGenScanner_ModuleFieldSet(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	modulePath := "github.com/example/testmod"
 	dep := &resolver.Dependency{
@@ -1052,7 +1074,7 @@ func TestAIGenScanner_ModuleFieldSet(t *testing.T) {
 
 // TestAIGenScanner_ZeroFirstReleaseDate tests handling of zero FirstReleaseDate.
 func TestAIGenScanner_ZeroFirstReleaseDate(t *testing.T) {
-	scanner := NewAIGenScanner()
+	scanner := newAIGenScannerForTest(aigenTestNow())
 
 	dep := &resolver.Dependency{
 		Module: parser.Module{
@@ -1076,5 +1098,227 @@ func TestAIGenScanner_ZeroFirstReleaseDate(t *testing.T) {
 
 	if slices.Contains(risk.Indicators, "module_created_recently") {
 		t.Errorf("Should not flag zero FirstReleaseDate as recently created")
+	}
+}
+
+// TestAIGenScanner_PreChatGPTModuleNotFlagged verifies that a module first
+// released before 2022-11-01 (the ChatGPT public launch date) is excluded from
+// the AI-gen detector regardless of its other characteristics.
+// github.com/kr/text was first released in 2014 — it must never be flagged.
+func TestAIGenScanner_PreChatGPTModuleNotFlagged(t *testing.T) {
+	scanner := newAIGenScannerForTest(aigenTestNow())
+
+	firstRelease2014 := time.Date(2014, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/kr/text",
+			Version: "v0.2.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+		OwnerName:        "",
+		OwnerBio:         "",
+		OwnerLocation:    "",
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease2014,
+		TotalReleases:     2,
+		HasSecurityPolicy: false,
+		HasContribGuide:   false,
+		HasCodeOfConduct:  false,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.RiskLevel != "none" {
+		t.Errorf("Pre-ChatGPT module must not be flagged: got risk_level=%q score=%d indicators=%v",
+			risk.RiskLevel, risk.Score, risk.Indicators)
+	}
+	if risk.Score != 0 {
+		t.Errorf("Pre-ChatGPT module must have score 0, got %d", risk.Score)
+	}
+	if len(risk.Indicators) != 0 {
+		t.Errorf("Pre-ChatGPT module must have no indicators, got %v", risk.Indicators)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("Pre-ChatGPT module must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_PostChatGPTAllThreeIndicatorsFlagged verifies that a
+// synthetic module with all three high-confidence signals (first release within
+// the last 12 months, single release, generic name "utils") is flagged and
+// promoted via MeetsPromotionGate.
+func TestAIGenScanner_PostChatGPTAllThreeIndicatorsFlagged(t *testing.T) {
+	scanner := newAIGenScannerForTest(aigenTestNow())
+
+	// First release 6 months ago: post-ChatGPT and within the 12-month window.
+	firstRelease := aigenTestNow().AddDate(0, -6, 0)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name "utils"
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            true,
+		ContributorCount: 5,
+		BusFactor:        2,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease,
+		TotalReleases:     1, // single release — releasesAtMost2 = true
+		HasSecurityPolicy: false,
+		HasContribGuide:   false,
+		HasCodeOfConduct:  false,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.Score == 0 {
+		t.Error("Post-ChatGPT module with all three indicators must have score > 0")
+	}
+	if !risk.MeetsPromotionGate {
+		t.Errorf("Post-ChatGPT module with age<12mo + <=2 releases + generic name must meet promotion gate (score=%d indicators=%v)", risk.Score, risk.Indicators)
+	}
+	if !slices.Contains(risk.Indicators, "generic_package_name") {
+		t.Errorf("Expected generic_package_name indicator, got %v", risk.Indicators)
+	}
+	if !slices.Contains(risk.Indicators, "very_few_releases") {
+		t.Errorf("Expected very_few_releases indicator, got %v", risk.Indicators)
+	}
+}
+
+// TestAIGenScanner_NilResilienceInfoNoFlag verifies that a nil ResilienceInfo
+// causes the detector to skip entirely and produce no risk flag.
+// Missing data must never trigger a false positive.
+func TestAIGenScanner_NilResilienceInfoNoFlag(t *testing.T) {
+	scanner := newAIGenScannerForTest(aigenTestNow())
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name — would score if ri were present
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+		OwnerName:        "",
+	}
+
+	// ri == nil: no resilience data available.
+	risk := scanner.analyzeModule(dep, maintainerInfo, nil)
+
+	if risk.Score != 0 {
+		t.Errorf("nil ResilienceInfo must produce score 0, got %d (indicators: %v)", risk.Score, risk.Indicators)
+	}
+	if risk.RiskLevel != "none" {
+		t.Errorf("nil ResilienceInfo must produce risk_level none, got %q", risk.RiskLevel)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("nil ResilienceInfo must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_ZeroFirstReleaseDateNoFlag verifies that a zero
+// FirstReleaseDate causes the detector to skip entirely and produce no flag.
+// This guards against false positives when GitHub API data is unavailable.
+func TestAIGenScanner_ZeroFirstReleaseDateNoFlag(t *testing.T) {
+	scanner := newAIGenScannerForTest(aigenTestNow())
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name — would score if date were known
+			Version: "v0.1.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            false,
+		ContributorCount: 1,
+		BusFactor:        1,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate: time.Time{}, // zero: date unknown
+		TotalReleases:    1,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	if risk.Score != 0 {
+		t.Errorf("Zero FirstReleaseDate must produce score 0, got %d (indicators: %v)", risk.Score, risk.Indicators)
+	}
+	if risk.RiskLevel != "none" {
+		t.Errorf("Zero FirstReleaseDate must produce risk_level none, got %q", risk.RiskLevel)
+	}
+	if risk.MeetsPromotionGate {
+		t.Error("Zero FirstReleaseDate must not meet promotion gate")
+	}
+}
+
+// TestAIGenScanner_SingleIndicatorPopulatesIndicatorsNotRiskFactors verifies
+// that a module with only one indicator (generic_name only, no recent age, no
+// few releases) populates aigen.Indicators for transparency but does NOT meet
+// the promotion gate that drives risk_factors in the scorer.
+func TestAIGenScanner_SingleIndicatorPopulatesIndicatorsNotRiskFactors(t *testing.T) {
+	scanner := newAIGenScannerForTest(aigenTestNow())
+
+	// Module first released in 2023 (post-ChatGPT) but more than 12 months ago
+	// so it does NOT meet age < 12 months.
+	firstRelease := time.Date(2023, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{
+			Path:    "github.com/someuser/utils", // generic name only
+			Version: "v2.0.0",
+		},
+		Direct: true,
+	}
+
+	maintainerInfo := &MaintainerInfo{
+		IsOrg:            true,
+		ContributorCount: 10,
+		BusFactor:        5,
+	}
+
+	resilienceInfo := &ResilienceInfo{
+		FirstReleaseDate:  firstRelease,
+		TotalReleases:     20, // many releases, so releasesAtMost2 = false
+		HasSecurityPolicy: true,
+		HasContribGuide:   true,
+		HasCodeOfConduct:  true,
+	}
+
+	risk := scanner.analyzeModule(dep, maintainerInfo, resilienceInfo)
+
+	// generic_package_name indicator must be populated for transparency.
+	if !slices.Contains(risk.Indicators, "generic_package_name") {
+		t.Errorf("Single-indicator hit must populate Indicators: got %v", risk.Indicators)
+	}
+	if risk.Score == 0 {
+		t.Error("Single-indicator hit must have non-zero score")
+	}
+
+	// But the promotion gate must NOT fire (only one of the three signals is present).
+	if risk.MeetsPromotionGate {
+		t.Errorf("Single generic_name indicator must NOT meet promotion gate (score=%d indicators=%v)",
+			risk.Score, risk.Indicators)
 	}
 }

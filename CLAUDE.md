@@ -131,6 +131,12 @@ unisupply ./ --policy ./my-policy.json
 
 # Filter output
 unisupply ./ --min-risk medium --show-only vulnerabilities,maintenance
+
+# Progress output (default: auto — TTY spinner if stderr is a terminal,
+# timestamped lines otherwise). Always writes to stderr; never contaminates
+# stdout, so it is safe with `--format json` piped to a consumer.
+unisupply ./ --progress plain 2> progress.log         # capture log
+unisupply ./ --progress none --format json > out.json # fully silent
 ```
 
 ### Environment variables

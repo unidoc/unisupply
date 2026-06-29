@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -141,6 +142,25 @@ func TestCompareVersions(t *testing.T) {
 			name:     "patch_version_difference",
 			a:        "v1.0.1",
 			b:        "v1.0.0",
+			expected: 1,
+		},
+		// Regression: lexical compare incorrectly returns v1.9.0 > v1.10.0.
+		{
+			name:     "minor_double_digit_regression",
+			a:        "v1.9.0",
+			b:        "v1.10.0",
+			expected: -1,
+		},
+		{
+			name:     "minor_double_digit_greater",
+			a:        "v1.10.0",
+			b:        "v1.9.0",
+			expected: 1,
+		},
+		{
+			name:     "major_cross_double_digit",
+			a:        "v2.0.0",
+			b:        "v1.99.99",
 			expected: 1,
 		},
 	}
@@ -421,7 +441,7 @@ func TestGraph_TotalEdges(t *testing.T) {
 // TestResolve_FileNotFound tests Resolve with a non-existent go.mod file.
 func TestResolve_FileNotFound(t *testing.T) {
 	gomodPath := "/nonexistent/path/go.mod"
-	graph, warnings, err := Resolve(gomodPath, false)
+	graph, warnings, err := Resolve(context.Background(), gomodPath, false)
 
 	if err == nil {
 		t.Error("Resolve() expected error for non-existent file, got nil")
@@ -461,7 +481,7 @@ require (
 		t.Fatalf("Failed to write go.mod: %v", err)
 	}
 
-	graph, warnings, err := Resolve(gomodPath, true)
+	graph, warnings, err := Resolve(context.Background(), gomodPath, true)
 	if err != nil {
 		t.Fatalf("Resolve(directOnly=true) failed: %v", err)
 	}
@@ -517,7 +537,7 @@ require (
 
 	// Call with directOnly=false to attempt go mod graph
 	// Since we're in tests, go mod graph likely won't work, triggering fallback
-	graph, warnings, err := Resolve(gomodPath, false)
+	graph, warnings, err := Resolve(context.Background(), gomodPath, false)
 
 	// We accept either success (if go mod graph works) or fallback success
 	if err != nil {
@@ -571,7 +591,7 @@ github.com/transitive/dep v1.2.3/go.mod h1:abcdef1234567890abcdef1234567890abcde
 		t.Fatalf("Failed to write go.sum: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, false)
+	graph, _, err := Resolve(context.Background(), gomodPath, false)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}
@@ -616,7 +636,7 @@ replace github.com/original/pkg => ./local/replacement
 		t.Fatalf("Failed to write go.sum: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, true)
+	graph, _, err := Resolve(context.Background(), gomodPath, true)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}
@@ -665,7 +685,7 @@ require (
 		t.Fatalf("Failed to write go.sum: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, true)
+	graph, _, err := Resolve(context.Background(), gomodPath, true)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}
@@ -715,7 +735,7 @@ go 1.21
 		t.Fatalf("Failed to write go.sum: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, true)
+	graph, _, err := Resolve(context.Background(), gomodPath, true)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}
@@ -776,7 +796,7 @@ github.com/transitive/b v2.5.0/go.mod h1:abcdef=
 	}
 
 	// Call with directOnly=false to trigger full resolution attempt
-	graph, warnings, err := Resolve(gomodPath, false)
+	graph, warnings, err := Resolve(context.Background(), gomodPath, false)
 	if err != nil {
 		t.Fatalf("Resolve(directOnly=false) failed: %v", err)
 	}
@@ -827,7 +847,7 @@ require (
 		t.Fatalf("Failed to write go.sum: %v", err)
 	}
 
-	graph, _, err := Resolve(gomodPath, false)
+	graph, _, err := Resolve(context.Background(), gomodPath, false)
 	if err != nil {
 		t.Fatalf("Resolve() failed: %v", err)
 	}

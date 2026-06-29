@@ -2,19 +2,11 @@
 
 > Go supply chain risk assessment — vulnerabilities, maintainer health, typosquatting, AI-generated code risk, CI/CD audit, SBOM, policy enforcement.
 
-<!--
-TODO (PR 11 / M5.5): the repository is currently private. When it goes public,
-replace this comment block with the live badge row below.
-
 [![CI](https://github.com/unidoc/unisupply/actions/workflows/ci.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/ci.yml)
 [![Release](https://github.com/unidoc/unisupply/actions/workflows/release.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/release.yml)
+[![CodeQL](https://github.com/unidoc/unisupply/actions/workflows/codeql.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/codeql.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/unidoc/unisupply)](https://goreportcard.com/report/github.com/unidoc/unisupply)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
-Coverage badge intentionally omitted — no Codecov / Coveralls integration yet.
-Do not surface an integrity signal that is not backed by a verification
-mechanism (OWASP SCVS V4.1).
--->
 
 ## What it does
 
@@ -37,6 +29,9 @@ release-time decisions about third-party Go code.
 ```bash
 # Latest release (Go 1.25+ required)
 go install github.com/unidoc/unisupply/cmd/unisupply@latest
+
+# Pinned version (recommended for reproducible environments)
+go install github.com/unidoc/unisupply/cmd/unisupply@v0.4.0
 
 # Or download a prebuilt binary from the Releases page
 #   https://github.com/unidoc/unisupply/releases
@@ -111,10 +106,10 @@ path that pulled the module in.
 | Build files      | Unpinned Docker images, `curl \| bash` patterns         | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores                                    | unitrust API (optional)    |
 
-The risk score is a weighted composite:
+The risk score is a weighted composite per dependency:
 
 ```
-Risk Score (0–100) =
+Per-Dep Risk Score (0–100) =
     Vulnerabilities × 0.40
   + Maintenance     × 0.25
   + Depth           × 0.15
@@ -124,6 +119,32 @@ Risk Score (0–100) =
   + AI-Gen Penalty         (0–15)
   + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
 ```
+
+**Project headline score** is the maximum of four candidates — it never dilutes a single bad actor into a healthy-looking average:
+
+```
+Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+```
+
+| Candidate | Description |
+| ------------------- | ----------------------------------------------------------------- |
+| `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
+| `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
+| `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
+| `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
+
+**Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
+
+| Candidate | Value |
+| ------------------- | ----- |
+| `severity_adjusted` | 10 |
+| `p95_dep_risk` | 12 |
+| `archived_floor` | 60 ← direct archived dep |
+| `cve_floor` | 40 |
+
+Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
+
+`MeanDepRiskScore` is still available as the top-level JSON field `mean_dep_risk_score` for trend lines, but is not the headline.
 
 Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL** 76–100.
 
@@ -136,6 +157,42 @@ Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL**
 | PDF                   | `--format pdf`             | Enterprise reports (built with UniPDF + UniChart)   |
 | CycloneDX SBOM        | `--format sbom-cyclonedx`  | Standard CycloneDX 1.5 software bill of materials   |
 | SPDX SBOM             | `--format sbom-spdx`       | SPDX 2.3 software bill of materials                 |
+
+The JSON output includes per-CVE reachability information. Each vulnerability
+entry carries a `reachability` field (`"called"`, `"imported"`, or
+`"required"`) that reflects how deeply the vulnerable symbol is reachable in
+your build's call graph — see
+[docs/scanners.md § Vulnerability reachability](docs/scanners.md#vulnerability-reachability)
+for the exact definitions and scoring effect.
+
+```json
+{
+  "module": "golang.org/x/net",
+  "version": "v0.35.0",
+  "risk_score": 72,
+  "risk_level": "HIGH",
+  "vulnerabilities": [
+    {
+      "id": "GO-2025-0001",
+      "aliases": ["CVE-2025-12345"],
+      "summary": "HTTP/2 request smuggling in golang.org/x/net/http2",
+      "severity": "HIGH",
+      "fixed_version": "v0.36.0",
+      "reachability": "called"
+    },
+    {
+      "id": "GO-2025-0002",
+      "aliases": ["CVE-2025-67890"],
+      "summary": "DoS in unused websocket handler",
+      "severity": "MEDIUM",
+      "fixed_version": "v0.36.0",
+      "reachability": "imported"
+    }
+  ]
+}
+```
+
+Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
 
 ## Policy engine
 
@@ -262,6 +319,13 @@ output unchanged.
 - Failures of the Trust Index call (network errors, non-200 responses) are
   surfaced as warnings; they do not abort the scan or alter risk scores
   derived from the in-tree scanners.
+- **SSRF defense.** `--trust-index-url` requires `https` for all non-loopback
+  hosts. RFC1918, link-local (`169.254/16`), and IPv6 ULA/link-local addresses
+  are rejected unless `--trust-index-allow-private` is set. Use
+  `--trust-index-allow-private` only when running a self-hosted unitrust on a
+  private network — never in public CI where the flag value could be
+  controlled by an attacker. A warning is printed before each POST so the
+  destination is always visible in logs.
 
 ## Architecture
 
@@ -305,6 +369,7 @@ The most frequently used flags:
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)              |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                      |
 | `--trust-index-url`     | unitrust endpoint for curated trust scores                    |
+| `--trust-index-allow-private` | Allow `--trust-index-url` to target RFC1918/link-local addresses (self-hosted) |
 | `--policy-preset`       | `strict` or `moderate`                                        |
 | `--policy`              | Path to a custom policy JSON file                             |
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
@@ -320,17 +385,60 @@ Environment variables:
 | `GITHUB_TOKEN`    | Higher GitHub API rate limits and access to private repositories |
 | `UNIDOC_LICENSE_API_KEY` | UniDoc license key (required for PDF report generation)   |
 
+## Privacy and network access
+
+`unisupply` collects **no telemetry**. It reads local files (`go.mod`,
+`go.sum`, `.github/workflows/*.yml`, `Dockerfile`, `Makefile`, shell scripts)
+and never uploads source code, scan results, or any project-identifying data.
+The only information transmitted are the minimal identifiers listed below —
+the same data already public in your `go.mod`.
+
+| Host | What is sent | When | Disable |
+| ---- | ------------ | ---- | ------- |
+| `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
+| `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
+| `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*) | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
+| `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV has no data | always runs (no-op if no CVE alias) |
+| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
+| `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
+| `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
+| `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
+| `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
+
+**Not contacted:** `sum.golang.org` (checksum verification is the user's responsibility at `go mod download` time, outside unisupply), `pkg.go.dev` (web UI only; not used as an API), no analytics beacon, crash reporter, or telemetry endpoint.
+
+**Trust Index disclosure.** The `--trust-index-url` call sends the full list
+of discovered module paths — equivalent to your published `go.mod`. No
+versions, no source. The feature is opt-in and off by default; see the
+[Trust Index section](#trust-index-integration) for full details.
+
+**Air-gapped environments.** Allow only the hosts above at your network
+boundary; each scanner degrades gracefully with explicit warnings when a
+host is unreachable.
+
 ## Documentation
 
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards and enforcement
 - [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog 1.1)
 - [RELEASING.md](RELEASING.md) — maintainer release procedure
 - [LICENSE](LICENSE) — Apache License 2.0
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+The `unisupply` CLI binary is Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
+
+**Library-use note:** The PDF report package (`pkg/report/pdf`) depends on
+[UniPDF v3](https://github.com/unidoc/unipdf/tree/v3), a commercial product governed by
+the [UniDoc EULA](https://unidoc.io/eula/). PDF generation requires a license
+key via `UNIDOC_LICENSE_API_KEY` — see [unidoc.io](https://unidoc.io) for licensing options. Importing `pkg/report/pdf` in your own
+application is subject to the UniDoc EULA; the rest of UniSupply carries no
+such restriction.
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for a full dependency
+license inventory.
+See [NOTICE](NOTICE) for required upstream attribution notices.
 
 Copyright © UniDoc ehf.

@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -703,7 +704,7 @@ jobs:
 	}
 
 	cs := NewCIScanner()
-	report, err := cs.ScanWorkflows(workflowDir)
+	report, err := cs.ScanWorkflows(context.Background(), workflowDir)
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
@@ -727,7 +728,7 @@ func TestCIScanner_ScanBuildFiles_Integration(t *testing.T) {
 	}
 
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles(tempDir)
+	findings := cs.ScanBuildFiles(context.Background(), tempDir)
 
 	found := false
 	for _, f := range findings {
@@ -907,7 +908,7 @@ func TestComputeOverallCIScore(t *testing.T) {
 // TestCIScanner_ScanBuildFiles_NonExistentFile tests handling of missing files.
 func TestCIScanner_ScanBuildFiles_NonExistentDir(t *testing.T) {
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles("/nonexistent/path")
+	findings := cs.ScanBuildFiles(context.Background(), "/nonexistent/path")
 
 	// Should return empty slice, not error
 	if len(findings) != 0 {
@@ -968,7 +969,7 @@ jobs:
 	}
 
 	cs := NewCIScanner()
-	report, err := cs.ScanWorkflows(workflowDir)
+	report, err := cs.ScanWorkflows(context.Background(), workflowDir)
 	if err != nil {
 		t.Fatalf("ScanWorkflows failed: %v", err)
 	}
@@ -1074,10 +1075,39 @@ func TestCIScanner_FindFiles_MultipleDockerfiles(t *testing.T) {
 	}
 
 	cs := NewCIScanner()
-	findings := cs.ScanBuildFiles(tempDir)
+	findings := cs.ScanBuildFiles(context.Background(), tempDir)
 
 	// Should find findings in all Dockerfile variants
 	if len(findings) < 3 {
 		t.Errorf("expected at least 3 findings for 3 Dockerfiles, got %d", len(findings))
+	}
+}
+
+// TestFindFiles_SkipsSymlink confirms findFiles never returns symlink paths.
+func TestFindFiles_SkipsSymlink(t *testing.T) {
+	dir := t.TempDir()
+
+	real := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(real, []byte("FROM alpine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dir, "Dockerfile.link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks not supported on this platform:", err)
+	}
+
+	got := findFiles(dir, "Dockerfile*")
+	for _, f := range got {
+		fi, err := os.Lstat(f)
+		if err != nil {
+			t.Fatalf("Lstat(%s): %v", f, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("findFiles returned symlink %s", f)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("expected 1 real file, got %d: %v", len(got), got)
 	}
 }

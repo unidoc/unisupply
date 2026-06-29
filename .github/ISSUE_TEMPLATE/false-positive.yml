@@ -1,0 +1,105 @@
+name: False positive
+description: A scanner flagged a dependency it should not have.
+title: "[False positive]: "
+labels: ["false-positive", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when unisupply reported a finding that you believe is
+        incorrect. Please include evidence — links to releases, maintainer
+        profiles, or CVE status — so we can verify and tune the scanner.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence — which scanner, which module, what it claimed.
+      placeholder: The maintainer scanner flagged golang.org/x/text as low bus factor.
+    validations:
+      required: true
+
+  - type: input
+    id: module
+    attributes:
+      label: Affected module
+      description: Full module path with version.
+      placeholder: "golang.org/x/text@v0.36.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scanner
+    attributes:
+      label: Scanner that fired
+      options:
+        - Vulnerability
+        - Maintenance
+        - Maintainer
+        - Typosquatting
+        - Resilience
+        - AI-generated
+        - CI/CD pipeline
+        - Build file
+        - Trust Index
+    validations:
+      required: true
+
+  - type: textarea
+    id: reported
+    attributes:
+      label: What unisupply reported
+      description: Paste the finding section from terminal or JSON output.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-incorrect
+    attributes:
+      label: Why you believe this is incorrect
+      description: Evidence — links to releases, maintainer profile, CVE status, etc.
+    validations:
+      required: true
+
+  - type: input
+    id: unisupply-version
+    attributes:
+      label: unisupply version
+      placeholder: "v0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: "go version go1.25.3 darwin/arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS / arch
+      options:
+        - Linux amd64
+        - Linux arm64
+        - macOS amd64
+        - macOS arm64
+        - Windows amd64
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have included the unisupply output for the affected module.
+          required: true
+        - label: I have provided evidence explaining why the finding is incorrect.
+          required: true

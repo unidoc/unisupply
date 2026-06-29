@@ -1,6 +1,11 @@
 package scanner
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,7 +54,7 @@ func TestMaintenanceScanner_ScanAll(t *testing.T) {
 		},
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Fatalf("ScanAll failed: %v", err)
 	}
@@ -91,7 +96,7 @@ func TestMaintenanceScanner_ScanAll_Empty(t *testing.T) {
 		Dependencies: make(map[string]*resolver.Dependency),
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Fatalf("ScanAll failed: %v", err)
 	}
@@ -134,14 +139,13 @@ func TestMaintenanceScanner_ScanAll_ErrorHandling(t *testing.T) {
 		},
 	}
 
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 
-	// First error is captured
+	// fetchVersionInfo fails for v0.error but fetchLatestVersion succeeds, so no error.
 	if err != nil {
 		t.Fatalf("ScanAll() unexpected error: %v", err)
 	}
 
-	// Should have results for at least one module
 	if len(results) != len(graph.Dependencies) {
 		t.Fatalf("ScanAll() returned %d results, want %d", len(results), len(graph.Dependencies))
 	}
@@ -208,7 +212,7 @@ func TestMaintenanceScanner_ScanAll_Concurrency(t *testing.T) {
 	}
 
 	// ScanAll uses a semaphore with 10 concurrent workers
-	results, err := ms.ScanAll(graph)
+	results, err := ms.ScanAll(context.Background(), graph)
 	if err != nil {
 		t.Logf("ScanAll returned error (first error captured): %v", err)
 	}
@@ -230,6 +234,57 @@ func TestMaintenanceScanner_ScanAll_Concurrency(t *testing.T) {
 			if info == nil {
 				t.Errorf("result for %q is nil", modPath)
 			}
+		}
+	}
+}
+
+// TestMaintenanceScanner_ScanAll_ErrorAggregation verifies that the "N of M" error
+// count is reported when multiple modules fail all proxy lookups.
+func TestMaintenanceScanner_ScanAll_ErrorAggregation(t *testing.T) {
+	// Server returns 500 for every request to a "fail-module" path, 200 otherwise.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "fail-module") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		info := proxyVersionInfo{
+			Version: "v1.0.0",
+			Time:    time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	ms := NewMaintenanceScanner(5 * time.Second)
+	ms.proxyURL = server.URL
+
+	graph := &resolver.Graph{
+		Root: "test/module",
+		Dependencies: map[string]*resolver.Dependency{
+			"github.com/fail-module/one":   {Module: parser.Module{Path: "github.com/fail-module/one", Version: "v1.0.0"}},
+			"github.com/fail-module/two":   {Module: parser.Module{Path: "github.com/fail-module/two", Version: "v1.0.0"}},
+			"github.com/fail-module/three": {Module: parser.Module{Path: "github.com/fail-module/three", Version: "v1.0.0"}},
+			"github.com/good/alpha":        {Module: parser.Module{Path: "github.com/good/alpha", Version: "v1.0.0"}},
+			"github.com/good/beta":         {Module: parser.Module{Path: "github.com/good/beta", Version: "v1.0.0"}},
+		},
+	}
+
+	results, err := ms.ScanAll(context.Background(), graph)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "3 of 5") {
+		t.Errorf("error = %q, want it to contain '3 of 5'", err.Error())
+	}
+
+	// Good modules still appear in results.
+	if len(results) != 2 {
+		t.Errorf("results count = %d, want 2 (good modules only)", len(results))
+	}
+	for _, path := range []string{"github.com/good/alpha", "github.com/good/beta"} {
+		if _, ok := results[path]; !ok {
+			t.Errorf("expected result for %q, not found", path)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -233,8 +234,8 @@ func TestNewMaintenanceScanner(t *testing.T) {
 		t.Error("client is nil")
 	}
 
-	if ms.client.Timeout != 10*time.Second {
-		t.Errorf("client timeout = %v, want 10s", ms.client.Timeout)
+	if ms.client.Timeout() != 10*time.Second {
+		t.Errorf("client timeout = %v, want 10s", ms.client.Timeout())
 	}
 
 	if ms.proxyURL != "https://proxy.golang.org" {
@@ -258,7 +259,7 @@ func TestMaintenanceScanner_CheckModule(t *testing.T) {
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	info, err := ms.checkModule("github.com/foo/bar", "v1.0.0")
+	info, err := ms.checkModule(context.Background(), "github.com/foo/bar", "v1.0.0")
 	if err != nil {
 		t.Fatalf("checkModule failed: %v", err)
 	}
@@ -297,7 +298,7 @@ func TestMaintenanceScanner_CheckModule_Deprecated(t *testing.T) {
 	ms.proxyURL = server.URL
 
 	// Use a module path that contains "deprecated"
-	info, err := ms.checkModule("github.com/foo/deprecated-lib", "v1.0.0")
+	info, err := ms.checkModule(context.Background(), "github.com/foo/deprecated-lib", "v1.0.0")
 	if err != nil {
 		t.Fatalf("checkModule failed: %v", err)
 	}
@@ -307,26 +308,26 @@ func TestMaintenanceScanner_CheckModule_Deprecated(t *testing.T) {
 	}
 }
 
-// TestMaintenanceScanner_CheckModule_ProxyError verifies handling of proxy errors.
-func TestMaintenanceScanner_CheckModule_ProxyError(t *testing.T) {
+// TestMaintenanceScanner_CheckModule_PartialProxyError verifies that a fetchVersionInfo
+// error is tolerated when fetchLatestVersion succeeds (partial data is returned, no error).
+func TestMaintenanceScanner_CheckModule_PartialProxyError(t *testing.T) {
 	server, _ := newMockProxy(t)
 	defer server.Close()
 
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	// Fetch a version that will trigger a 500 error
-	info, _ := ms.checkModule("github.com/foo/bar", "v0.error")
-
-	// Error handling: the scanner's fetchVersionInfo may return an error,
-	// but checkModule continues and returns a MaintenanceInfo with zero values.
-	if info == nil {
-		t.Fatalf("checkModule returned nil (should not panic, but returned MaintenanceInfo)")
+	// v0.error triggers a 500 on fetchVersionInfo, but @latest succeeds.
+	info, err := ms.checkModule(context.Background(), "github.com/foo/bar", "v0.error")
+	if err != nil {
+		t.Fatalf("checkModule returned unexpected error: %v", err)
 	}
-
-	// The info should have safe zero values
-	if info.MonthsSinceRelease < 0 {
-		t.Errorf("MonthsSinceRelease should be >= 0, got %d", info.MonthsSinceRelease)
+	if info == nil {
+		t.Fatalf("checkModule returned nil info")
+	}
+	// Latest version is still populated from the @latest endpoint.
+	if info.LatestVersion == "" {
+		t.Errorf("LatestVersion should be populated from @latest, got empty")
 	}
 }
 
@@ -341,7 +342,7 @@ func TestMaintenanceScanner_Cache(t *testing.T) {
 	modPath := "github.com/foo/bar"
 
 	// First call
-	_, err := ms.checkModule(modPath, "v1.0.0")
+	_, err := ms.checkModule(context.Background(), modPath, "v1.0.0")
 	if err != nil {
 		t.Fatalf("first checkModule failed: %v", err)
 	}
@@ -350,7 +351,7 @@ func TestMaintenanceScanner_Cache(t *testing.T) {
 	firstCallCount := counter.count(fmt.Sprintf("/%s/@latest", encodeModulePath(modPath)))
 
 	// Second call (should use cache)
-	_, err = ms.checkModule(modPath, "v1.0.0")
+	_, err = ms.checkModule(context.Background(), modPath, "v1.0.0")
 	if err != nil {
 		t.Fatalf("second checkModule failed: %v", err)
 	}
@@ -372,7 +373,7 @@ func TestMaintenanceScanner_FetchVersionInfo_Success(t *testing.T) {
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	versionInfo, err := ms.fetchVersionInfo("github.com/foo/bar", "v1.0.0")
+	versionInfo, err := ms.fetchVersionInfo(context.Background(), "github.com/foo/bar", "v1.0.0")
 	if err != nil {
 		t.Fatalf("fetchVersionInfo failed: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestMaintenanceScanner_FetchVersionInfo_ProxyError(t *testing.T) {
 	ms.proxyURL = server.URL
 
 	// Use a version that triggers a 500 error
-	versionInfo, err := ms.fetchVersionInfo("github.com/foo/bar", "v0.error")
+	versionInfo, err := ms.fetchVersionInfo(context.Background(), "github.com/foo/bar", "v0.error")
 	if err == nil {
 		t.Fatalf("fetchVersionInfo should return error for proxy error, got nil")
 	}
@@ -417,7 +418,7 @@ func TestMaintenanceScanner_FetchLatestVersion_Success(t *testing.T) {
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	version, timestamp := ms.fetchLatestVersion("github.com/foo/bar")
+	version, timestamp := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
 
 	if version != "v1.0.0" {
 		t.Errorf("version = %q, want %q", version, "v1.0.0")
@@ -436,7 +437,7 @@ func TestMaintenanceScanner_FetchLatestVersion_ProxyError(t *testing.T) {
 	ms := NewMaintenanceScanner(1 * time.Millisecond) // Very short timeout
 	ms.proxyURL = server.URL
 
-	version, timestamp := ms.fetchLatestVersion("github.com/foo/bar")
+	version, timestamp := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
 
 	if version != "" {
 		t.Errorf("version should be empty on error, got %q", version)
@@ -458,7 +459,7 @@ func TestMaintenanceScanner_CheckDeprecation_Deprecated(t *testing.T) {
 	info := &MaintenanceInfo{}
 
 	// Check a deprecated module path
-	ms.checkDeprecation("github.com/foo/deprecated-lib", info)
+	ms.checkDeprecation(context.Background(), "github.com/foo/deprecated-lib", info)
 
 	if !info.Deprecated {
 		t.Error("Deprecated = false, want true")
@@ -476,7 +477,7 @@ func TestMaintenanceScanner_CheckDeprecation_NotDeprecated(t *testing.T) {
 	info := &MaintenanceInfo{}
 
 	// Check a normal module path
-	ms.checkDeprecation("github.com/foo/bar", info)
+	ms.checkDeprecation(context.Background(), "github.com/foo/bar", info)
 
 	if info.Deprecated {
 		t.Error("Deprecated = true, want false")
@@ -494,7 +495,7 @@ func TestMaintenanceScanner_CheckDeprecation_ProxyError(t *testing.T) {
 	info := &MaintenanceInfo{}
 
 	// Should not panic
-	ms.checkDeprecation("github.com/foo/bar", info)
+	ms.checkDeprecation(context.Background(), "github.com/foo/bar", info)
 
 	// info should remain unchanged (not deprecated)
 	if info.Deprecated {
@@ -525,7 +526,7 @@ func TestMaintenanceScanner_ConcurrentChecks(t *testing.T) {
 		wg.Add(1)
 		go func(path string) {
 			defer wg.Done()
-			info, err := ms.checkModule(path, "v1.0.0")
+			info, err := ms.checkModule(context.Background(), path, "v1.0.0")
 			if err != nil {
 				t.Logf("checkModule(%q) error: %v", path, err)
 				return
@@ -564,8 +565,8 @@ func TestMaintenanceScanner_MultipleInstances(t *testing.T) {
 	ms2.proxyURL = server.URL
 
 	// Each should have independent caches
-	info1, _ := ms1.checkModule("github.com/foo/bar", "v1.0.0")
-	info2, _ := ms2.checkModule("github.com/foo/bar", "v1.0.0")
+	info1, _ := ms1.checkModule(context.Background(), "github.com/foo/bar", "v1.0.0")
+	info2, _ := ms2.checkModule(context.Background(), "github.com/foo/bar", "v1.0.0")
 
 	if info1 == nil || info2 == nil {
 		t.Fatalf("checkModule returned nil")
@@ -577,8 +578,8 @@ func TestMaintenanceScanner_MultipleInstances(t *testing.T) {
 	}
 
 	// Verify they have independent caches (calling again should hit cache in each)
-	_, _ = ms1.checkModule("github.com/foo/bar", "v1.0.0")
-	_, _ = ms2.checkModule("github.com/foo/bar", "v1.0.0")
+	_, _ = ms1.checkModule(context.Background(), "github.com/foo/bar", "v1.0.0")
+	_, _ = ms2.checkModule(context.Background(), "github.com/foo/bar", "v1.0.0")
 
 	// Both should still work correctly
 	if len(ms1.cache) == 0 || len(ms2.cache) == 0 {
@@ -598,7 +599,7 @@ func TestMaintenanceScanner_CacheSize(t *testing.T) {
 
 	// Call checkModule 5 times
 	for i := 0; i < 5; i++ {
-		_, _ = ms.checkModule(modPath, "v1.0.0")
+		_, _ = ms.checkModule(context.Background(), modPath, "v1.0.0")
 	}
 
 	// Cache should only have 1 entry

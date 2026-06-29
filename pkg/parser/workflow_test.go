@@ -464,7 +464,7 @@ jobs:
 		t.Fatalf("failed to write yaml: %v", err)
 	}
 
-	workflows, err := ParseAllWorkflows(tmpDir)
+	workflows, _, err := ParseAllWorkflows(tmpDir)
 	if err != nil {
 		t.Fatalf("ParseAllWorkflows() error: %v", err)
 	}
@@ -491,7 +491,7 @@ jobs:
 func TestParseAllWorkflows_EmptyDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	workflows, err := ParseAllWorkflows(tmpDir)
+	workflows, _, err := ParseAllWorkflows(tmpDir)
 	if err != nil {
 		t.Fatalf("ParseAllWorkflows() error: %v", err)
 	}
@@ -536,7 +536,7 @@ jobs:
 		t.Fatalf("failed to write invalid: %v", err)
 	}
 
-	workflows, err := ParseAllWorkflows(tmpDir)
+	workflows, _, err := ParseAllWorkflows(tmpDir)
 	if err != nil {
 		t.Fatalf("ParseAllWorkflows() error: %v", err)
 	}
@@ -547,6 +547,31 @@ jobs:
 
 	if workflows[0].Name != "Valid Workflow" {
 		t.Errorf("workflow name = %q, want %q", workflows[0].Name, "Valid Workflow")
+	}
+}
+
+// TestParseAllWorkflows_OversizedWarning confirms a >1 MB file is skipped and
+// its filename appears somewhere in the warning string (via the error from ParseWorkflow).
+func TestParseAllWorkflows_OversizedWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	big := filepath.Join(tmpDir, "big.yml")
+	if err := os.WriteFile(big, make([]byte, maxWorkflowSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workflows, warnings, err := ParseAllWorkflows(tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(workflows) != 0 {
+		t.Errorf("expected 0 workflows, got %d", len(workflows))
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected at least one warning for oversized file, got none")
+	}
+	if !containsSubstring(warnings[0], "big.yml") {
+		t.Errorf("warning %q does not mention the skipped file", warnings[0])
 	}
 }
 
@@ -1037,6 +1062,22 @@ func TestIsOfficialAction_Table(t *testing.T) {
 // contains is a helper to check if a string contains a substring.
 func contains(s, substr string) bool {
 	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsSubstring(s, substr)))
+}
+
+// TestParseWorkflow_Oversized confirms files larger than 1 MB are rejected.
+func TestParseWorkflow_Oversized(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "big.yml")
+
+	data := make([]byte, maxWorkflowSize+1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseWorkflow(path)
+	if err == nil {
+		t.Fatal("expected error for oversized file, got nil")
+	}
 }
 
 // containsSubstring checks if s contains substr as a substring.
