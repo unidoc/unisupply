@@ -364,6 +364,12 @@ func run(cfg *runConfig) error {
 	if stageReport {
 		rep.Stage(fmt.Sprintf("Generating %s report", cfg.format))
 	}
+	if cfg.format == "pdf" && os.Getenv("UNIDOC_LICENSE_API_KEY") == "" {
+		fmt.Fprintln(os.Stderr, "unisupply: --format pdf without UNIDOC_LICENSE_API_KEY generates a watermarked PDF.")
+		fmt.Fprintln(os.Stderr, "  With a key, PDF generation contacts cloud.unidoc.io (metered license API).")
+		fmt.Fprintln(os.Stderr, "  Use --format text for fully offline, keyless output.")
+	}
+
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
