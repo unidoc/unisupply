@@ -385,6 +385,37 @@ Environment variables:
 | `GITHUB_TOKEN`    | Higher GitHub API rate limits and access to private repositories |
 | `UNIDOC_LICENSE_API_KEY` | UniDoc license key (required for PDF report generation)   |
 
+## Privacy and network access
+
+`unisupply` collects **no telemetry**. It reads local files (`go.mod`,
+`go.sum`, `.github/workflows/*.yml`, `Dockerfile`, `Makefile`, shell scripts)
+and never uploads source code, scan results, or any project-identifying data.
+The only information transmitted are the minimal identifiers listed below —
+the same data already public in your `go.mod`.
+
+| Host | What is sent | When | Disable |
+| ---- | ------------ | ---- | ------- |
+| `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
+| `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
+| `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*) | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
+| `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV has no data | always runs (no-op if no CVE alias) |
+| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
+| `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
+| `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
+| `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
+| `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
+
+**Not contacted:** `sum.golang.org` (checksum verification is the user's responsibility at `go mod download` time, outside unisupply), `pkg.go.dev` (web UI only; not used as an API), no analytics beacon, crash reporter, or telemetry endpoint.
+
+**Trust Index disclosure.** The `--trust-index-url` call sends the full list
+of discovered module paths — equivalent to your published `go.mod`. No
+versions, no source. The feature is opt-in and off by default; see the
+[Trust Index section](#trust-index-integration) for full details.
+
+**Air-gapped environments.** Allow only the hosts above at your network
+boundary; each scanner degrades gracefully with explicit warnings when a
+host is unreachable.
+
 ## Documentation
 
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
