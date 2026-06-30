@@ -81,7 +81,7 @@ jobs:
       - name: Run unisupply CI/CD scan
         run: |
           set -euo pipefail
-          /tmp/unisupply ./ --scan-ci --no-color --policy-preset moderate
+          /tmp/unisupply ./ --scan-ci --no-color --policy .github/security-policy.json
 
       - name: List stale direct dependencies
         run: |

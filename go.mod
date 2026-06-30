@@ -24,7 +24,7 @@ require (
 	github.com/unidoc/unichart v0.4.0 // indirect
 	github.com/unidoc/unitype v0.5.1 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/image v0.39.0 // indirect
+	golang.org/x/image v0.43.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect

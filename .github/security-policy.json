@@ -1,0 +1,5 @@
+{
+  "max_risk_score": 85,
+  "max_overall_score": 70,
+  "no_critical_vulns": true
+}
