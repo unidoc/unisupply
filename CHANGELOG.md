@@ -7,28 +7,103 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
-## [0.5.0] - unreleased
+## [0.5.0] - 2026-06-29
 
-### Changed
+Compliance, hardening, and scoring-accuracy release. The focus is making
+unisupply trustworthy to adopt: honest output, safe runtime behavior, and a
+documented network contract.
 
-- Risk headline now uses `max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)` instead of
-  the mean. Projects with reachable CVEs or archived deps will see higher scores. Per-dep scores unchanged.
-- `owner_verified` in JSON output now reflects UniTrust's curated `maintainer_verified` when
-  `--trust-index-url` is used; falls back to GitHub org-type check otherwise. JSON consumers
-  that previously treated `owner_verified` as a synonym for `is_org` should update their logic.
-- Maintainer risk score for a single-maintainer module is reduced from 50 to 25 when UniTrust
-  has verified the maintainer's identity (`owner_verified: true`).
+### New Features
 
-### Security
-
-- **Trust Index SSRF defense.** `--trust-index-url` now requires `https` for all non-loopback hosts. RFC1918, link-local (`169.254/16`), and IPv6 ULA/link-local addresses are rejected at startup unless `--trust-index-allow-private` is explicitly set. The host is resolved at startup; any resolved IP in a denied range causes a fatal error. Resolved IPs are then **pinned at dial time** via a custom `DialContext`, preventing DNS-rebinding attacks where an attacker returns a safe IP at startup and a private/metadata IP at request time. A warning is printed before every bulk POST naming the exact URL and module count so the destination is visible in logs. Pass `--trust-index-allow-private` to use a self-hosted unitrust on a private network.
+- **Reachability-aware vulnerability scoring.** Imported-only CVEs are
+  downgraded one severity tier in the project headline; required-only CVEs are
+  downgraded two tiers. Per-dep weight multipliers: ×0.7 (imported), ×0.3
+  (required). Required-only CVEs no longer promote per-dep `risk_level`.
+- **Per-CVE `reachability` field** added to JSON output (`called` / `imported`
+  / `required`), enabling downstream tooling to filter by call-path evidence.
+- **`owner_verified` UniTrust enrichment.** When `--trust-index-url` is used,
+  `owner_verified` in JSON output now reflects UniTrust's curated
+  `maintainer_verified`; falls back to GitHub org-type check otherwise.
+  Consumers that treated `owner_verified` as a synonym for `is_org` should
+  update their logic.
+- **Graceful shutdown.** SIGTERM / SIGINT cancel all in-flight scanner requests
+  cleanly; no partial output is written on interrupt.
+- **GitHub rate-limit handling.** 403 / 429 responses from `api.github.com`
+  are treated as transient errors with jittered backoff; scans no longer abort
+  on rate-limit bursts.
+- **PDF-without-key notice.** When `--format pdf` is used without
+  `UNIDOC_LICENSE_API_KEY`, a message is printed to `stderr` naming
+  `cloud.unidoc.io` and suggesting `--format text` for fully offline, keyless
+  output. The generated PDF will include a watermark without a key.
 
 ### Improvements
 
-- Vulnerability scoring: imported-only CVEs are downgraded one severity tier in the project-level headline; required-only CVEs are downgraded two tiers. Per-dep weight multipliers ×0.7 (imported) and ×0.3 (required). Required-only CVEs no longer promote per-dep `risk_level`.
-- Per-CVE `reachability` field added to JSON output (`called` / `imported` / `required`).
-- Scoring iteration order is now deterministic — `worst_cve_id` is reproducible across same-input runs.
-- Maintainer scanner activity classification is quantized to scan-start UTC day; GitHub API responses are disk-cached with a 24h TTL.
+#### Scoring & output
+
+- Risk headline now uses `max(severity_adjusted, p95_dep_risk, archived_floor,
+  cve_floor)` instead of the mean. Projects with reachable CVEs or archived
+  deps will see higher scores; clean projects are unaffected.
+- Maintainer risk score for a single-maintainer module is reduced 50 → 25 when
+  UniTrust has verified the maintainer's identity (`owner_verified: true`).
+- Scoring iteration order is now deterministic — `worst_cve_id` is reproducible
+  across same-input runs.
+- Maintainer scanner activity classification quantized to scan-start UTC day;
+  GitHub API responses are disk-cached with a 24h TTL.
+
+#### Safety story & documentation
+
+- **Network transparency contract.** `README.md § Privacy and network access`
+  lists every external host unisupply may contact, what is sent, when, and how
+  to disable it — including `cloud.unidoc.io` (UniDoc metered license API,
+  PDF only). `SECURITY.md` carries a matching summary.
+- **EULA disclosure.** `README.md` now prominently notes that `pkg/report/pdf`
+  depends on UniPDF (commercial EULA); all other packages are Apache 2.0.
+- `go install` path documented in `README.md` with a pinned version example.
+
+#### License compliance
+
+- **`NOTICE` file** with Apache 2.0 §4(d) upstream attributions for `pflag`,
+  `x/term`, `x/vuln`, and `yaml.v3`. Added `THIRD_PARTY_LICENSES.md`
+  recording the audit date and per-dep findings.
+- **License drift CI job** (`license-check`). Runs `go-licenses csv` on every
+  PR; fails if any unlisted non-permissive transitive dep appears. `go-licenses`
+  is pinned to a known-good commit hash.
+- **Bats test suite** for `check-licenses.sh`, covering NOTICE-drift detection.
+- **`CODE_OF_CONDUCT.md`** (Contributor Covenant v2.1).
+
+#### Security controls & CI
+
+- **Trust Index SSRF defense.** `--trust-index-url` now requires `https` for
+  all non-loopback hosts. RFC1918, link-local (`169.254/16`), and IPv6
+  ULA/link-local addresses are rejected at startup unless
+  `--trust-index-allow-private` is explicitly set. Resolved IPs are pinned at
+  dial time via a custom `DialContext`, preventing DNS-rebinding attacks.
+- **CodeQL analysis** workflow (daily schedule + push/PR trigger).
+- **Dependabot** configuration for Go modules and GitHub Actions.
+- `goimports` pinned to `v0.44.0` in CI (was unpinned, flagged by own CI/CD
+  scanner).
+- GitHub Actions upgraded to Node 24 runtime.
+
+### Bug Fixes
+
+- Semver comparison bug in the vulnerability finder caused some CVE version
+  range checks to be evaluated incorrectly; govulncheck scan failures are now
+  surfaced rather than silently dropped.
+- Scan output accountability: archived dependency status is now backfilled from
+  the maintenance scanner into the per-dep record so text and JSON reports are
+  consistent.
+- Output accuracy: several per-dep fields (`is_archived`, `is_deprecated`,
+  `last_release`) were missing or stale in edge cases; corrected.
+- `MaintenanceScanner` error count now displayed as "N of M checked" instead of
+  a bare count, preventing confusion when some deps are unreachable.
+- Policy conflict: using both `--policy` and `--policy-preset` together now
+  prints a clear warning instead of silently preferring one.
+- Runtime safety: `govulncheck` scan failures, context cancellations, and
+  `go list` errors are propagated as diagnostics rather than swallowed.
+
+### Security Patches
+
+- `golang.org/x/vuln` bumped `v1.3.0 → v1.4.0`.
 
 ## [0.4.0] - 2026-05-08
 
@@ -132,5 +207,6 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/unidoc/unisupply/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/unidoc/unisupply/releases/tag/v0.4.0
