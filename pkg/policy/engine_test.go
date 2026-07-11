@@ -164,6 +164,9 @@ func TestDefaultStrictPolicy(t *testing.T) {
 	if !p.ForbidReplaceRedirect {
 		t.Errorf("ForbidReplaceRedirect: expected true")
 	}
+	if !p.RequireSumDBVerified {
+		t.Errorf("RequireSumDBVerified: expected true")
+	}
 }
 
 func TestDefaultModeratePolicy(t *testing.T) {
@@ -620,6 +623,64 @@ func TestEvaluate_ForbidReplaceRedirect_VersionPinPasses(t *testing.T) {
 
 	if !result.Pass {
 		t.Errorf("expected Pass=true (version-pin replace must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_RequireSumDBVerified_Mismatch verifies that a confirmed
+// `go mod verify` mismatch fails the require_sumdb_verified rule and the
+// violation carries the sumdb_mismatch finding detail.
+func TestEvaluate_RequireSumDBVerified_Mismatch(t *testing.T) {
+	p := &policy.Policy{RequireSumDBVerified: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		SumDBVerified: scanner.SumDBVerifiedFalse,
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "sumdb_mismatch",
+				Severity: scanner.IntegrityCritical,
+				Module:   "go.sum",
+				Detail:   "go mod verify failed: verifying gopkg.in/yaml.v3@v3.0.1/go.mod: checksum mismatch",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "require_sumdb_verified" {
+		t.Errorf("expected rule 'require_sumdb_verified', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Detail != input.IntegrityReport.Findings[0].Detail {
+		t.Errorf("expected violation to carry the sumdb_mismatch detail, got %q", result.Violations[0].Detail)
+	}
+}
+
+// TestEvaluate_RequireSumDBVerified_UnknownStatesPass verifies the
+// honest-UNKNOWN contract: "true", "offline", "skipped", and never-attempted
+// verification all pass — only a confirmed mismatch fails.
+func TestEvaluate_RequireSumDBVerified_UnknownStatesPass(t *testing.T) {
+	p := &policy.Policy{RequireSumDBVerified: true}
+
+	for _, state := range []string{
+		scanner.SumDBVerifiedTrue,
+		scanner.SumDBVerifiedOffline,
+		scanner.SumDBVerifiedSkipped,
+		"", // verification never attempted
+	} {
+		input := makeEvalInput(nil, 0)
+		input.IntegrityReport = &scanner.IntegrityReport{SumDBVerified: state}
+
+		result := p.Evaluate(input)
+
+		if !result.Pass {
+			t.Errorf("state %q: expected Pass=true (only a confirmed mismatch fails), got false: %+v", state, result.Violations)
+		}
 	}
 }
 

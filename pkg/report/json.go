@@ -260,11 +260,17 @@ type JSONCIFinding struct {
 	Remediation string `json:"remediation"`
 }
 
-// JSONIntegrityReport holds the go.mod replace/exclude directive audit.
+// JSONIntegrityReport holds the go.mod replace/exclude directive audit and
+// the go.sum verification outcome.
 type JSONIntegrityReport struct {
-	ReplaceCount  int                    `json:"replace_count"`
-	ExcludeCount  int                    `json:"exclude_count"`
-	RedirectCount int                    `json:"redirect_count"`
+	ReplaceCount  int `json:"replace_count"`
+	ExcludeCount  int `json:"exclude_count"`
+	RedirectCount int `json:"redirect_count"`
+	// SumDBVerified is the `go mod verify` outcome: "true", "false",
+	// "offline", or "skipped" — string-valued so honest-UNKNOWN states are
+	// distinguishable from a verified pass/fail. Omitted when verification
+	// was never attempted.
+	SumDBVerified string                 `json:"sumdb_verified,omitempty"`
 	Findings      []JSONIntegrityFinding `json:"findings,omitempty"`
 }
 
@@ -578,6 +584,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			ReplaceCount:  opts.IntegrityReport.ReplaceCount,
 			ExcludeCount:  opts.IntegrityReport.ExcludeCount,
 			RedirectCount: opts.IntegrityReport.RedirectCount,
+			SumDBVerified: opts.IntegrityReport.SumDBVerified,
 		}
 		for _, f := range opts.IntegrityReport.Findings {
 			integrityJSON.Findings = append(integrityJSON.Findings, JSONIntegrityFinding{

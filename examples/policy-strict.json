@@ -7,5 +7,6 @@
   "no_archived": true,
   "no_typosquatting": true,
   "max_ci_score": 50,
-  "forbid_replace_redirect": true
+  "forbid_replace_redirect": true,
+  "require_sumdb_verified": true
 }

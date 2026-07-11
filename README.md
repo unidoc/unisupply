@@ -14,7 +14,8 @@
 supply chain risk assessment. It runs ten focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
-file inspection, `go.mod` replace/exclude directive audit, and Trust Index
+file inspection, `go.mod`/`go.sum` integrity audit (replace/exclude
+directives, go.sum completeness, sumdb verification), and Trust Index
 lookup — combines the in-tree scanner signals into a weighted risk score per
 dependency, attaches the optional Trust Index data to each report alongside
 that score, and renders the result as a colored terminal
@@ -265,6 +266,9 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
+- `require_sumdb_verified` — fail when `go mod verify` reported a checksum
+  mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
+  (offline, no go.sum, toolchain unavailable) do not fail this rule.
 
 <!-- TODO (PR 08 / M6.5): once the examples/ directory lands, link to ready-to-copy policy files here. -->
 
@@ -367,7 +371,7 @@ CLI (pflag)
   │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
   │   ├── Build file scanning
-  │   ├── Integrity (go.mod replace/exclude audit)
+  │   ├── Integrity (go.mod/go.sum audit, go mod verify)
   │   └── Trust Index lookup (unitrust, optional)
   ├── Compute risk scores             pkg/scorer/
   ├── Evaluate org policies           pkg/policy/
@@ -432,7 +436,7 @@ the same data already public in your `go.mod`.
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
 
-**Not contacted:** `sum.golang.org` (checksum verification is the user's responsibility at `go mod download` time, outside unisupply), `pkg.go.dev` (web UI only; not used as an API), no analytics beacon, crash reporter, or telemetry endpoint.
+**Not contacted directly:** `sum.golang.org` and `pkg.go.dev` are never called by unisupply itself; no analytics beacon, crash reporter, or telemetry endpoint. Note that the Integrity scanner shells out to `go mod verify`, which checks the **local module cache** against go.sum — normally a fully offline operation. On a cold cache the `go` toolchain may fetch missing module metadata through your configured `GOPROXY` and verify it against `sum.golang.org`, exactly as any `go build` would; `GOPRIVATE`/`GONOSUMDB` are honored as usual. unisupply adds no network host beyond what the `go` toolchain itself contacts.
 
 **Trust Index disclosure.** The `--trust-index-url` call sends the full list
 of discovered module paths — equivalent to your published `go.mod`. No

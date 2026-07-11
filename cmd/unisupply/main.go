@@ -207,7 +207,8 @@ func run(cfg *runConfig) error {
 	// the per-module classification feeds the scorer below, and the report is
 	// wired into the text/JSON/PDF output next to the CI/CD report.
 	rep.Stage("Auditing go.mod directives")
-	integrityReport, integrityClasses := scanner.NewIntegrityScanner().ScanDirectives(gomod)
+	integrityScanner := scanner.NewIntegrityScanner()
+	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
 	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
 
 	rep.Stage("Resolving dependency graph")
@@ -224,6 +225,14 @@ func run(cfg *runConfig) error {
 		fmt.Fprintln(os.Stderr, "No dependencies found.")
 		return nil
 	}
+
+	// go.sum presence/completeness (offline file logic, needs the resolved
+	// graph) and sumdb verification via `go mod verify` (local module cache
+	// against go.sum; the toolchain handles GOPRIVATE/GONOSUMDB itself).
+	rep.Stage("Verifying go.sum (go mod verify)")
+	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
+	integrityScanner.VerifySumDB(ctx, gomodPath, integrityReport)
+	rep.Done("sumdb: %s", integrityReport.SumDBVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
@@ -292,17 +301,18 @@ func run(cfg *runConfig) error {
 
 	rep.Stage("Computing risk scores")
 	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:       graph,
-		Vulns:       vulns,
-		Maintenance: maintenance,
-		Maintainers: maintainers,
-		Typosquats:  typosquats,
-		Resilience:  resilience,
-		AIGenRisks:  aiGenRisks,
-		TrustIndex:  trustIndex,
-		Integrity:   integrityClasses,
-		DebugMode:   cfg.debugScoring,
-		Now:         scanStart,
+		Graph:         graph,
+		Vulns:         vulns,
+		Maintenance:   maintenance,
+		Maintainers:   maintainers,
+		Typosquats:    typosquats,
+		Resilience:    resilience,
+		AIGenRisks:    aiGenRisks,
+		TrustIndex:    trustIndex,
+		Integrity:     integrityClasses,
+		SumDBMismatch: integrityReport.SumDBVerified == scanner.SumDBVerifiedFalse,
+		DebugMode:     cfg.debugScoring,
+		Now:           scanStart,
 	})
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	rep.Done("")
