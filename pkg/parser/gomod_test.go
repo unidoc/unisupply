@@ -237,6 +237,70 @@ replace github.com/foo/bar => ../local/path
 	}
 }
 
+// TestParseGoMod_SingleLineExclude tests parsing a single-line exclude directive.
+func TestParseGoMod_SingleLineExclude(t *testing.T) {
+	tmpDir := t.TempDir()
+	gomodPath := filepath.Join(tmpDir, "go.mod")
+
+	content := `module github.com/test
+exclude github.com/foo/bar v1.2.0
+`
+
+	if err := writeFile(gomodPath, content); err != nil {
+		t.Fatalf("failed to write test go.mod: %v", err)
+	}
+
+	gm, err := ParseGoMod(gomodPath)
+	if err != nil {
+		t.Fatalf("ParseGoMod failed: %v", err)
+	}
+
+	if len(gm.Excludes) != 1 {
+		t.Fatalf("Excludes length = %d, want 1", len(gm.Excludes))
+	}
+
+	if gm.Excludes[0].Path != "github.com/foo/bar" {
+		t.Errorf("Excludes[0].Path = %q, want %q", gm.Excludes[0].Path, "github.com/foo/bar")
+	}
+	if gm.Excludes[0].Version != "v1.2.0" {
+		t.Errorf("Excludes[0].Version = %q, want %q", gm.Excludes[0].Version, "v1.2.0")
+	}
+}
+
+// TestParseGoMod_ExcludeBlock tests parsing a block-form exclude directive.
+func TestParseGoMod_ExcludeBlock(t *testing.T) {
+	tmpDir := t.TempDir()
+	gomodPath := filepath.Join(tmpDir, "go.mod")
+
+	content := `module github.com/test
+
+exclude (
+	github.com/foo/bar v1.2.0
+	github.com/baz/qux v3.0.0
+)
+`
+
+	if err := writeFile(gomodPath, content); err != nil {
+		t.Fatalf("failed to write test go.mod: %v", err)
+	}
+
+	gm, err := ParseGoMod(gomodPath)
+	if err != nil {
+		t.Fatalf("ParseGoMod failed: %v", err)
+	}
+
+	if len(gm.Excludes) != 2 {
+		t.Fatalf("Excludes length = %d, want 2", len(gm.Excludes))
+	}
+
+	if gm.Excludes[0].Path != "github.com/foo/bar" || gm.Excludes[0].Version != "v1.2.0" {
+		t.Errorf("Excludes[0] = %+v, want {github.com/foo/bar v1.2.0}", gm.Excludes[0])
+	}
+	if gm.Excludes[1].Path != "github.com/baz/qux" || gm.Excludes[1].Version != "v3.0.0" {
+		t.Errorf("Excludes[1] = %+v, want {github.com/baz/qux v3.0.0}", gm.Excludes[1])
+	}
+}
+
 // TestParseGoMod_IndirectFlag tests that the indirect flag is properly parsed.
 func TestParseGoMod_IndirectFlag(t *testing.T) {
 	tmpDir := t.TempDir()

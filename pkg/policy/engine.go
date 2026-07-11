@@ -57,6 +57,17 @@ type Policy struct {
 
 	// MaxCIScore fails if the CI/CD risk score exceeds this.
 	MaxCIScore *int `json:"max_ci_score,omitempty"`
+
+	// ForbidReplaceRedirect fails if any go.mod replace directive redirects a
+	// module to a different module path (fork/private-mirror redirect).
+	// Version-pin and local-path replaces are not affected by this rule.
+	//
+	// Deliberate asymmetry with the integrity_floor headline candidate (which
+	// skips test-only dependencies): this policy check fires on a redirect
+	// even when the replaced module is test-only, because test-time code still
+	// executes in CI (with access to CI secrets) and a hijacked test-only
+	// dependency is not a safe blind spot.
+	ForbidReplaceRedirect bool `json:"forbid_replace_redirect,omitempty"`
 }
 
 // Violation represents a single policy violation.
@@ -90,10 +101,11 @@ func LoadPolicy(path string) (*Policy, error) {
 
 // EvalInput bundles all data needed for policy evaluation.
 type EvalInput struct {
-	ProjectScore *scorer.ProjectScore
-	Maintainers  map[string]*scanner.MaintainerInfo
-	Typosquats   map[string]*scanner.TyposquatResult
-	CIReport     *scanner.CIReport
+	ProjectScore    *scorer.ProjectScore
+	Maintainers     map[string]*scanner.MaintainerInfo
+	Typosquats      map[string]*scanner.TyposquatResult
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
 }
 
 // Evaluate checks all dependencies against the policy and returns violations.
@@ -207,6 +219,17 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 	}
 
+	// No replace-redirect: fail on any HIGH-severity replace directive
+	// (redirect to a different module path). Version-pin and local-path
+	// replaces are not affected.
+	if p.ForbidReplaceRedirect && input.IntegrityReport != nil {
+		for _, f := range input.IntegrityReport.Findings {
+			if f.Severity == scanner.IntegrityHigh {
+				result.addError("forbid_replace_redirect", f.Module, f.Detail)
+			}
+		}
+	}
+
 	return result
 }
 
@@ -265,14 +288,15 @@ func DefaultStrictPolicy() *Policy {
 	maxCI := 50
 
 	return &Policy{
-		MaxRiskScore:         &maxRisk,
-		MaxOverallScore:      &maxOverall,
-		NoCriticalVulns:      true,
-		NoSingleMaintainer:   true,
-		NoUnmaintainedMonths: &maxUnmaintained,
-		NoArchived:           true,
-		NoTyposquatting:      true,
-		MaxCIScore:           &maxCI,
+		MaxRiskScore:          &maxRisk,
+		MaxOverallScore:       &maxOverall,
+		NoCriticalVulns:       true,
+		NoSingleMaintainer:    true,
+		NoUnmaintainedMonths:  &maxUnmaintained,
+		NoArchived:            true,
+		NoTyposquatting:       true,
+		MaxCIScore:            &maxCI,
+		ForbidReplaceRedirect: true,
 	}
 }
 

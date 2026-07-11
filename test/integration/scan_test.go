@@ -76,6 +76,7 @@ func emptyScoreInput(g *resolver.Graph) scorer.ScoreInput {
 		Resilience:  map[string]*scanner.ResilienceInfo{},
 		AIGenRisks:  map[string]*scanner.AIGenRisk{},
 		TrustIndex:  map[string]*scanner.TrustIndexEntry{},
+		Integrity:   map[string]scanner.IntegrityRiskLevel{},
 	}
 }
 
@@ -203,6 +204,72 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 			}
 			if dep.RiskScore != want {
 				t.Errorf("run %d: risk score for %s is %d, baseline %d", i, dep.Module, dep.RiskScore, want)
+			}
+		}
+	}
+}
+
+// TestFullPipeline_ReplaceDirectives exercises the replace.mod fixture, which
+// contains all three replace classes (version-pin, local-path, redirect) plus
+// one exclude directive. It is fully offline — classification is pure go.mod
+// analysis, no network calls.
+func TestFullPipeline_ReplaceDirectives(t *testing.T) {
+	gomodPath := testdataPath("gomod", "replace.mod")
+
+	gomod, err := parser.ParseGoMod(gomodPath)
+	if err != nil {
+		t.Fatalf("ParseGoMod failed: %v", err)
+	}
+
+	report, classes := scanner.NewIntegrityScanner().ScanDirectives(gomod)
+
+	if report.ReplaceCount != 3 {
+		t.Errorf("ReplaceCount = %d, want 3", report.ReplaceCount)
+	}
+	if report.ExcludeCount != 1 {
+		t.Errorf("ExcludeCount = %d, want 1", report.ExcludeCount)
+	}
+	if report.RedirectCount != 1 {
+		t.Errorf("RedirectCount = %d, want 1", report.RedirectCount)
+	}
+
+	wantClasses := map[string]scanner.IntegrityRiskLevel{
+		"github.com/foo/pinned":     scanner.IntegrityLow,
+		"github.com/foo/local":      scanner.IntegrityMedium,
+		"github.com/foo/redirected": scanner.IntegrityHigh,
+	}
+	for mod, want := range wantClasses {
+		if got := classes[mod]; got != want {
+			t.Errorf("classes[%q] = %q, want %q", mod, got, want)
+		}
+	}
+
+	graph, _, err := resolver.Resolve(context.Background(), gomodPath, directOnly)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	input := emptyScoreInput(graph)
+	input.Integrity = classes
+	ps := scorer.ScoreAll(input)
+
+	if ps.HeadlineDriver != "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, want integrity_floor (redirect to a different module)", ps.HeadlineDriver)
+	}
+	if ps.OverallLevel != scorer.RiskHigh {
+		t.Errorf("OverallLevel = %q, want HIGH", ps.OverallLevel)
+	}
+
+	for _, ds := range ps.Dependencies {
+		if ds.Module == "github.com/foo/redirected" || ds.Module == "github.com/foo/local" || ds.Module == "github.com/foo/pinned" {
+			found := false
+			for _, rf := range ds.RiskFactors {
+				if rf == "replaced" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s: RiskFactors = %v, want to contain %q", ds.Module, ds.RiskFactors, "replaced")
 			}
 		}
 	}

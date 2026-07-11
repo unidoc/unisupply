@@ -5,7 +5,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-<!-- Add new entries here as they land on `development`. -->
+### New Features
+
+- **`go.mod` replace/exclude directive audit (Integrity scanner).** Every
+  `replace` directive is classified as a version-pin (LOW), local-path
+  override (MEDIUM), or redirect to a different module (HIGH); `exclude`
+  directives render as INFO findings. A HIGH-severity redirect floors the
+  project headline into the HIGH band (`integrity_floor` candidate) and adds
+  a `replaced` risk factor to the affected dependency. Fully offline — no
+  network calls. New `forbid_replace_redirect` policy rule (enabled in the
+  strict preset) fails CI when a redirect replace is present.
 
 ### New Features
 

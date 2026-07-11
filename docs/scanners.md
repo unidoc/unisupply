@@ -18,6 +18,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.{yml,yaml}` |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
+| Integrity        | `go.mod` `replace`/`exclude` directive audit               | `go.mod` (offline)          |
 
 The CI/CD and Build-files scanners are off by default; enable them with
 `--scan-workflows` (workflow files `*.yml` and `*.yaml` only) or `--scan-ci`
@@ -38,6 +39,7 @@ Risk Score (0–100) =
   + Typosquat Penalty      (0–20)  // typosquat.Confidence × 20
   + AI-Gen Penalty         (0–15)  // aiGenRisk.Score × 0.15
   + Low-Resilience Penalty (0–6)   // (30 − resilience.Score) × 0.2 when score < 30
+  + Replace Penalty        (0–20)  // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
 ```
 
 Weights are defined in `pkg/scorer/risk.go` (`Weight*` constants). The final
@@ -213,6 +215,38 @@ namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,
 `go.opentelemetry.io/`, `github.com/golang/`, `github.com/google/`,
 `github.com/googleapis/`, etc.) — these projects use v0.x and centralized
 maintainership by design, not neglect.
+
+## Integrity
+
+The Integrity scanner audits `go.mod` `replace` and `exclude` directives —
+pure offline analysis, no network calls. Every `replace` directive is
+classified by comparing the replacement module path against the original:
+
+| Class                 | Condition                                                                                     | Severity | Score effect                                    |
+| --------------------- | ---------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------ |
+| Version-pin           | Replacement path equals the original path                                                       | LOW      | None — expected, pins a specific version          |
+| Local-path            | Replacement path has a `./`/`../` prefix, or is an OS-absolute filesystem path                   | MEDIUM   | +8 per-dependency penalty                         |
+| Major-version redirect | Replacement path is the original module gaining or swapping a `/vN` (N ≥ 2) semantic-import-versioning suffix (same underlying module) | MEDIUM   | +8 per-dependency penalty                         |
+| Redirect              | Replacement path points to a genuinely different module                                         | HIGH     | +20 per-dependency penalty; floors the project headline to HIGH (51, or 60 for a direct dependency) |
+
+Every `exclude` directive renders as an INFO finding for transparency — it
+carries no score effect. A dependency with any replace directive gets the
+`replaced` risk factor regardless of class; only MEDIUM/HIGH classes add to
+the score.
+
+A HIGH-severity (redirect) replace on a non-test-only dependency is the
+`integrity_floor` headline candidate — it floors the project's overall score
+into the HIGH band even when no other signal would. LOW and MEDIUM replace
+classes never move the headline; this is deliberate — version pins, local
+development overrides, and same-module major-version redirects are common and
+must not trigger noisy false alarms.
+
+Enable the `forbid_replace_redirect` policy rule (on by default in the strict
+preset) to fail CI when a redirect replace is present. Note the deliberate
+asymmetry with the headline: the `integrity_floor` headline candidate skips
+test-only dependencies, but the `forbid_replace_redirect` policy rule does
+not — test-time code still executes in CI (with access to CI secrets), so a
+hijacked test-only dependency is not a safe blind spot for policy purposes.
 
 ## Risk bands
 

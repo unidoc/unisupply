@@ -11,12 +11,13 @@
 ## What it does
 
 `unisupply` analyzes a Go project's full module dependency chain and produces a
-supply chain risk assessment. It runs nine focused scanners — vulnerability
+supply chain risk assessment. It runs ten focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
-file inspection, and Trust Index lookup — combines the in-tree scanner signals
-into a weighted risk score per dependency, attaches the optional Trust Index
-data to each report alongside that score, and renders the result as a colored terminal
+file inspection, `go.mod` replace/exclude directive audit, and Trust Index
+lookup — combines the in-tree scanner signals into a weighted risk score per
+dependency, attaches the optional Trust Index data to each report alongside
+that score, and renders the result as a colored terminal
 summary, machine-readable JSON, an enterprise PDF report, or a CycloneDX /
 SPDX SBOM. A built-in policy engine fails CI on configurable thresholds
 (critical vulns, max age, blocked modules, unpinned actions, ...).
@@ -104,6 +105,7 @@ path that pulled the module in.
 | AI-Generated     | Fresh modules, few releases, generic names (heuristics) | Module metadata            |
 | CI/CD            | Action pinning, permissions, secret exposure            | `.github/workflows/*.yml`  |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns         | Dockerfile, Makefile, *.sh |
+| Integrity        | `go.mod` `replace`/`exclude` directive audit            | `go.mod` (offline)         |
 | Trust Index      | Curated trust scores                                    | unitrust API (optional)    |
 
 The risk score is a weighted composite per dependency:
@@ -118,12 +120,13 @@ Per-Dep Risk Score (0–100) =
   + Typosquat Penalty      (0–20)
   + AI-Gen Penalty         (0–15)
   + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
+  + Replace Penalty        (0–20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
 ```
 
-**Project headline score** is the maximum of four candidates — it never dilutes a single bad actor into a healthy-looking average:
+**Project headline score** is the maximum of five candidates — it never dilutes a single bad actor into a healthy-looking average:
 
 ```
-Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor)
 ```
 
 | Candidate | Description |
@@ -132,6 +135,7 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 | `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
 | `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
 | `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
+| `integrity_floor` | HIGH floor (51) when any transitive dep has a `replace` directive redirecting to a different module; 60 for a direct dep |
 
 **Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
 
@@ -354,7 +358,7 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 9 security scanners        pkg/scanner/
+  ├── Run 10 security scanners       pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
@@ -362,8 +366,9 @@ CLI (pflag)
   │   ├── Resilience scoring
   │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
-  │   ├── Trust Index lookup (unitrust, optional)
-  │   └── Build file scanning
+  │   ├── Build file scanning
+  │   ├── Integrity (go.mod replace/exclude audit)
+  │   └── Trust Index lookup (unitrust, optional)
   ├── Compute risk scores             pkg/scorer/
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/

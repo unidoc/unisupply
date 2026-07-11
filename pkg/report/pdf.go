@@ -21,10 +21,11 @@ import (
 
 // PDFOptions configures PDF report generation.
 type PDFOptions struct {
-	OutputPath string
-	GoVersion  string
-	CIReport   *scanner.CIReport
-	Takeovers  []*scanner.MaintainerInfo
+	OutputPath      string
+	GoVersion       string
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
@@ -76,6 +77,11 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 	if opts.CIReport != nil {
 		rep.Step("CI/CD section")
 		writeCISection(c, opts.CIReport, helvetica, helveticaBold)
+	}
+
+	if opts.IntegrityReport != nil {
+		rep.Step("module directives section")
+		writeIntegritySection(c, opts.IntegrityReport, helvetica, helveticaBold)
 	}
 
 	if len(opts.Takeovers) > 0 {
@@ -483,6 +489,40 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 		ch.Style.FontSize = 10
 		_ = c.Draw(p)
 	}
+}
+
+func writeIntegritySection(c *creator.Creator, ir *scanner.IntegrityReport, regular, bold *model.PdfFont) {
+	c.NewPage()
+	heading(c, "Module Directives", bold)
+
+	stats := c.NewStyledParagraph()
+	stats.SetLineHeight(1.6)
+	addBullet(stats, fmt.Sprintf("Replace directives: %d (%d redirect to a different module)", ir.ReplaceCount, ir.RedirectCount), regular)
+	addBullet(stats, fmt.Sprintf("Exclude directives: %d", ir.ExcludeCount), regular)
+	_ = c.Draw(stats)
+
+	if len(ir.Findings) == 0 {
+		p := c.NewStyledParagraph()
+		ch := p.Append("No findings")
+		ch.Style.Font = regular
+		ch.Style.FontSize = 10
+		_ = c.Draw(p)
+		return
+	}
+
+	table := c.NewTable(3)
+	table.SetMargins(0, 0, 5, 10)
+	if err := table.SetColumnWidths(0.15, 0.55, 0.3); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
+	addTableHeader(c, table, []string{"Severity", "Detail", "Remediation"}, bold)
+
+	for _, f := range ir.Findings {
+		addTableRow3(c, table, string(f.Severity), f.Detail, f.Remediation, regular)
+	}
+
+	_ = c.Draw(table)
 }
 
 func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInfo, regular, bold *model.PdfFont) {

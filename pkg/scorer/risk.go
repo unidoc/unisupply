@@ -33,9 +33,10 @@ const (
 )
 
 // HeadlineCandidate records one axis that competes to become the headline score.
-// The four candidates are: severity_adjusted, p95_dep_risk, archived_floor, cve_floor.
+// The five candidates are: severity_adjusted, p95_dep_risk, archived_floor,
+// cve_floor, integrity_floor.
 type HeadlineCandidate struct {
-	Name       string  `json:"name"`        // "severity_adjusted" | "p95_dep_risk" | "archived_floor" | "cve_floor"
+	Name       string  `json:"name"`        // "severity_adjusted" | "p95_dep_risk" | "archived_floor" | "cve_floor" | "integrity_floor"
 	Score      float64 `json:"score"`       // raw candidate value (0–100)
 	DrivingDep string  `json:"driving_dep"` // module path of the dep that set the score, e.g. "github.com/gorilla/i18n"
 	Reason     string  `json:"reason"`      // human-readable explanation, e.g. "archived 129 months"
@@ -58,6 +59,12 @@ type DependencyScore struct {
 	TrustIndex     *scanner.TrustIndexEntry `json:"trust_index,omitempty"`
 	RiskFactors    []string                 `json:"risk_factors,omitempty"`
 
+	// ReplaceClass is the severity of this dependency's go.mod replace
+	// directive ("LOW" version-pin, "MEDIUM" local-path, "HIGH" redirect to a
+	// different module), or empty when the dependency is not replaced. See
+	// scanner.IntegrityScanner.ScanDirectives.
+	ReplaceClass scanner.IntegrityRiskLevel `json:"replace_class,omitempty"`
+
 	// IsTestOnly carries the three-state test-only classification from the
 	// resolver. See resolver.Dependency.IsTestOnly for the full semantics.
 	// Task 10's discount logic MUST only apply the discount when this is &true
@@ -75,6 +82,7 @@ type DependencyScore struct {
 	ResilienceBonus float64 `json:"-"`
 	AIGenBonus      float64 `json:"-"`
 	TyposquatBonus  float64 `json:"-"`
+	IntegrityBonus  float64 `json:"-"`
 	// FlooredTo is non-zero when severityFloor overrode the weighted total.
 	// The gap is NOT additive — rendered as "floored→N".
 	FlooredTo int `json:"-"`
@@ -87,12 +95,12 @@ type DependencyScore struct {
 
 // ProjectScore holds the overall project risk assessment.
 //
-// The headline score is the maximum of four candidates:
+// The headline score is the maximum of five candidates:
 //
-//	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+//	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor)
 //
 // MeanDepRiskScore is retained as a non-normative portfolio-wide signal.
-// HeadlineDriver records which of the four candidates won.
+// HeadlineDriver records which of the five candidates won.
 type ProjectScore struct {
 	OverallScore      int                `json:"overall_risk_score"`
 	OverallLevel      RiskLevel          `json:"overall_risk_level"`
@@ -116,8 +124,8 @@ type ProjectScore struct {
 	SeverityAdjustedVulnScore int `json:"severity_adjusted_vuln_score"`
 
 	// HeadlineDriver is one of "severity_adjusted", "p95_dep_risk", "archived_floor",
-	// "cve_floor" — which of the four candidates produced OverallScore.
-	// Empty when there are no dependencies.
+	// "cve_floor", "integrity_floor" — which of the five candidates produced
+	// OverallScore. Empty when there are no dependencies.
 	HeadlineDriver string `json:"headline_driver,omitempty"`
 
 	// HeadlineCandidate records the winning candidate's full detail (score, driving dep, reason).
@@ -252,6 +260,11 @@ type ScoreInput struct {
 	AIGenRisks  map[string]*scanner.AIGenRisk
 	TrustIndex  map[string]*scanner.TrustIndexEntry
 
+	// Integrity maps a module path to its go.mod replace directive severity
+	// (see scanner.IntegrityScanner.ScanDirectives). A missing entry means the
+	// dependency is not replaced.
+	Integrity map[string]scanner.IntegrityRiskLevel
+
 	// DebugMode populates ps.DebugScoring with diagnostic data when true.
 	// Wired to the --debug-scoring CLI flag.
 	DebugMode bool
@@ -304,6 +317,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 			input.Resilience[dep.Module.Path],
 			input.AIGenRisks[dep.Module.Path],
 			input.TrustIndex[dep.Module.Path],
+			input.Integrity[dep.Module.Path],
 			now,
 		)
 		ps.Dependencies = append(ps.Dependencies, ds)
@@ -346,10 +360,10 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		)
 	}
 
-	// Four-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
+	// Five-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor).
 	//
 	// MeanDepRiskScore is non-normative — retained for dashboards/trend lines.
-	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
+	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor).
 	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
 
 	sevResult := severityAdjustedVulnScore(now, ps.Dependencies)
@@ -377,6 +391,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		p95DepRiskCandidate(ps.Dependencies),
 		archivedFloor(ps.Dependencies),
 		cveFloor(ps.Dependencies),
+		integrityFloor(ps.Dependencies),
 	}
 	winner := selectHeadline(candidates)
 	ps.HeadlineCandidate = &winner
@@ -420,6 +435,7 @@ func scoreDependency(
 	resilience *scanner.ResilienceInfo,
 	aiGenRisk *scanner.AIGenRisk,
 	trustIndex *scanner.TrustIndexEntry,
+	integrityClass scanner.IntegrityRiskLevel,
 	now time.Time,
 ) *DependencyScore {
 	// Backfill Maintenance.Archived from the maintainer scanner before building
@@ -448,6 +464,7 @@ func scoreDependency(
 		Resilience:     resilience,
 		AIGenRisk:      aiGenRisk,
 		TrustIndex:     trustIndex,
+		ReplaceClass:   integrityClass,
 	}
 
 	// 1. Vulnerability score (0-100).
@@ -521,6 +538,21 @@ func scoreDependency(
 		ds.RiskFactors = append(ds.RiskFactors, "low_resilience")
 	}
 
+	// Replace directive: any replace (version-pin, local-path, or redirect)
+	// surfaces as a risk factor for transparency. Only the MEDIUM (local-path)
+	// and HIGH (redirect) classes add to the score — a version-pin replace is
+	// expected and carries no bonus.
+	integrityBonus := 0.0
+	if dep.Replaced {
+		ds.RiskFactors = append(ds.RiskFactors, "replaced")
+		switch integrityClass {
+		case scanner.IntegrityHigh:
+			integrityBonus = 20
+		case scanner.IntegrityMedium:
+			integrityBonus = 8
+		}
+	}
+
 	// Weighted total.
 	//
 	// Normal case: the five weights sum to 1.0 (0.40 + 0.25 + 0.15 + 0.10 + 0.10).
@@ -554,11 +586,13 @@ func scoreDependency(
 	ds.TyposquatBonus = typosquatBonus
 	ds.AIGenBonus = aiGenBonus
 	ds.ResilienceBonus = resilienceBonus
+	ds.IntegrityBonus = integrityBonus
 
 	weighted := weightedBase/denominator +
 		typosquatBonus +
 		aiGenBonus +
-		resilienceBonus
+		resilienceBonus +
+		integrityBonus
 
 	ds.RiskScore = int(math.Round(weighted))
 
@@ -1622,6 +1656,43 @@ func cveFloor(deps []*DependencyScore) HeadlineCandidate {
 				best.DrivingDep = ds.Module
 				best.Reason = fmt.Sprintf("%s %s %s", reach, tier, v.ID)
 			}
+		}
+	}
+
+	return best
+}
+
+// integrityFloor floors the headline to HIGH when any non-test-only dep in the
+// graph carries a HIGH-severity replace directive (a redirect to a different
+// module path — see scanner.IntegrityScanner.ScanDirectives).
+//
+// LOW (version-pin) and MEDIUM (local-path) replace classes must never drive
+// the headline — only a redirect to a different module signals a possible
+// fork hijack or private-mirror compromise. HIGH band starts at 51
+// (levelFromScore), so all HIGH floors use 51, not 50; direct dependency
+// escalates to 60, mirroring archivedFloor.
+func integrityFloor(deps []*DependencyScore) HeadlineCandidate {
+	best := HeadlineCandidate{Name: "integrity_floor"}
+
+	for _, ds := range deps {
+		if ds.IsTestOnly != nil && *ds.IsTestOnly {
+			continue
+		}
+		if ds.ReplaceClass != scanner.IntegrityHigh {
+			continue
+		}
+
+		var score float64
+		if ds.Direct {
+			score = 60
+		} else {
+			score = 51
+		}
+
+		if score > best.Score {
+			best.Score = score
+			best.DrivingDep = ds.Module
+			best.Reason = "replace directive redirects to a different module path"
 		}
 	}
 

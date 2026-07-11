@@ -22,6 +22,7 @@ type GoMod struct {
 	GoVersion    string
 	Requirements []Module
 	Replaces     map[string]Module // original path -> replacement
+	Excludes     []Module          // modules excluded via the exclude directive
 }
 
 // ParseGoMod parses a go.mod file and returns structured data.
@@ -38,6 +39,7 @@ func ParseGoMod(path string) (*GoMod, error) {
 	lines := strings.Split(string(data), "\n")
 	inRequireBlock := false
 	inReplaceBlock := false
+	inExcludeBlock := false
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -68,9 +70,14 @@ func ParseGoMod(path string) (*GoMod, error) {
 			inReplaceBlock = true
 			continue
 		}
+		if line == "exclude (" {
+			inExcludeBlock = true
+			continue
+		}
 		if line == ")" {
 			inRequireBlock = false
 			inReplaceBlock = false
+			inExcludeBlock = false
 			continue
 		}
 
@@ -89,6 +96,14 @@ func ParseGoMod(path string) (*GoMod, error) {
 			continue
 		}
 
+		// Single-line exclude.
+		if strings.HasPrefix(line, "exclude ") {
+			if mod := parseRequireLine(strings.TrimPrefix(line, "exclude ")); mod != nil {
+				gm.Excludes = append(gm.Excludes, *mod)
+			}
+			continue
+		}
+
 		// Inside require block.
 		if inRequireBlock {
 			mod := parseRequireLine(line)
@@ -101,6 +116,14 @@ func ParseGoMod(path string) (*GoMod, error) {
 		// Inside replace block.
 		if inReplaceBlock {
 			parseReplaceLine(line, gm.Replaces)
+			continue
+		}
+
+		// Inside exclude block.
+		if inExcludeBlock {
+			if mod := parseRequireLine(line); mod != nil {
+				gm.Excludes = append(gm.Excludes, *mod)
+			}
 			continue
 		}
 	}
