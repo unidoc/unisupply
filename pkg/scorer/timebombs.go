@@ -6,7 +6,7 @@ import "fmt"
 // regardless of overall scoring. Each entry appears in the report even when
 // the headline score already reflects it — the goal is undeniable visibility.
 type TimeBomb struct {
-	// Kind is one of "archived" or "critical_cve".
+	// Kind is one of "archived", "critical_cve", or "kev".
 	Kind string
 	// Module is the module path of the affected dependency.
 	Module string
@@ -22,7 +22,12 @@ type TimeBomb struct {
 // CollectTimeBombs returns all time-bomb entries for the given project score.
 // It collects:
 //   - Any non-test dependency that is archived.
+//   - Any KEV-listed CVE on a non-test dependency (confirmed exploited in the
+//     wild per CISA), deduped by CVE ID.
 //   - Any CRITICAL CVE on a non-test dependency, deduped by CVE ID.
+//
+// A CVE that is both KEV-listed and CRITICAL appears once, as a "kev" entry —
+// confirmed exploitation is the stronger signal.
 //
 // The returned slice is always non-nil; callers may check len without a nil guard.
 func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
@@ -48,10 +53,11 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 			})
 		}
 
-		// CRITICAL CVE check (regardless of reachability).
+		// KEV and CRITICAL CVE checks (regardless of reachability).
 		for i := range dep.Vulns {
 			v := &dep.Vulns[i]
-			if effectiveTier(v) != "CRITICAL" {
+			isKEV := v.InKEV
+			if !isKEV && effectiveTier(v) != "CRITICAL" {
 				continue
 			}
 			if seenCVE[v.ID] {
@@ -71,6 +77,19 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 					reachSuffix = ", " + reachTag
 				}
 			}
+			if isKEV {
+				detail := fmt.Sprintf("%s (KEV — exploited in the wild%s)", v.ID, reachSuffix)
+				if v.KEVRansomware == "Known" {
+					detail = fmt.Sprintf("%s (KEV — exploited in ransomware campaigns%s)", v.ID, reachSuffix)
+				}
+				bombs = append(bombs, TimeBomb{
+					Kind:         "kev",
+					Module:       dep.Module,
+					Detail:       detail,
+					Reachability: reachTag,
+				})
+				continue
+			}
 			bombs = append(bombs, TimeBomb{
 				Kind:         "critical_cve",
 				Module:       dep.Module,
@@ -79,7 +98,6 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 			})
 		}
 
-		// TODO: add KEV (Known Exploited Vulnerabilities) check.
 		// TODO: add pseudo-version provenance check.
 	}
 

@@ -120,6 +120,72 @@ See the upstream documentation for further precision-limit details:
 [Go Vulnerability Management](https://go.dev/security/vuln/) ·
 [govulncheck reference](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
 
+### Threat-intel enrichment (EPSS + CISA KEV)
+
+Every CVE is enriched with two real-world exploitation signals:
+
+| Source | Field(s) | Endpoint | Meaning |
+| ------ | -------- | -------- | ------- |
+| [FIRST.org EPSS](https://www.first.org/epss/) | `epss_score`, `epss_percentile`, `epss_date` | `api.first.org` | Estimated probability (0.0–1.0) that the CVE will be exploited within the next 30 days. |
+| [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | `in_kev`, `kev_date_added`, `kev_known_ransomware` | `www.cisa.gov` | The CVE is confirmed exploited in the wild by CISA. |
+
+Both are keyed by CVE ID: for `GO-*`/`GHSA-*` vulns the first `CVE-*` alias
+is used. Vulnerabilities without a CVE alias (common for fresh Go advisories)
+have no threat-intel data — that is expected, not an error.
+
+**Field-presence semantics.** `epss_score` absent means the lookup failed or
+no CVE alias exists; a present `0.0` is a real score. `in_kev` absent means
+"not checked" (KEV fetch failed or no CVE alias); `false` means "checked and
+not listed".
+
+#### Scoring effect
+
+Order of operations inside the project-level headline
+(`severityAdjustedVulnScore`), per CVE:
+
+1. Normalise severity (`effectiveTier`; UNKNOWN + confirmed-called → HIGH).
+2. Reachability downgrade (`imported` −1 tier, `required` −2 tiers).
+3. Test-only downgrade (−1 tier when the dep is confirmed test-only).
+4. **EPSS amplifier** — `epss_score ≥ 0.5` and tier below CRITICAL: promote
+   one tier (LOW → MEDIUM, MEDIUM → HIGH, HIGH → CRITICAL).
+5. **KEV override** — `in_kev` true: force CRITICAL.
+6. Step function counts the resulting tier.
+
+The threat-intel rules apply **after** the downgrades because the downgrades
+encode "this code path isn't reachable in this project" — wild-exploitation
+status doesn't make an unreachable path more vulnerable. The most
+counter-intuitive consequence: **a downgrade-dropped CVE is not resurrected.**
+Once the reachability or test-only downgrade removes a CVE from the step
+function (e.g. a test-only LOW), neither EPSS nor KEV brings it back. Instead,
+a **hidden-risk warning** is emitted whenever a KEV-listed CVE (or one with
+EPSS ≥ 0.9) was downgraded: static analysis says the path isn't reachable, but
+the exploitation evidence warrants manual review.
+
+Per-dependency effects:
+
+- `vulnScore` gains an additive bonus of `max_epss_on_dep × 15`, capped at the
+  existing 100 ceiling (a dep with one EPSS-0.8 CVE gains +12).
+- Any KEV-listed CVE floors the dep at **76 (CRITICAL)** regardless of
+  severity and reachability — presence on KEV essentially mandates patching.
+- Any KEV-listed CVE also produces a `kev` TIME-BOMB entry in the report.
+
+The 0.5 EPSS threshold means FIRST.org estimates >50% exploitation likelihood
+within 30 days; promotion is bounded at one tier. KEV is binary and absolute.
+Neither threshold is operator-tunable — one default, documented rationale.
+
+#### Cache and failure behavior
+
+EPSS responses are cached per CVE under `$XDG_CACHE_HOME/unisupply/epss/` and
+the KEV catalog (single ~1.5 MB bulk fetch per scan) under
+`$XDG_CACHE_HOME/unisupply/kev/`, both with a 24-hour TTL (EPSS scores are
+recomputed daily; KEV updates weekly at most). Both lookups are best-effort:
+on failure the scan completes with a warning and the fields absent —
+threat-intel unavailability never fails a scan.
+
+> **Coverage caveat:** EPSS and KEV apply per-CVE; they do not change which
+> CVEs are detected. Coverage is bounded by govulncheck + OSV enrichment, and
+> the same static-analysis limits described above apply.
+
 ### Vulnerability floor
 
 Any dependency with at least one `called` or `imported` CVE has its score

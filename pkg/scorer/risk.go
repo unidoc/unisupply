@@ -221,6 +221,12 @@ type DebugCVE struct {
 	// ReachabilityDowngrade describes the tier shift applied due to reachability
 	// (e.g. "CRITICAL→HIGH (imported)"). Empty when no downgrade was applied.
 	ReachabilityDowngrade string `json:"reachability_downgrade,omitempty"`
+	// EPSSScore mirrors scanner.Vulnerability.EPSSScore — the input to the
+	// EPSS amplifier (promotes one tier at >= 0.5). Nil when unavailable.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+	// InKEV mirrors scanner.Vulnerability.InKEV — the input to the KEV
+	// override (forces CRITICAL on any non-dropped tier).
+	InKEV bool `json:"in_kev,omitempty"`
 }
 
 // DebugPerDepInput records the inputs to vulnScore for one dependency.
@@ -347,6 +353,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
 
 	sevResult := severityAdjustedVulnScore(now, ps.Dependencies)
+	ps.Warnings = append(ps.Warnings, sevResult.warnings...)
 	ps.SeverityAdjustedVulnScore = sevResult.score
 	ps.WorstCVEID = sevResult.worstID
 	ps.WorstCVESeverity = sevResult.worstSeverity
@@ -646,8 +653,10 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 
 	maxWeight := 0.0
 	highOrAboveCount := 0
+	maxEPSS := 0.0
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
 		// Apply the reachability factor before comparing and accumulating.
 		// "called"/""→×1.0, "imported"→×0.7, "required"→×0.3.
 		w := severityWeight(v.Severity) * reachabilityFactor(v.Reachability)
@@ -660,6 +669,9 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 		if w >= highOrAboveWeightFloor {
 			highOrAboveCount++
 		}
+		if v.EPSSScore != nil && *v.EPSSScore > maxEPSS {
+			maxEPSS = *v.EPSSScore
+		}
 	}
 
 	// Accumulator: base is the worst CVE; each additional HIGH-or-above adds 5.
@@ -668,7 +680,9 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 		bonus = float64(highOrAboveCount-1) * 5
 	}
 
-	total := maxWeight + bonus
+	// EPSS additive bonus: the dep's worst exploitation probability adds up to
+	// 15 points (e.g. one EPSS-0.8 CVE adds +12), capped at the 100 ceiling.
+	total := maxWeight + bonus + maxEPSS*epssVulnScoreWeight
 	if total > 100 {
 		total = 100
 	}
@@ -682,6 +696,7 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 //
 // Floor table:
 //
+//	any KEV-listed CVE (any reachability)  → 76 (CRITICAL band)
 //	CRITICAL or HIGH                       → 51 (HIGH band)
 //	MEDIUM                                 → 26 (MEDIUM band)
 //	LOW                                    → 0  (no floor; amplifier below may still raise it)
@@ -702,8 +717,18 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 	hasMedium := false
 	hasUnknownCalledFailed := false // UNKNOWN + enrichment failure + confirmed called
 	hasUnknownFailed := false       // UNKNOWN + enrichment failure, reachability unconfirmed
+	hasKEV := false
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
+		// KEV check runs before the "required" skip: a CVE that CISA has
+		// confirmed exploited in the wild floors the dep at CRITICAL (76)
+		// regardless of severity or reachability — the per-dep axis answers
+		// "how risky is this module?", and a module shipping a weaponized CVE
+		// is critically risky whether or not this project links it.
+		if v.InKEV {
+			hasKEV = true
+		}
 		// Skip required-only CVEs — they do not contribute to the floor.
 		if v.Reachability == "required" {
 			continue
@@ -731,6 +756,10 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 	}
 
 	switch {
+	case hasKEV:
+		// Confirmed exploited in the wild: CRITICAL floor (76) regardless of
+		// severity — presence on KEV essentially mandates patching.
+		return 76, RiskCritical
 	case hasCritical:
 		return 51, RiskCritical
 	case hasHigh:
@@ -774,7 +803,8 @@ func lowFixAgeFloor(now time.Time, vulns []scanner.Vulnerability) int {
 	}
 	floor := 0
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
 		// Only apply amplifier to LOW-severity CVEs.
 		if !strings.EqualFold(v.Severity, "LOW") {
 			continue
@@ -943,8 +973,8 @@ func computeOverallScore(deps []*DependencyScore) int {
 			// Mirror severityFloor's logic: "required" CVEs are excluded because
 			// their code never links into the build. Only "called", "imported", or
 			// unset (backward-compat alias for "called") trigger the floor.
-			for _, v := range ds.Vulns {
-				if v.Reachability != "required" {
+			for i := range ds.Vulns {
+				if ds.Vulns[i].Reachability != "required" {
 					hasVulns = true
 					break
 				}
@@ -1008,6 +1038,9 @@ type severityAdjustedResult struct {
 	stepInputs          StepFunctionInputs
 	enrichedCVEs        []DebugCVE
 	perDepInputs        []DebugPerDepInput
+	// warnings holds hidden-risk notices (KEV or very-high EPSS on a CVE the
+	// downgrades suppressed); the caller appends them to ps.Warnings.
+	warnings []string
 }
 
 // severityAdjustedVulnScore computes the CVE-driven step-function axis.
@@ -1068,7 +1101,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			// UNKNOWN + confirmed called → treat as HIGH for the step function.
 			// Empty reachability stays MEDIUM (unconfirmed ≠ reachable).
 			// Mirrors the severityFloor policy for the per-dep axis.
-			if strings.EqualFold(v.Severity, "UNKNOWN") && isConfirmedReachable(*v) {
+			if strings.EqualFold(v.Severity, "UNKNOWN") && isConfirmedReachable(v) {
 				rawTier = "HIGH"
 			}
 
@@ -1080,6 +1113,31 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			finalTier := reachabilityTier
 			if isTestOnlyConfirmed && finalTier != "" {
 				finalTier = downgradeTier(reachabilityTier)
+			}
+
+			// Step 3: apply threat-intel adjustment (EPSS amplifier, then KEV
+			// override) on top of the downgrades. A downgrade-dropped CVE is
+			// NOT resurrected — see adjustTierForThreatIntel.
+			finalTier = adjustTierForThreatIntel(finalTier, v)
+
+			// Hidden-risk warnings: static analysis downgraded this CVE, but
+			// threat intel says it is being exploited (KEV) or is very likely
+			// to be (EPSS >= 0.9). The right answer is human review.
+			if wasDowngraded := reachDesc != "" || isTestOnlyConfirmed; wasDowngraded {
+				context := v.Reachability
+				if isTestOnlyConfirmed {
+					context = "test-only"
+				}
+				switch {
+				case v.InKEV:
+					res.warnings = append(res.warnings, fmt.Sprintf(
+						"KEV CVE %s on dep %s (%s) — confirmed exploited in the wild; verify reachability manually",
+						v.ID, ds.Module, context))
+				case v.EPSSScore != nil && *v.EPSSScore >= epssManualReviewThreshold:
+					res.warnings = append(res.warnings, fmt.Sprintf(
+						"high-EPSS CVE %s (%.0f%% exploitation probability) on dep %s (%s) — verify reachability manually",
+						v.ID, *v.EPSSScore*100, ds.Module, context))
+				}
 			}
 
 			// Track raw worst severity on this dep (for debug only).
@@ -1102,6 +1160,8 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 					EnrichmentFailed:      v.EnrichmentFailed,
 					Reachability:          v.Reachability,
 					ReachabilityDowngrade: reachDesc,
+					EPSSScore:             v.EPSSScore,
+					InKEV:                 v.InKEV,
 				}
 				res.enrichedCVEs = append(res.enrichedCVEs, dc)
 				continue
@@ -1139,6 +1199,8 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 				EnrichmentFailed:      v.EnrichmentFailed,
 				Reachability:          v.Reachability,
 				ReachabilityDowngrade: reachDesc,
+				EPSSScore:             v.EPSSScore,
+				InKEV:                 v.InKEV,
 			}
 			// Populate DowngradedTier when any downgrade (reachability or test-only)
 			// changed the effective tier from the raw tier.
@@ -1216,7 +1278,7 @@ func effectiveTier(v *scanner.Vulnerability) string {
 //
 // Use this instead of v.Severity when rendering scored results — it keeps the
 // display and scoring logic in sync without duplicating the policy in reporters.
-func ScoredSeverity(v scanner.Vulnerability) string {
+func ScoredSeverity(v *scanner.Vulnerability) string {
 	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 		if isConfirmedReachable(v) {
 			return "HIGH"
@@ -1224,6 +1286,62 @@ func ScoredSeverity(v scanner.Vulnerability) string {
 		return "MEDIUM"
 	}
 	return strings.ToUpper(v.Severity)
+}
+
+// epssPromoteThreshold is the EPSS score at or above which a CVE's tier is
+// promoted one notch. 0.5 means FIRST.org estimates >50% probability of
+// exploitation within 30 days — the threshold for "actively dangerous".
+const epssPromoteThreshold = 0.5
+
+// epssManualReviewThreshold is the EPSS score at or above which a downgraded
+// CVE triggers a "verify reachability manually" warning: static analysis says
+// the code path isn't reachable, but the exploitation probability is so high
+// that human review is warranted.
+const epssManualReviewThreshold = 0.9
+
+// epssVulnScoreWeight scales the per-dep EPSS additive bonus in vulnScore:
+// bonus = max_epss_on_dep × 15.
+const epssVulnScoreWeight = 15
+
+// promoteTier shifts a tier up by one notch. CRITICAL stays CRITICAL.
+func promoteTier(t string) string {
+	switch t {
+	case "LOW":
+		return "MEDIUM"
+	case "MEDIUM":
+		return "HIGH"
+	case "HIGH", "CRITICAL":
+		return "CRITICAL"
+	default:
+		return t
+	}
+}
+
+// adjustTierForThreatIntel applies the post-downgrade threat-intel rules to a
+// CVE's step-function tier:
+//
+//  1. EPSS amplifier — score >= 0.5 and tier below CRITICAL: promote one tier.
+//  2. KEV override   — CVE is in CISA's KEV catalog: force CRITICAL.
+//
+// Both apply AFTER the reachability and test-only downgrades because those
+// encode "this code path isn't reachable in this project" — wild-exploitation
+// status doesn't make an unreachable path more vulnerable. For the same
+// reason, a downgrade-dropped CVE (tier == "") is NOT resurrected: once the
+// downgrades remove a CVE from the step function, EPSS and KEV do not bring
+// it back. This is the most counter-intuitive composition case — the
+// hidden-risk warnings in severityAdjustedVulnScore surface it for human
+// review instead.
+func adjustTierForThreatIntel(tier string, v *scanner.Vulnerability) string {
+	if tier == "" {
+		return ""
+	}
+	if v.EPSSScore != nil && *v.EPSSScore >= epssPromoteThreshold {
+		tier = promoteTier(tier)
+	}
+	if v.InKEV {
+		tier = "CRITICAL"
+	}
+	return tier
 }
 
 // downgradeTier shifts a tier down by one notch. Used for test-only deps.
@@ -1254,7 +1372,7 @@ func downgradeTier(t string) string {
 //
 //   - Weight axis: "" → 1.0 (pessimistic; don't under-weight unknown sources).
 //   - Confirmation axis: "" → false (conservative; don't over-escalate severity).
-func isConfirmedReachable(v scanner.Vulnerability) bool {
+func isConfirmedReachable(v *scanner.Vulnerability) bool {
 	return v.Reachability == "called"
 }
 

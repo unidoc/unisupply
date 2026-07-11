@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -258,11 +259,11 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	_ = c.Draw(findings)
 
 	// Data-quality notes: list vulns where enrichment was attempted but failed.
-	var failedVulns []scanner.Vulnerability
+	var failedVulns []*scanner.Vulnerability
 	for _, ds := range ps.Dependencies {
-		for _, v := range ds.Vulns {
-			if v.EnrichmentFailed {
-				failedVulns = append(failedVulns, v)
+		for i := range ds.Vulns {
+			if ds.Vulns[i].EnrichmentFailed {
+				failedVulns = append(failedVulns, &ds.Vulns[i])
 			}
 		}
 	}
@@ -675,8 +676,18 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	details.SetMargins(20, 0, 0, 10)
 	details.SetLineHeight(1.5)
 
-	// Vulnerabilities.
-	for _, v := range ds.Vulns {
+	// Vulnerabilities, sorted KEV-first then EPSS descending — highest
+	// threat-intel risk at the top of the listing.
+	vulns := make([]scanner.Vulnerability, len(ds.Vulns))
+	copy(vulns, ds.Vulns)
+	sort.SliceStable(vulns, func(i, j int) bool {
+		if vulns[i].InKEV != vulns[j].InKEV {
+			return vulns[i].InKEV
+		}
+		return epssOrZero(&vulns[i]) > epssOrZero(&vulns[j])
+	})
+	for i := range vulns {
+		v := &vulns[i]
 		aliases := strings.Join(v.Aliases, ", ")
 		// Append an inline reachability tag when the tier is not "called" (the
 		// most-severe tier).  Empty Reachability is treated as called for
@@ -686,7 +697,14 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		case "imported", "required":
 			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
 		}
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s — %s", v.ID, v.Severity, reachTag, aliases), regular)
+		ti := ""
+		if v.EPSSPercentile != nil {
+			ti = fmt.Sprintf(" [EPSS %.0f%%]", *v.EPSSPercentile*100)
+		}
+		if v.InKEV {
+			ti += " [KEV — exploited in the wild]"
+		}
+		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s%s — %s", v.ID, v.Severity, reachTag, ti, aliases), regular)
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}
@@ -716,6 +734,14 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	}
 
 	_ = c.Draw(details)
+}
+
+// epssOrZero returns the vuln's EPSS score, treating absent as 0 for sorting.
+func epssOrZero(v *scanner.Vulnerability) float64 {
+	if v.EPSSScore == nil {
+		return 0
+	}
+	return *v.EPSSScore
 }
 
 func pdfRiskColor(level scorer.RiskLevel) creator.Color {

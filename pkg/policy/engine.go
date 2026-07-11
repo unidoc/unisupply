@@ -118,8 +118,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		// No known vulns.
 		if p.NoKnownVulns && len(ds.Vulns) > 0 {
 			ids := make([]string, 0, len(ds.Vulns))
-			for _, v := range ds.Vulns {
-				ids = append(ids, v.ID)
+			for i := range ds.Vulns {
+				ids = append(ids, ds.Vulns[i].ID)
 			}
 			result.addError("no_known_vulns", ds.Module,
 				fmt.Sprintf("has %d known vulnerabilities: %s", len(ds.Vulns), strings.Join(ids, ", ")))
@@ -127,7 +127,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// No critical vulns.
 		if p.NoCriticalVulns {
-			for _, v := range ds.Vulns {
+			for i := range ds.Vulns {
+				v := &ds.Vulns[i]
 				sev := strings.ToUpper(v.Severity)
 				if sev == "CRITICAL" || sev == "HIGH" {
 					result.addError("no_critical_vulns", ds.Module,

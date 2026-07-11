@@ -165,12 +165,18 @@ your build's call graph — see
 [docs/scanners.md § Vulnerability reachability](docs/scanners.md#vulnerability-reachability)
 for the exact definitions and scoring effect.
 
+Each CVE also carries threat-intel enrichment: `epss_score` /
+`epss_percentile` (FIRST.org's exploitation-probability prediction) and
+`in_kev` (presence in CISA's Known Exploited Vulnerabilities catalog). Both
+feed the risk score — see
+[docs/scanners.md § Threat-intel enrichment](docs/scanners.md#threat-intel-enrichment-epss--cisa-kev).
+
 ```json
 {
   "module": "golang.org/x/net",
   "version": "v0.35.0",
-  "risk_score": 72,
-  "risk_level": "HIGH",
+  "risk_score": 76,
+  "risk_level": "CRITICAL",
   "vulnerabilities": [
     {
       "id": "GO-2025-0001",
@@ -178,7 +184,13 @@ for the exact definitions and scoring effect.
       "summary": "HTTP/2 request smuggling in golang.org/x/net/http2",
       "severity": "HIGH",
       "fixed_version": "v0.36.0",
-      "reachability": "called"
+      "reachability": "called",
+      "epss_score": 0.89,
+      "epss_percentile": 0.994,
+      "epss_date": "2026-07-10",
+      "in_kev": true,
+      "kev_date_added": "2026-07-01",
+      "kev_known_ransomware": "Unknown"
     },
     {
       "id": "GO-2025-0002",
@@ -186,13 +198,20 @@ for the exact definitions and scoring effect.
       "summary": "DoS in unused websocket handler",
       "severity": "MEDIUM",
       "fixed_version": "v0.36.0",
-      "reachability": "imported"
+      "reachability": "imported",
+      "epss_score": 0.004,
+      "epss_percentile": 0.31,
+      "epss_date": "2026-07-10",
+      "in_kev": false
     }
   ]
 }
 ```
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
+Absent `epss_score` means the lookup failed or the vuln has no CVE alias;
+absent `in_kev` means the KEV catalog was not consulted (`false` means
+"checked, not listed").
 
 ## Policy engine
 
@@ -402,6 +421,8 @@ the same data already public in your `go.mod`.
 | `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
 | `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
+| `api.first.org` | CVE IDs (batched) | EPSS exploitation-probability lookup for flagged CVEs | always runs (no-op if no CVE alias); 24h cache |
+| `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
 

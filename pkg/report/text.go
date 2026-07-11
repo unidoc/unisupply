@@ -84,7 +84,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
 		}
 	}
-	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
+	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallLevel, hasExploitEvidence(ps)))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
 
 	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
@@ -207,7 +207,8 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "\n%s\n", c(colorRed, fmt.Sprintf("STDLIB VULNERABILITIES (%d found)", len(opts.StdlibVulns))))
 		fmt.Fprintf(w, "%s\n", c(colorRed, strings.Repeat("─", 40)))
 		fmt.Fprintf(w, "%s\n", c(colorDim, "These affect the Go standard library used to build dependencies."))
-		for _, v := range opts.StdlibVulns {
+		for i := range opts.StdlibVulns {
+			v := &opts.StdlibVulns[i]
 			aliases := strings.Join(v.Aliases, ", ")
 			fmt.Fprintf(w, "  %s %s (%s)\n", c(colorRed, v.ID), v.Summary, aliases)
 			if v.FixedVersion != "" {
@@ -268,8 +269,8 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		// Compute per-tier counts. Empty Reachability is treated as "called"
 		// for backward compatibility with non-govulncheck CVE sources.
 		var nCalled, nImported, nRequired int
-		for _, v := range ds.Vulns {
-			switch v.Reachability {
+		for i := range ds.Vulns {
+			switch ds.Vulns[i].Reachability {
 			case "imported":
 				nImported++
 			case "required":
@@ -286,7 +287,8 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 				c(colorDim, "Vulnerabilities:"),
 				vulnReachabilityCountHeader(nCalled, nImported, nRequired))
 		}
-		for _, v := range ds.Vulns {
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
 			aliases := strings.Join(v.Aliases, ", ")
 			if aliases == "" {
 				aliases = v.ID
@@ -296,7 +298,16 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				displaySev = "UNKNOWN"
 			}
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, displaySev, tag, aliases)
+			// Threat-intel badges: EPSS percentile and KEV status. KEV is
+			// colored like CRITICAL — confirmed exploitation in the wild.
+			ti := ""
+			if v.EPSSPercentile != nil {
+				ti = fmt.Sprintf(" [EPSS %.0f%%]", *v.EPSSPercentile*100)
+			}
+			if v.InKEV {
+				ti += " " + c(colorRed, "[KEV]")
+			}
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s — %s\n", v.ID, displaySev, tag, ti, aliases)
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
 			}
@@ -575,10 +586,33 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 	return count
 }
 
-func overallExplanation(score int, level scorer.RiskLevel) string {
+// hasExploitEvidence reports whether any CVE in the project carries real
+// exploitation evidence: KEV-listed (confirmed exploited) or EPSS >= 0.5
+// (FIRST.org estimates >50% exploitation probability within 30 days).
+// Gates the "actively exploited" wording in overallExplanation so the
+// CRITICAL boilerplate is evidence-based, not reflexive.
+func hasExploitEvidence(ps *scorer.ProjectScore) bool {
+	for _, ds := range ps.Dependencies {
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
+			if v.InKEV {
+				return true
+			}
+			if v.EPSSScore != nil && *v.EPSSScore >= 0.5 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func overallExplanation(level scorer.RiskLevel, exploitEvidence bool) string {
 	switch level {
 	case scorer.RiskCritical:
-		return "Immediate action required. Your supply chain has critical vulnerabilities\nor severely compromised dependencies that could be actively exploited."
+		if exploitEvidence {
+			return "Immediate action required. Your supply chain has critical vulnerabilities\nwith evidence of active exploitation in the wild (CISA KEV or high EPSS)."
+		}
+		return "Immediate action required. Your supply chain has critical vulnerabilities\nor severely compromised dependencies."
 	case scorer.RiskHigh:
 		return "Action recommended. Known vulnerabilities with available fixes, or\ndependencies with serious maintenance/trust concerns."
 	case scorer.RiskMedium:
