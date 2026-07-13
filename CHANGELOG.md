@@ -15,6 +15,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   a `replaced` risk factor to the affected dependency. Fully offline — no
   network calls. New `forbid_replace_redirect` policy rule (enabled in the
   strict preset) fails CI when a redirect replace is present.
+- **go.sum completeness check and go.sum verification (Integrity scanner).**
+  A project with requirements but no go.sum gets a HIGH `gosum_missing`
+  finding; direct dependencies with no go.sum entry get a MEDIUM
+  `gosum_incomplete` finding (direct-only by design — module graph pruning
+  makes transitive entries legitimately optional; skipped entirely when
+  `vendor/modules.txt` is present).
+  Checksum verification shells out to `go mod verify` — checking the local
+  module cache against the checksums pinned in go.sum, honoring
+  `GOPRIVATE`/`GONOSUMDB` — and is reported as `gosum_verified`
+  (`"true"`/`"false"`/`"offline"`/`"skipped"`) in all output formats. A
+  confirmed mismatch (integrity markers in the verify output) produces a
+  CRITICAL `gosum_mismatch` finding and floors the project headline into the
+  CRITICAL band; UNKNOWN states — offline mode, cancellation, cold cache
+  without network, missing toolchain — are never treated as failures. New
+  `require_gosum_verified` policy rule (enabled in the strict preset) fails
+  CI on a confirmed mismatch.
 
 ### New Features
 

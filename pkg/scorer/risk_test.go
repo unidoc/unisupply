@@ -2517,7 +2517,7 @@ func TestIntegrityFloor(t *testing.T) {
 				ReplaceClass: scanner.IntegrityHigh,
 			},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 51 {
 			t.Errorf("Score = %.0f, want 51 (transitive redirect)", candidate.Score)
 		}
@@ -2535,7 +2535,7 @@ func TestIntegrityFloor(t *testing.T) {
 				ReplaceClass: scanner.IntegrityHigh,
 			},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 60 {
 			t.Errorf("Score = %.0f, want 60 (direct redirect)", candidate.Score)
 		}
@@ -2550,7 +2550,7 @@ func TestIntegrityFloor(t *testing.T) {
 				ReplaceClass: scanner.IntegrityHigh,
 			},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 0 {
 			t.Errorf("Score = %.0f, want 0 (test-only redirect → no floor)", candidate.Score)
 		}
@@ -2565,7 +2565,7 @@ func TestIntegrityFloor(t *testing.T) {
 				ReplaceClass: scanner.IntegrityLow,
 			},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 0 {
 			t.Errorf("Score = %.0f, want 0 (version-pin must never drive the headline)", candidate.Score)
 		}
@@ -2580,7 +2580,7 @@ func TestIntegrityFloor(t *testing.T) {
 				ReplaceClass: scanner.IntegrityMedium,
 			},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 0 {
 			t.Errorf("Score = %.0f, want 0 (local-path must never drive the headline)", candidate.Score)
 		}
@@ -2590,11 +2590,63 @@ func TestIntegrityFloor(t *testing.T) {
 		deps := []*DependencyScore{
 			{Module: "github.com/clean/pkg", Direct: true, IsTestOnly: testutil.BoolPtr(false)},
 		}
-		candidate := integrityFloor(deps)
+		candidate := integrityFloor(deps, false)
 		if candidate.Score != 0 {
 			t.Errorf("Score = %.0f, want 0 (no replace directives)", candidate.Score)
 		}
 	})
+
+	t.Run("go.sum mismatch floors to CRITICAL", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{Module: "github.com/clean/pkg", Direct: true, IsTestOnly: testutil.BoolPtr(false)},
+		}
+		candidate := integrityFloor(deps, true)
+		if candidate.Score != 76 {
+			t.Errorf("Score = %.0f, want 76 (go.sum mismatch → CRITICAL band floor)", candidate.Score)
+		}
+		if candidate.DrivingDep != "go.sum" {
+			t.Errorf("DrivingDep = %q, want go.sum", candidate.DrivingDep)
+		}
+	})
+
+	t.Run("go.sum mismatch outranks direct redirect", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       true,
+				IsTestOnly:   testutil.BoolPtr(false),
+				ReplaceClass: scanner.IntegrityHigh,
+			},
+		}
+		candidate := integrityFloor(deps, true)
+		if candidate.Score != 76 {
+			t.Errorf("Score = %.0f, want 76 (go.sum mismatch outranks the 60-point direct-redirect floor)", candidate.Score)
+		}
+	})
+}
+
+// TestScoreAll_GoSumMismatch_FloorsHeadlineToCritical verifies the end-to-end
+// path: a `go mod verify` mismatch floors the project headline into the
+// CRITICAL band via integrity_floor, even on an otherwise clean graph.
+func TestScoreAll_GoSumMismatch_FloorsHeadlineToCritical(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+
+	input := twoAxisEmptyInput(graph)
+	input.GoSumMismatch = true
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver != "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, want integrity_floor", ps.HeadlineDriver)
+	}
+	if ps.OverallScore != 76 {
+		t.Errorf("OverallScore = %d, want 76", ps.OverallScore)
+	}
+	if ps.OverallLevel != RiskCritical {
+		t.Errorf("OverallLevel = %q, want CRITICAL", ps.OverallLevel)
+	}
 }
 
 // TestScoreAll_ReplaceRedirect_FloorsHeadlineToHigh verifies the end-to-end

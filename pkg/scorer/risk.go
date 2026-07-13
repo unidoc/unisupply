@@ -266,6 +266,13 @@ type ScoreInput struct {
 	// dependency is not replaced.
 	Integrity map[string]scanner.IntegrityRiskLevel
 
+	// GoSumMismatch is true when `go mod verify` reported a checksum mismatch
+	// (scanner.IntegrityReport.GoSumVerified == "false"). It floors the
+	// headline into the CRITICAL band via the integrity_floor candidate.
+	// Honest-UNKNOWN verification states ("offline"/"skipped") must map to
+	// false — only a confirmed mismatch drives the headline.
+	GoSumMismatch bool
+
 	// DebugMode populates ps.DebugScoring with diagnostic data when true.
 	// Wired to the --debug-scoring CLI flag.
 	DebugMode bool
@@ -392,7 +399,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		p95DepRiskCandidate(ps.Dependencies),
 		archivedFloor(ps.Dependencies),
 		cveFloor(ps.Dependencies),
-		integrityFloor(ps.Dependencies),
+		integrityFloor(ps.Dependencies, input.GoSumMismatch),
 	}
 	winner := selectHeadline(candidates)
 	ps.HeadlineCandidate = &winner
@@ -1674,14 +1681,25 @@ func cveFloor(deps []*DependencyScore) HeadlineCandidate {
 
 // integrityFloor floors the headline to HIGH when any non-test-only dep in the
 // graph carries a HIGH-severity replace directive (a redirect to a different
-// module path — see scanner.IntegrityScanner.ScanDirectives).
+// module path — see scanner.IntegrityScanner.ScanDirectives), and to CRITICAL
+// when `go mod verify` reported a go.sum checksum mismatch (gosumMismatch).
 //
 // LOW (version-pin) and MEDIUM (local-path) replace classes must never drive
 // the headline — only a redirect to a different module signals a possible
 // fork hijack or private-mirror compromise. HIGH band starts at 51
 // (levelFromScore), so all HIGH floors use 51, not 50; direct dependency
-// escalates to 60, mirroring archivedFloor.
-func integrityFloor(deps []*DependencyScore) HeadlineCandidate {
+// escalates to 60, mirroring archivedFloor. CRITICAL band starts at 76, so
+// the go.sum-mismatch floor is 76 — it always outranks the replace floors.
+func integrityFloor(deps []*DependencyScore, gosumMismatch bool) HeadlineCandidate {
+	if gosumMismatch {
+		return HeadlineCandidate{
+			Name:       "integrity_floor",
+			Score:      76,
+			DrivingDep: "go.sum",
+			Reason:     "go mod verify failed — a module in the local cache does not match its go.sum checksum",
+		}
+	}
+
 	best := HeadlineCandidate{Name: "integrity_floor"}
 
 	for _, ds := range deps {

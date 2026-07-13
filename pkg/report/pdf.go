@@ -499,6 +499,9 @@ func writeIntegritySection(c *creator.Creator, ir *scanner.IntegrityReport, regu
 	stats.SetLineHeight(1.6)
 	addBullet(stats, fmt.Sprintf("Replace directives: %d (%d redirect to a different module)", ir.ReplaceCount, ir.RedirectCount), regular)
 	addBullet(stats, fmt.Sprintf("Exclude directives: %d", ir.ExcludeCount), regular)
+	if ir.GoSumVerified != "" {
+		addBullet(stats, "go.sum verification (go mod verify): "+gosumLabel(ir.GoSumVerified), regular)
+	}
 	_ = c.Draw(stats)
 
 	if len(ir.Findings) == 0 {

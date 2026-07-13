@@ -251,6 +251,47 @@ test-only dependencies, but the `forbid_replace_redirect` policy rule does
 not — test-time code still executes in CI (with access to CI secrets), so a
 hijacked test-only dependency is not a safe blind spot for policy purposes.
 
+### go.sum verification
+
+The Integrity scanner also audits `go.sum`:
+
+| Finding            | Condition                                                                    | Severity | Headline effect                      |
+| ------------------ | ---------------------------------------------------------------------------- | -------- | ------------------------------------ |
+| `gosum_missing`    | `go.mod` declares requirements but no `go.sum` exists                        | HIGH     | None — noise-rule exempt             |
+| `gosum_incomplete` | A direct (non-replaced) dependency's resolved version has no `go.sum` entry  | MEDIUM   | None — noise-rule exempt             |
+| `gosum_mismatch`   | `go mod verify` reports a checksum mismatch (local module cache does not match `go.sum`) | CRITICAL | Floors the headline to CRITICAL (76) |
+
+The completeness check covers **direct dependencies only** — under Go 1.17+
+module graph pruning, transitive modules listed by `go mod graph` can
+legitimately have no `go.sum` entry, so a full-graph join would over-report.
+A direct requirement is always an MVS root whose `go.mod` hash must be
+recorded; its absence is a real gap. The check is skipped entirely when
+`vendor/modules.txt` is present — builds with `-mod=vendor` do not consult
+`go.sum`.
+
+Go.sum verification **shells out to `go mod verify`**, which checks the local
+module cache against the checksums already pinned in `go.sum` and honors
+`GOPRIVATE`/`GONOSUMDB` itself. It does **not** contact the checksum database
+(`sum.golang.org`) or perform transparency-log lookups — those happen at
+download time via the toolchain's own sumdb client; this check detects
+post-download tampering of the cache or of `go.sum`. The outcome is reported
+as `gosum_verified` in all output formats with four honest states: `"true"`
+(verified), `"false"` (confirmed mismatch), `"offline"` (verification skipped
+in offline mode), and `"skipped"` (no `go.sum`, the `go` toolchain could not
+be run, the scan was cancelled, or verify failed for a non-integrity reason
+such as a cold module cache with no network). A non-zero exit is only treated
+as a mismatch when the output carries an actual integrity marker
+(`has been modified`, `checksum mismatch`, `SECURITY ERROR`). Only a confirmed
+mismatch floors the headline or fails the `require_gosum_verified` policy rule
+(on by default in the strict preset) — UNKNOWN states are never treated as
+failures.
+
+Note a toolchain subtlety: `go mod verify` re-checks each module's `go.mod`
+hash against `go.sum` when loading the build list, but verifies module zips
+against the cache's own integrity records — so `gosum_verified: "true"` means
+the build graph's checksums are consistent, not that every archive byte was
+re-hashed against `go.sum`.
+
 ## Risk bands
 
 | Level    | Score   |

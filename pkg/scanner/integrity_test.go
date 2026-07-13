@@ -1,10 +1,15 @@
 package scanner
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
+	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
 // TestIntegrityScanner_ClassifyReplace tests classification of every replace
@@ -225,5 +230,255 @@ func TestIntegrityScanner_NoDirectives(t *testing.T) {
 	}
 	if len(classes) != 0 {
 		t.Errorf("classes should be empty, got %d entries", len(classes))
+	}
+}
+
+// --- go.sum presence/completeness (ScanGoSum) ---
+
+// gosumFixture writes a go.mod (and optionally go.sum) into a temp dir and
+// returns the go.mod path.
+func gosumFixture(t *testing.T, gosum string) string {
+	t.Helper()
+	dir := t.TempDir()
+	gomodPath := filepath.Join(dir, "go.mod")
+	if err := os.WriteFile(gomodPath, []byte("module example.com/fixture\n\ngo 1.21\n"), 0o600); err != nil {
+		t.Fatalf("writing go.mod: %v", err)
+	}
+	if gosum != "" {
+		if err := os.WriteFile(filepath.Join(dir, "go.sum"), []byte(gosum), 0o600); err != nil {
+			t.Fatalf("writing go.sum: %v", err)
+		}
+	}
+	return gomodPath
+}
+
+func TestScanGoSum_Missing(t *testing.T) {
+	gomodPath := gosumFixture(t, "")
+	gm := &parser.GoMod{
+		ModulePath:   "example.com/fixture",
+		Requirements: []parser.Module{{Path: "github.com/foo/bar", Version: "v1.0.0"}},
+	}
+	graph := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{}}
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().ScanGoSum(gomodPath, gm, graph, report)
+
+	if len(report.Findings) != 1 {
+		t.Fatalf("Findings length = %d, want 1", len(report.Findings))
+	}
+	f := report.Findings[0]
+	if f.Category != "gosum_missing" {
+		t.Errorf("Category = %q, want gosum_missing", f.Category)
+	}
+	if f.Severity != IntegrityHigh {
+		t.Errorf("Severity = %q, want %q", f.Severity, IntegrityHigh)
+	}
+}
+
+func TestScanGoSum_MissingButNoRequirements(t *testing.T) {
+	gomodPath := gosumFixture(t, "")
+	gm := &parser.GoMod{ModulePath: "example.com/fixture"}
+	graph := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{}}
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().ScanGoSum(gomodPath, gm, graph, report)
+
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (no requirements → go.sum legitimately absent)", len(report.Findings))
+	}
+}
+
+func TestScanGoSum_Complete(t *testing.T) {
+	gosum := "github.com/foo/bar v1.0.0 h1:abc=\ngithub.com/foo/bar v1.0.0/go.mod h1:def=\n"
+	gomodPath := gosumFixture(t, gosum)
+	gm := &parser.GoMod{
+		ModulePath:   "example.com/fixture",
+		Requirements: []parser.Module{{Path: "github.com/foo/bar", Version: "v1.0.0"}},
+	}
+	graph := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+		"github.com/foo/bar": {Module: parser.Module{Path: "github.com/foo/bar", Version: "v1.0.0"}, Direct: true},
+	}}
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().ScanGoSum(gomodPath, gm, graph, report)
+
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (go.sum complete), findings: %+v", len(report.Findings), report.Findings)
+	}
+}
+
+func TestScanGoSum_Incomplete(t *testing.T) {
+	gosum := "github.com/foo/bar v1.0.0/go.mod h1:def=\n"
+	gomodPath := gosumFixture(t, gosum)
+	gm := &parser.GoMod{
+		ModulePath:   "example.com/fixture",
+		Requirements: []parser.Module{{Path: "github.com/foo/bar", Version: "v1.0.0"}},
+	}
+	graph := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+		"github.com/foo/bar":     {Module: parser.Module{Path: "github.com/foo/bar", Version: "v1.0.0"}, Direct: true},
+		"github.com/baz/qux":     {Module: parser.Module{Path: "github.com/baz/qux", Version: "v2.1.0"}, Direct: true},
+		"github.com/rep/laced":   {Module: parser.Module{Path: "github.com/rep/laced", Version: "v0.1.0"}, Direct: true, Replaced: true},
+		"github.com/tran/sitive": {Module: parser.Module{Path: "github.com/tran/sitive", Version: "v0.9.0"}},
+	}}
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().ScanGoSum(gomodPath, gm, graph, report)
+
+	if len(report.Findings) != 1 {
+		t.Fatalf("Findings length = %d, want 1, findings: %+v", len(report.Findings), report.Findings)
+	}
+	f := report.Findings[0]
+	if f.Category != "gosum_incomplete" {
+		t.Errorf("Category = %q, want gosum_incomplete", f.Category)
+	}
+	if f.Severity != IntegrityMedium {
+		t.Errorf("Severity = %q, want %q", f.Severity, IntegrityMedium)
+	}
+	if !strings.Contains(f.Detail, "github.com/baz/qux@v2.1.0") {
+		t.Errorf("Detail should name the missing module, got %q", f.Detail)
+	}
+	if strings.Contains(f.Detail, "github.com/rep/laced") {
+		t.Errorf("Detail must not name replaced modules, got %q", f.Detail)
+	}
+	if strings.Contains(f.Detail, "github.com/tran/sitive") {
+		t.Errorf("Detail must not name transitive modules (graph-pruning false positives), got %q", f.Detail)
+	}
+}
+
+func TestScanGoSum_VendorSkipsCompleteness(t *testing.T) {
+	gosum := "github.com/foo/bar v1.0.0/go.mod h1:def=\n"
+	gomodPath := gosumFixture(t, gosum)
+	vendorDir := filepath.Join(filepath.Dir(gomodPath), "vendor")
+	if err := os.MkdirAll(vendorDir, 0o750); err != nil {
+		t.Fatalf("creating vendor dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vendorDir, "modules.txt"), []byte("# github.com/baz/qux v2.1.0\n"), 0o600); err != nil {
+		t.Fatalf("writing modules.txt: %v", err)
+	}
+	gm := &parser.GoMod{
+		ModulePath:   "example.com/fixture",
+		Requirements: []parser.Module{{Path: "github.com/baz/qux", Version: "v2.1.0"}},
+	}
+	graph := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+		"github.com/baz/qux": {Module: parser.Module{Path: "github.com/baz/qux", Version: "v2.1.0"}, Direct: true},
+	}}
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().ScanGoSum(gomodPath, gm, graph, report)
+
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (vendor/modules.txt present → -mod=vendor semantics)", len(report.Findings))
+	}
+}
+
+// --- go.sum verification (VerifyGoSum) ---
+
+func TestVerifyGoSum_Offline(t *testing.T) {
+	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+
+	report := &IntegrityReport{}
+	is := NewIntegrityScanner()
+	is.Offline = true
+	is.VerifyGoSum(context.Background(), gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedOffline {
+		t.Errorf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedOffline)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (offline must never be a failure)", len(report.Findings))
+	}
+}
+
+func TestVerifyGoSum_NoGoSum(t *testing.T) {
+	gomodPath := gosumFixture(t, "")
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedSkipped)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (missing go.sum is gosum_missing's job, not a mismatch)", len(report.Findings))
+	}
+}
+
+func TestVerifyGoSum_ContextCancelled(t *testing.T) {
+	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().VerifyGoSum(ctx, gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q (killed process is not an integrity signal)", report.GoSumVerified, GoSumVerifiedSkipped)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (cancellation must never be a failure)", len(report.Findings))
+	}
+}
+
+// fakeGo puts a shell script named "go" on PATH that prints output and exits
+// with code, so VerifyGoSum's handling of `go mod verify` failures can be
+// exercised without a real module cache or network.
+func fakeGo(t *testing.T, output string, code int) {
+	t.Helper()
+	binDir := t.TempDir()
+	outFile := filepath.Join(binDir, "output.txt")
+	if err := os.WriteFile(outFile, []byte(output+"\n"), 0o600); err != nil {
+		t.Fatalf("writing fake go output: %v", err)
+	}
+	// PATH is replaced wholesale below, so the script must not rely on it —
+	// use the absolute /bin/cat.
+	script := "#!/bin/sh\n/bin/cat " + outFile + "\nexit " + strconv.Itoa(code) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(script), 0o700); err != nil { //nolint:gosec // test helper must be executable
+		t.Fatalf("writing fake go: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestVerifyGoSum_NonMismatchFailureSkips(t *testing.T) {
+	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+	fakeGo(t, "go: github.com/foo/bar@v1.0.0: Get \"https://proxy.golang.org/...\": dial tcp: no such host", 1)
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q (cold cache / network failure is not tampering)", report.GoSumVerified, GoSumVerifiedSkipped)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0: %+v", len(report.Findings), report.Findings)
+	}
+}
+
+func TestVerifyGoSum_MismatchMarkersFail(t *testing.T) {
+	outputs := map[string]string{
+		"verify modified":   "github.com/foo/bar v1.0.0: dir has been modified (/cache/github.com/foo/bar@v1.0.0)",
+		"checksum mismatch": "verifying github.com/foo/bar@v1.0.0/go.mod: checksum mismatch\n\tdownloaded: h1:aaa=\n\tgo.sum:     h1:bbb=\n\nSECURITY ERROR",
+	}
+	for name, output := range outputs {
+		t.Run(name, func(t *testing.T) {
+			gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+			fakeGo(t, output, 1)
+
+			report := &IntegrityReport{}
+			NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
+
+			if report.GoSumVerified != GoSumVerifiedFalse {
+				t.Fatalf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedFalse)
+			}
+			if len(report.Findings) != 1 {
+				t.Fatalf("Findings length = %d, want 1: %+v", len(report.Findings), report.Findings)
+			}
+			if report.Findings[0].Category != "gosum_mismatch" {
+				t.Errorf("Category = %q, want gosum_mismatch", report.Findings[0].Category)
+			}
+			if report.Findings[0].Severity != IntegrityCritical {
+				t.Errorf("Severity = %q, want %q", report.Findings[0].Severity, IntegrityCritical)
+			}
+		})
 	}
 }

@@ -165,6 +165,7 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
   "no_typosquatting": true,
   "max_ci_score": 50,
   "forbid_replace_redirect": true,
+  "require_gosum_verified": true,
   "blocked_modules": ["github.com/suspicious/pkg"],
   "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
