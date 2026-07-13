@@ -152,6 +152,20 @@ type JSONVuln struct {
 	SeverityScored string `json:"severity_scored,omitempty"`
 	// EnrichmentErrors holds the failure summary when all enrichment tiers failed.
 	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
+	// EPSSScore is FIRST.org's exploitation probability (0.0–1.0). Absent when
+	// the lookup failed or the vuln has no CVE alias; a present 0.0 is a real score.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+	// EPSSPercentile is the score's percentile rank against all scored CVEs.
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+	// EPSSDate is the date the EPSS score was computed (YYYY-MM-DD).
+	EPSSDate string `json:"epss_date,omitempty"`
+	// InKEV reports CISA KEV catalog membership. Absent means "not checked"
+	// (KEV fetch failed or no CVE alias); false means "checked, not listed".
+	InKEV *bool `json:"in_kev,omitempty"`
+	// KEVDateAdded is the date CISA added the CVE to the KEV catalog.
+	KEVDateAdded string `json:"kev_date_added,omitempty"`
+	// KEVRansomware is CISA's knownRansomwareCampaignUse: "Known" | "Unknown".
+	KEVRansomware string `json:"kev_known_ransomware,omitempty"`
 }
 
 // JSONMaintenance is maintenance health info.
@@ -357,8 +371,9 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			RiskFactors:    ds.RiskFactors,
 		}
 
-		for _, v := range ds.Vulns {
-			jd.Vulns = append(jd.Vulns, JSONVuln{
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
+			jv := JSONVuln{
 				ID:                  v.ID,
 				Aliases:             v.Aliases,
 				Summary:             v.Summary,
@@ -373,7 +388,19 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				SeveritySource:      v.SeveritySource,
 				SeverityScored:      scorer.ScoredSeverity(v),
 				EnrichmentErrors:    v.EnrichmentErrors,
-			})
+				EPSSScore:           v.EPSSScore,
+				EPSSPercentile:      v.EPSSPercentile,
+				EPSSDate:            v.EPSSDate,
+				KEVDateAdded:        v.KEVDateAdded,
+				KEVRansomware:       v.KEVRansomware,
+			}
+			// in_kev is serialized only when the KEV catalog was actually
+			// consulted: absent = "not checked", false = "checked, not listed".
+			if v.KEVChecked {
+				inKEV := v.InKEV
+				jv.InKEV = &inKEV
+			}
+			jd.Vulns = append(jd.Vulns, jv)
 		}
 
 		if ds.Maintenance != nil {

@@ -116,3 +116,28 @@ func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
 	// Must not panic.
 	writeDependencyBlock(c, ds, regular, bold, true)
 }
+
+// TestEPSSBadge verifies the badge renders the EPSS score (exploitation
+// probability, the signal the scorer acts on) — not the percentile — and that
+// tiny non-zero scores are shown as "<1%" instead of a misleading "0%".
+func TestEPSSBadge(t *testing.T) {
+	score := 0.42
+	percentile := 0.97
+	tiny := 0.004
+	zero := 0.0
+	cases := []struct {
+		name string
+		vuln scanner.Vulnerability
+		want string
+	}{
+		{"no score", scanner.Vulnerability{}, ""},
+		{"uses score not percentile", scanner.Vulnerability{EPSSScore: &score, EPSSPercentile: &percentile}, " [EPSS 42%]"},
+		{"tiny score", scanner.Vulnerability{EPSSScore: &tiny}, " [EPSS <1%]"},
+		{"zero score", scanner.Vulnerability{EPSSScore: &zero}, " [EPSS 0%]"},
+	}
+	for _, tc := range cases {
+		if got := epssBadge(&tc.vuln); got != tc.want {
+			t.Errorf("%s: epssBadge = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

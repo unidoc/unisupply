@@ -7,6 +7,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### New Features
+
+- **Threat-intel enrichment (EPSS + CISA KEV).** Every CVE now carries EPSS
+  (exploitation probability from FIRST.org: `epss_score`, `epss_percentile`,
+  `epss_date`) and CISA KEV status (confirmed exploited in the wild: `in_kev`,
+  `kev_date_added`, `kev_known_ransomware`). Scoring uses both to refine the
+  headline: EPSS ≥ 0.5 promotes a CVE one severity tier, KEV membership forces
+  CRITICAL (neither resurrects a CVE dropped by the reachability or test-only
+  downgrades). Per-dep scores gain an EPSS bonus (`max_epss × 15`) and any
+  KEV-listed CVE floors its dependency at 76/CRITICAL. KEV-listed CVEs appear
+  as `kev` entries in TIME-BOMBS, and a hidden-risk warning is emitted when a
+  KEV or EPSS ≥ 0.9 CVE was downgraded by static analysis. Adds two network
+  endpoints (`api.first.org`, `www.cisa.gov`), both best-effort with 24h
+  on-disk caches — threat-intel unavailability never fails a scan.
+
+### Improvements
+
+- The CRITICAL verdict text "could be actively exploited" is now
+  evidence-gated: it appears only when a CVE is KEV-listed or has EPSS ≥ 0.5;
+  otherwise severity-based wording is used.
+- PDF reports sort each dependency's vulnerabilities KEV-first, then by EPSS
+  descending; text and PDF reports show `[EPSS NN%]` and `[KEV]` badges per
+  CVE.
+
 ## [0.5.0] - 2026-06-29
 
 Compliance, hardening, and scoring-accuracy release. The focus is making

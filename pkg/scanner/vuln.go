@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,6 +75,41 @@ type Vulnerability struct {
 	// failed (EnrichmentFailed==true). At most one entry: the consolidated
 	// "severity lookup failed (OSV/NVD/GitHub)" warning message.
 	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
+
+	// Threat-intel enrichment — populated from EPSS and CISA KEV lookups.
+	// Both influence scoring (EPSS amplifier, KEV override); see
+	// docs/scanners.md "Threat-intel enrichment" for the full tables.
+	// Lookups are keyed by CVE ID: for GO-*/GHSA-* vulns the first CVE-*
+	// alias is used; vulns without a CVE alias have no threat-intel data
+	// (expected, not an error).
+
+	// EPSSScore is FIRST.org's estimated probability (0.0–1.0) that the CVE
+	// will be exploited within the next 30 days. Pointer-typed so absence
+	// (lookup failed or no CVE alias) is distinguishable from a real 0.0.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+
+	// EPSSPercentile is the score's percentile rank against all scored CVEs.
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+
+	// EPSSDate is the date the EPSS score was computed (YYYY-MM-DD).
+	EPSSDate string `json:"epss_date,omitempty"`
+
+	// InKEV is true when the CVE appears in CISA's Known Exploited
+	// Vulnerabilities catalog. Serialized only when the KEV catalog was
+	// actually consulted (see KEVChecked): absent means "not checked",
+	// false means "checked and not listed".
+	InKEV bool `json:"in_kev,omitempty"`
+
+	// KEVChecked is true when the KEV catalog was loaded and this vuln had a
+	// CVE alias to look up — i.e. InKEV is a real answer, not a default.
+	KEVChecked bool `json:"kev_checked,omitempty"`
+
+	// KEVDateAdded is the date CISA added the CVE to the catalog.
+	KEVDateAdded string `json:"kev_date_added,omitempty"`
+
+	// KEVRansomware is CISA's knownRansomwareCampaignUse field:
+	// "Known", "Unknown", or "" when not in KEV.
+	KEVRansomware string `json:"kev_known_ransomware,omitempty"`
 
 	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
 	PublishedAt *time.Time `json:"published_at,omitempty"`
@@ -247,7 +283,89 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 		results[modPath] = modVulns
 	}
 
+	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
+
 	return results, warnings, nil
+}
+
+// CVEAlias returns the CVE ID to use for threat-intel lookups on v: the ID
+// itself when it is a CVE, otherwise the first valid CVE-* alias. Empty when
+// the vuln has no CVE identifier — EPSS and KEV only index CVE IDs, so such
+// vulns (common for fresh GO-* advisories) have no threat-intel data.
+func CVEAlias(v *Vulnerability) string {
+	if strings.HasPrefix(v.ID, "CVE-") && validateVulnID(v.ID) {
+		return v.ID
+	}
+	for _, alias := range v.Aliases {
+		if strings.HasPrefix(alias, "CVE-") && validateVulnID(alias) {
+			return alias
+		}
+	}
+	return ""
+}
+
+// enrichThreatIntel populates EPSS and KEV fields on every vulnerability that
+// has a CVE alias. Both lookups are best-effort: failures produce warnings,
+// never errors — the scan completes with the threat-intel fields absent.
+func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string) {
+	// Collect the distinct CVE IDs across all vulns.
+	cveSet := make(map[string]bool)
+	for _, modVulns := range results {
+		for i := range modVulns {
+			if cve := CVEAlias(&modVulns[i]); cve != "" {
+				cveSet[cve] = true
+			}
+		}
+	}
+	if len(cveSet) == 0 {
+		return nil
+	}
+	cveIDs := make([]string, 0, len(cveSet))
+	for cve := range cveSet {
+		cveIDs = append(cveIDs, cve)
+	}
+	sort.Strings(cveIDs)
+
+	epss, epssErr := ti.LookupEPSS(ctx, cveIDs)
+	if epssErr != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"EPSS lookup incomplete; exploitation probability may be missing for some CVEs: %v", epssErr))
+	}
+
+	kev, kevErr := ti.LoadKEV(ctx)
+	if kevErr != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"CISA KEV catalog unavailable; known-exploited status unchecked: %v", kevErr))
+	}
+
+	for modPath, modVulns := range results {
+		for i := range modVulns {
+			v := &modVulns[i]
+			cve := CVEAlias(v)
+			if cve == "" {
+				continue
+			}
+			if entry, ok := epss[cve]; ok {
+				score, percentile := entry.Score, entry.Percentile
+				v.EPSSScore = &score
+				v.EPSSPercentile = &percentile
+				v.EPSSDate = entry.Date
+			}
+			// A nil kev map means the catalog could not be loaded — leave
+			// KEVChecked false so consumers see "not checked", not "not listed".
+			if kev != nil {
+				v.KEVChecked = true
+				if entry, ok := kev[cve]; ok {
+					v.InKEV = true
+					v.KEVDateAdded = entry.DateAdded
+					v.KEVRansomware = entry.KnownRansomwareCampaignUse
+				}
+			}
+		}
+		results[modPath] = modVulns
+	}
+
+	return warnings
 }
 
 func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error) {
