@@ -16,13 +16,36 @@ type Module struct {
 	Indirect bool
 }
 
+// Replace represents one replace directive. OldVersion is empty for a
+// path-only replace (applies to all versions of the original module); when
+// set, the replace applies only when that exact version is selected.
+type Replace struct {
+	OldVersion string
+	New        Module
+}
+
 // GoMod represents parsed go.mod content.
 type GoMod struct {
 	ModulePath   string
 	GoVersion    string
 	Requirements []Module
-	Replaces     map[string]Module // original path -> replacement
-	Excludes     []Module          // modules excluded via the exclude directive
+	Replaces     map[string]Replace // original path -> replacement (one entry per path; a later directive for the same path wins)
+	Excludes     []Module           // modules excluded via the exclude directive
+}
+
+// ReplacementFor returns the replace directive that applies to the module at
+// (path, version), following go.mod semantics: a version-scoped replace only
+// matches when the selected version equals its old version, while a path-only
+// replace matches all versions.
+func (gm *GoMod) ReplacementFor(path, version string) (Replace, bool) {
+	r, ok := gm.Replaces[path]
+	if !ok {
+		return Replace{}, false
+	}
+	if r.OldVersion != "" && r.OldVersion != version {
+		return Replace{}, false
+	}
+	return r, true
 }
 
 // ParseGoMod parses a go.mod file and returns structured data.
@@ -33,7 +56,7 @@ func ParseGoMod(path string) (*GoMod, error) {
 	}
 
 	gm := &GoMod{
-		Replaces: make(map[string]Module),
+		Replaces: make(map[string]Replace),
 	}
 
 	lines := strings.Split(string(data), "\n")
@@ -154,7 +177,7 @@ func parseRequireLine(line string) *Module {
 	}
 }
 
-func parseReplaceLine(line string, replaces map[string]Module) {
+func parseReplaceLine(line string, replaces map[string]Replace) {
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "//") {
 		return
@@ -173,12 +196,15 @@ func parseReplaceLine(line string, replaces map[string]Module) {
 	}
 
 	origPath := original[0]
-	repMod := Module{Path: replacement[0]}
+	rep := Replace{New: Module{Path: replacement[0]}}
+	if len(original) >= 2 {
+		rep.OldVersion = original[1]
+	}
 	if len(replacement) >= 2 {
-		repMod.Version = replacement[1]
+		rep.New.Version = replacement[1]
 	}
 
-	replaces[origPath] = repMod
+	replaces[origPath] = rep
 }
 
 // GoSumEntry represents one line in go.sum.

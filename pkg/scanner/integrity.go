@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,6 +21,16 @@ const (
 	IntegrityLow    IntegrityRiskLevel = "LOW"
 	IntegrityMedium IntegrityRiskLevel = "MEDIUM"
 	IntegrityHigh   IntegrityRiskLevel = "HIGH"
+)
+
+// Integrity finding categories. Exported so consumers (e.g. the policy
+// engine) can match findings by kind instead of by severity.
+const (
+	IntegrityCategoryReplaceVersionPin   = "replace_version_pin"
+	IntegrityCategoryReplaceLocalPath    = "replace_local_path"
+	IntegrityCategoryReplaceMajorVersion = "replace_major_version"
+	IntegrityCategoryReplaceRedirect     = "replace_redirect"
+	IntegrityCategoryExclude             = "exclude"
 )
 
 // IntegrityFinding represents a single go.mod directive finding.
@@ -70,8 +79,11 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 	sort.Strings(origPaths)
 
 	for _, origPath := range origPaths {
-		replacement := gm.Replaces[origPath]
-		finding := classifyReplace(origPath, replacement)
+		rep := gm.Replaces[origPath]
+		finding := classifyReplace(origPath, rep.New)
+		if rep.OldVersion != "" {
+			finding.Detail += fmt.Sprintf(" (applies only when version %s is selected)", rep.OldVersion)
+		}
 		classes[origPath] = finding.Severity
 		report.Findings = append(report.Findings, finding)
 		report.ReplaceCount++
@@ -82,7 +94,7 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 
 	for _, ex := range gm.Excludes {
 		report.Findings = append(report.Findings, IntegrityFinding{
-			Category:    "exclude",
+			Category:    IntegrityCategoryExclude,
 			Severity:    IntegrityInfo,
 			Module:      ex.Path,
 			Detail:      fmt.Sprintf("version %s is excluded from selection", ex.Version),
@@ -98,18 +110,14 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 // comparing the original module path against the replacement:
 //
 //	replacement path == original path                          → version-pin override (LOW)
-//	replacement path is "./"/"../"-prefixed or OS-absolute       → local-path override (MEDIUM)
+//	replacement path is a local filesystem path                  → local-path override (MEDIUM)
 //	replacement path is a /vN major-version path of the same module → major-version redirect (MEDIUM)
 //	otherwise                                                    → redirect to a different module (HIGH)
-//
-// The original required version is not recorded in parser.GoMod.Replaces, so
-// classification is based on path comparison only — sufficient to distinguish
-// the four cases.
 func classifyReplace(origPath string, replacement parser.Module) IntegrityFinding {
 	switch {
 	case replacement.Path == origPath:
 		return IntegrityFinding{
-			Category:    "replace_version_pin",
+			Category:    IntegrityCategoryReplaceVersionPin,
 			Severity:    IntegrityLow,
 			Module:      origPath,
 			Detail:      fmt.Sprintf("%s is version-pinned to %s", origPath, replacement.Version),
@@ -117,7 +125,7 @@ func classifyReplace(origPath string, replacement parser.Module) IntegrityFindin
 		}
 	case isLocalPath(replacement.Path):
 		return IntegrityFinding{
-			Category:    "replace_local_path",
+			Category:    IntegrityCategoryReplaceLocalPath,
 			Severity:    IntegrityMedium,
 			Module:      origPath,
 			Detail:      fmt.Sprintf("%s is replaced with local path %s", origPath, replacement.Path),
@@ -125,7 +133,7 @@ func classifyReplace(origPath string, replacement parser.Module) IntegrityFindin
 		}
 	case isMajorVersionRedirect(origPath, replacement.Path):
 		return IntegrityFinding{
-			Category:    "replace_major_version",
+			Category:    IntegrityCategoryReplaceMajorVersion,
 			Severity:    IntegrityMedium,
 			Module:      origPath,
 			Detail:      fmt.Sprintf("%s is redirected to a major-version path of the same module: %s", origPath, replacement.Path),
@@ -133,7 +141,7 @@ func classifyReplace(origPath string, replacement parser.Module) IntegrityFindin
 		}
 	default:
 		return IntegrityFinding{
-			Category:    "replace_redirect",
+			Category:    IntegrityCategoryReplaceRedirect,
 			Severity:    IntegrityHigh,
 			Module:      origPath,
 			Detail:      fmt.Sprintf("%s is redirected to a different module: %s", origPath, replacement.Path),
@@ -143,12 +151,16 @@ func classifyReplace(origPath string, replacement parser.Module) IntegrityFindin
 }
 
 // isLocalPath reports whether path is a filesystem-directory replacement
-// target: a relative "./" or "../"-prefixed path, or an OS-absolute path (e.g.
-// "/home/dev/bar"). filepath.IsAbs is OS-dependent — on non-Windows builds it
-// will not recognize a Windows drive path like "C:\dev\bar", but that is
-// acceptable: this classifier runs on the host OS the scan is performed from.
+// target. It mirrors golang.org/x/mod/modfile.IsDirectoryPath: because go.mod
+// files can move from one system to another, both Unix and Windows path
+// syntaxes (relative, absolute, UNC, drive-letter) are recognized regardless
+// of the host OS the scan runs on.
 func isLocalPath(path string) bool {
-	return strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") || filepath.IsAbs(path)
+	return path == "." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "/") ||
+		path == ".." || strings.HasPrefix(path, "../") ||
+		strings.HasPrefix(path, `.\`) || strings.HasPrefix(path, `\`) ||
+		strings.HasPrefix(path, `..\`) ||
+		(len(path) >= 2 && ('A' <= path[0] && path[0] <= 'Z' || 'a' <= path[0] && path[0] <= 'z') && path[1] == ':')
 }
 
 // majorVersionSuffixRe matches a trailing Go major-version path element

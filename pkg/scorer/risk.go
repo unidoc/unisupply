@@ -60,8 +60,9 @@ type DependencyScore struct {
 	RiskFactors    []string                 `json:"risk_factors,omitempty"`
 
 	// ReplaceClass is the severity of this dependency's go.mod replace
-	// directive ("LOW" version-pin, "MEDIUM" local-path, "HIGH" redirect to a
-	// different module), or empty when the dependency is not replaced. See
+	// directive ("LOW" version-pin, "MEDIUM" local-path or same-module
+	// major-version redirect, "HIGH" redirect to a different module), or
+	// empty when the dependency is not replaced. See
 	// scanner.IntegrityScanner.ScanDirectives.
 	ReplaceClass scanner.IntegrityRiskLevel `json:"replace_class,omitempty"`
 
@@ -539,9 +540,10 @@ func scoreDependency(
 	}
 
 	// Replace directive: any replace (version-pin, local-path, or redirect)
-	// surfaces as a risk factor for transparency. Only the MEDIUM (local-path)
-	// and HIGH (redirect) classes add to the score — a version-pin replace is
-	// expected and carries no bonus.
+	// surfaces as a risk factor for transparency. Only the MEDIUM (local-path
+	// or same-module major-version redirect) and HIGH (redirect to a different
+	// module) classes add to the score — a version-pin replace is expected and
+	// carries no bonus.
 	integrityBonus := 0.0
 	if dep.Replaced {
 		ds.RiskFactors = append(ds.RiskFactors, "replaced")

@@ -219,12 +219,13 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 	}
 
-	// No replace-redirect: fail on any HIGH-severity replace directive
-	// (redirect to a different module path). Version-pin and local-path
-	// replaces are not affected.
+	// No replace-redirect: fail on any replace directive that redirects to a
+	// different module path. Version-pin, local-path, and major-version
+	// replaces are not affected, nor are other integrity finding kinds —
+	// the rule matches by category, not severity.
 	if p.ForbidReplaceRedirect && input.IntegrityReport != nil {
 		for _, f := range input.IntegrityReport.Findings {
-			if f.Severity == scanner.IntegrityHigh {
+			if f.Category == scanner.IntegrityCategoryReplaceRedirect {
 				result.addError("forbid_replace_redirect", f.Module, f.Detail)
 			}
 		}

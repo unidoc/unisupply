@@ -70,11 +70,11 @@ replace (
 	if rep, ok := gm.Replaces["github.com/old/path"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/old/path")
 	} else {
-		if rep.Path != "github.com/new/path" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "github.com/new/path")
+		if rep.New.Path != "github.com/new/path" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "github.com/new/path")
 		}
-		if rep.Version != "v1.5.0" {
-			t.Errorf("Replace version = %q, want %q", rep.Version, "v1.5.0")
+		if rep.New.Version != "v1.5.0" {
+			t.Errorf("Replace version = %q, want %q", rep.New.Version, "v1.5.0")
 		}
 	}
 }
@@ -194,11 +194,11 @@ replace github.com/foo/bar => github.com/baz/qux v1.2.0
 	if rep, ok := gm.Replaces["github.com/foo/bar"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo/bar")
 	} else {
-		if rep.Path != "github.com/baz/qux" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "github.com/baz/qux")
+		if rep.New.Path != "github.com/baz/qux" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "github.com/baz/qux")
 		}
-		if rep.Version != "v1.2.0" {
-			t.Errorf("Replace version = %q, want %q", rep.Version, "v1.2.0")
+		if rep.New.Version != "v1.2.0" {
+			t.Errorf("Replace version = %q, want %q", rep.New.Version, "v1.2.0")
 		}
 	}
 }
@@ -228,11 +228,11 @@ replace github.com/foo/bar => ../local/path
 	if rep, ok := gm.Replaces["github.com/foo/bar"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo/bar")
 	} else {
-		if rep.Path != "../local/path" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "../local/path")
+		if rep.New.Path != "../local/path" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "../local/path")
 		}
-		if rep.Version != "" {
-			t.Errorf("Replace version = %q, want empty", rep.Version)
+		if rep.New.Version != "" {
+			t.Errorf("Replace version = %q, want empty", rep.New.Version)
 		}
 	}
 }
@@ -411,7 +411,7 @@ func TestParseRequireLine_SingleField(t *testing.T) {
 
 // TestParseReplaceLine_Valid tests parsing a valid replace line.
 func TestParseReplaceLine_Valid(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo/bar v1 => github.com/baz/qux v2", replaces)
 
 	if len(replaces) != 1 {
@@ -421,18 +421,46 @@ func TestParseReplaceLine_Valid(t *testing.T) {
 	if rep, ok := replaces["github.com/foo/bar"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo/bar")
 	} else {
-		if rep.Path != "github.com/baz/qux" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "github.com/baz/qux")
+		if rep.OldVersion != "v1" {
+			t.Errorf("Replace old version = %q, want %q", rep.OldVersion, "v1")
 		}
-		if rep.Version != "v2" {
-			t.Errorf("Replace version = %q, want %q", rep.Version, "v2")
+		if rep.New.Path != "github.com/baz/qux" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "github.com/baz/qux")
 		}
+		if rep.New.Version != "v2" {
+			t.Errorf("Replace version = %q, want %q", rep.New.Version, "v2")
+		}
+	}
+}
+
+// TestReplacementFor verifies go.mod replace matching semantics: a path-only
+// replace matches every version, while a version-scoped replace only matches
+// its exact old version.
+func TestReplacementFor(t *testing.T) {
+	gm := &GoMod{
+		Replaces: map[string]Replace{
+			"github.com/all/versions": {New: Module{Path: "github.com/fork/all", Version: "v1.0.0"}},
+			"github.com/one/version":  {OldVersion: "v1.2.3", New: Module{Path: "github.com/fork/one", Version: "v1.2.4"}},
+		},
+	}
+
+	if _, ok := gm.ReplacementFor("github.com/all/versions", "v0.9.0"); !ok {
+		t.Errorf("ReplacementFor(all/versions, v0.9.0) = false, want true (path-only replace matches all versions)")
+	}
+	if _, ok := gm.ReplacementFor("github.com/one/version", "v1.2.3"); !ok {
+		t.Errorf("ReplacementFor(one/version, v1.2.3) = false, want true (exact version match)")
+	}
+	if _, ok := gm.ReplacementFor("github.com/one/version", "v2.0.0"); ok {
+		t.Errorf("ReplacementFor(one/version, v2.0.0) = true, want false (version-scoped replace does not match other versions)")
+	}
+	if _, ok := gm.ReplacementFor("github.com/not/replaced", "v1.0.0"); ok {
+		t.Errorf("ReplacementFor(not/replaced, v1.0.0) = true, want false")
 	}
 }
 
 // TestParseReplaceLine_NoArrow tests parsing a line without the arrow operator.
 func TestParseReplaceLine_NoArrow(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo/bar v1 github.com/baz/qux v2", replaces)
 
 	if len(replaces) != 0 {
@@ -442,7 +470,7 @@ func TestParseReplaceLine_NoArrow(t *testing.T) {
 
 // TestParseReplaceLine_Empty tests parsing an empty replace line.
 func TestParseReplaceLine_Empty(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("", replaces)
 
 	if len(replaces) != 0 {
@@ -632,7 +660,7 @@ func writeFile(path, content string) error {
 
 // Unexported helper test to verify parseReplaceLine handles version-less original paths.
 func TestParseReplaceLine_NoVersionOriginal(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo/bar => github.com/baz/qux v1.0.0", replaces)
 
 	if len(replaces) != 1 {
@@ -642,18 +670,18 @@ func TestParseReplaceLine_NoVersionOriginal(t *testing.T) {
 	if rep, ok := replaces["github.com/foo/bar"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo/bar")
 	} else {
-		if rep.Path != "github.com/baz/qux" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "github.com/baz/qux")
+		if rep.New.Path != "github.com/baz/qux" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "github.com/baz/qux")
 		}
-		if rep.Version != "v1.0.0" {
-			t.Errorf("Replace version = %q, want %q", rep.Version, "v1.0.0")
+		if rep.New.Version != "v1.0.0" {
+			t.Errorf("Replace version = %q, want %q", rep.New.Version, "v1.0.0")
 		}
 	}
 }
 
 // TestParseReplaceLine_NoVersionReplacement tests replace with no version in replacement.
 func TestParseReplaceLine_NoVersionReplacement(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo/bar v1.0.0 => github.com/baz/qux", replaces)
 
 	if len(replaces) != 1 {
@@ -663,11 +691,11 @@ func TestParseReplaceLine_NoVersionReplacement(t *testing.T) {
 	if rep, ok := replaces["github.com/foo/bar"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo/bar")
 	} else {
-		if rep.Path != "github.com/baz/qux" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "github.com/baz/qux")
+		if rep.New.Path != "github.com/baz/qux" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "github.com/baz/qux")
 		}
-		if rep.Version != "" {
-			t.Errorf("Replace version = %q, want empty", rep.Version)
+		if rep.New.Version != "" {
+			t.Errorf("Replace version = %q, want empty", rep.New.Version)
 		}
 	}
 }
@@ -750,20 +778,20 @@ replace (
 
 	if rep, ok := gm.Replaces["github.com/old/one"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/old/one")
-	} else if rep.Path != "github.com/new/one" {
-		t.Errorf("Replace one path = %q, want %q", rep.Path, "github.com/new/one")
+	} else if rep.New.Path != "github.com/new/one" {
+		t.Errorf("Replace one path = %q, want %q", rep.New.Path, "github.com/new/one")
 	}
 
 	if rep, ok := gm.Replaces["github.com/old/two"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/old/two")
-	} else if rep.Path != "github.com/new/two" {
-		t.Errorf("Replace two path = %q, want %q", rep.Path, "github.com/new/two")
+	} else if rep.New.Path != "github.com/new/two" {
+		t.Errorf("Replace two path = %q, want %q", rep.New.Path, "github.com/new/two")
 	}
 
 	if rep, ok := gm.Replaces["github.com/old/three"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/old/three")
-	} else if rep.Path != "../local" {
-		t.Errorf("Replace three path = %q, want %q", rep.Path, "../local")
+	} else if rep.New.Path != "../local" {
+		t.Errorf("Replace three path = %q, want %q", rep.New.Path, "../local")
 	}
 }
 
@@ -906,7 +934,7 @@ require (
 
 // TestParseReplaceLine_CommentLine tests that comment lines in replace blocks are skipped.
 func TestParseReplaceLine_CommentLine(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("// this is a comment", replaces)
 
 	if len(replaces) != 0 {
@@ -916,7 +944,7 @@ func TestParseReplaceLine_CommentLine(t *testing.T) {
 
 // TestParseReplaceLine_InsufficientFields tests replace line with missing fields.
 func TestParseReplaceLine_InsufficientFields(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo =>", replaces)
 
 	if len(replaces) != 0 {
@@ -926,7 +954,7 @@ func TestParseReplaceLine_InsufficientFields(t *testing.T) {
 
 // TestParseReplaceLine_OnlyArrow tests replace line with only arrow.
 func TestParseReplaceLine_OnlyArrow(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("=>", replaces)
 
 	if len(replaces) != 0 {
@@ -1242,7 +1270,7 @@ github.com/baz/qux v2.0.0 h1:another+hash+==
 
 // TestParseReplaceLine_EmptyArrow tests replace with empty parts around arrow.
 func TestParseReplaceLine_EmptyArrow(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("  =>  ", replaces)
 
 	if len(replaces) != 0 {
@@ -1252,7 +1280,7 @@ func TestParseReplaceLine_EmptyArrow(t *testing.T) {
 
 // TestParseReplaceLine_LocalPathWithVersion tests local path replace with version-like string.
 func TestParseReplaceLine_LocalPathWithVersion(t *testing.T) {
-	replaces := make(map[string]Module)
+	replaces := make(map[string]Replace)
 	parseReplaceLine("github.com/foo => ../vendor/foo v1.0.0", replaces)
 
 	if len(replaces) != 1 {
@@ -1262,11 +1290,11 @@ func TestParseReplaceLine_LocalPathWithVersion(t *testing.T) {
 	if rep, ok := replaces["github.com/foo"]; !ok {
 		t.Errorf("Replaces missing key %q", "github.com/foo")
 	} else {
-		if rep.Path != "../vendor/foo" {
-			t.Errorf("Replace path = %q, want %q", rep.Path, "../vendor/foo")
+		if rep.New.Path != "../vendor/foo" {
+			t.Errorf("Replace path = %q, want %q", rep.New.Path, "../vendor/foo")
 		}
-		if rep.Version != "v1.0.0" {
-			t.Errorf("Replace version = %q, want %q", rep.Version, "v1.0.0")
+		if rep.New.Version != "v1.0.0" {
+			t.Errorf("Replace version = %q, want %q", rep.New.Version, "v1.0.0")
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -11,70 +12,102 @@ import (
 func TestIntegrityScanner_ClassifyReplace(t *testing.T) {
 	tests := []struct {
 		name         string
-		replaces     map[string]parser.Module
+		replaces     map[string]parser.Replace
 		wantSeverity IntegrityRiskLevel
 		wantCategory string
 	}{
 		{
 			name: "version_pin",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "github.com/foo/bar", Version: "v1.2.3"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "github.com/foo/bar", Version: "v1.2.3"}},
 			},
 			wantSeverity: IntegrityLow,
 			wantCategory: "replace_version_pin",
 		},
 		{
 			name: "local_path_dot_slash",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "./local/bar"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "./local/bar"}},
 			},
 			wantSeverity: IntegrityMedium,
 			wantCategory: "replace_local_path",
 		},
 		{
 			name: "local_path_dot_dot_slash",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "../local/bar"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "../local/bar"}},
 			},
 			wantSeverity: IntegrityMedium,
 			wantCategory: "replace_local_path",
 		},
 		{
 			name: "local_path_absolute",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "/home/dev/bar"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "/home/dev/bar"}},
+			},
+			wantSeverity: IntegrityMedium,
+			wantCategory: "replace_local_path",
+		},
+		{
+			name: "local_path_windows_relative",
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: `.\local\bar`}},
+			},
+			wantSeverity: IntegrityMedium,
+			wantCategory: "replace_local_path",
+		},
+		{
+			name: "local_path_windows_parent",
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: `..\local\bar`}},
+			},
+			wantSeverity: IntegrityMedium,
+			wantCategory: "replace_local_path",
+		},
+		{
+			name: "local_path_windows_drive",
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: `C:\dev\bar`}},
+			},
+			wantSeverity: IntegrityMedium,
+			wantCategory: "replace_local_path",
+		},
+		{
+			name: "local_path_windows_unc",
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: `\\server\share\bar`}},
 			},
 			wantSeverity: IntegrityMedium,
 			wantCategory: "replace_local_path",
 		},
 		{
 			name: "major_version_new_suffix",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "github.com/foo/bar/v2", Version: "v2.0.0"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "github.com/foo/bar/v2", Version: "v2.0.0"}},
 			},
 			wantSeverity: IntegrityMedium,
 			wantCategory: "replace_major_version",
 		},
 		{
 			name: "major_version_swap",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar/v2": {Path: "github.com/foo/bar/v3", Version: "v3.0.0"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar/v2": {New: parser.Module{Path: "github.com/foo/bar/v3", Version: "v3.0.0"}},
 			},
 			wantSeverity: IntegrityMedium,
 			wantCategory: "replace_major_version",
 		},
 		{
 			name: "major_version_different_module_still_high",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "github.com/attacker/bar/v2", Version: "v2.0.0"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "github.com/attacker/bar/v2", Version: "v2.0.0"}},
 			},
 			wantSeverity: IntegrityHigh,
 			wantCategory: "replace_redirect",
 		},
 		{
 			name: "redirect",
-			replaces: map[string]parser.Module{
-				"github.com/foo/bar": {Path: "github.com/attacker/bar", Version: "v1.0.0"},
+			replaces: map[string]parser.Replace{
+				"github.com/foo/bar": {New: parser.Module{Path: "github.com/attacker/bar", Version: "v1.0.0"}},
 			},
 			wantSeverity: IntegrityHigh,
 			wantCategory: "replace_redirect",
@@ -110,10 +143,10 @@ func TestIntegrityScanner_ClassifyReplace(t *testing.T) {
 // (redirect) severity replaces, not LOW or MEDIUM.
 func TestIntegrityScanner_RedirectCount(t *testing.T) {
 	gm := &parser.GoMod{
-		Replaces: map[string]parser.Module{
-			"github.com/a/pin":      {Path: "github.com/a/pin", Version: "v1.0.0"},
-			"github.com/b/local":    {Path: "./vendor/b"},
-			"github.com/c/redirect": {Path: "github.com/attacker/c"},
+		Replaces: map[string]parser.Replace{
+			"github.com/a/pin":      {New: parser.Module{Path: "github.com/a/pin", Version: "v1.0.0"}},
+			"github.com/b/local":    {New: parser.Module{Path: "./vendor/b"}},
+			"github.com/c/redirect": {New: parser.Module{Path: "github.com/attacker/c"}},
 		},
 	}
 
@@ -124,6 +157,29 @@ func TestIntegrityScanner_RedirectCount(t *testing.T) {
 	}
 	if report.RedirectCount != 1 {
 		t.Errorf("RedirectCount = %d, want 1", report.RedirectCount)
+	}
+}
+
+// TestIntegrityScanner_VersionScopedReplace verifies that a version-scoped
+// replace directive surfaces its old version in the finding detail.
+func TestIntegrityScanner_VersionScopedReplace(t *testing.T) {
+	gm := &parser.GoMod{
+		Replaces: map[string]parser.Replace{
+			"github.com/foo/bar": {OldVersion: "v1.2.3", New: parser.Module{Path: "github.com/fork/bar", Version: "v1.2.4"}},
+		},
+	}
+
+	report, _ := NewIntegrityScanner().ScanDirectives(gm)
+
+	if len(report.Findings) != 1 {
+		t.Fatalf("Findings length = %d, want 1", len(report.Findings))
+	}
+	f := report.Findings[0]
+	if f.Category != IntegrityCategoryReplaceRedirect {
+		t.Errorf("Category = %q, want %q", f.Category, IntegrityCategoryReplaceRedirect)
+	}
+	if want := "(applies only when version v1.2.3 is selected)"; !strings.Contains(f.Detail, want) {
+		t.Errorf("Detail = %q, want it to contain %q", f.Detail, want)
 	}
 }
 

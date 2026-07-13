@@ -225,14 +225,17 @@ classified by comparing the replacement module path against the original:
 | Class                 | Condition                                                                                     | Severity | Score effect                                    |
 | --------------------- | ---------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------ |
 | Version-pin           | Replacement path equals the original path                                                       | LOW      | None — expected, pins a specific version          |
-| Local-path            | Replacement path has a `./`/`../` prefix, or is an OS-absolute filesystem path                   | MEDIUM   | +8 per-dependency penalty                         |
+| Local-path            | Replacement path is a filesystem path — relative, absolute, UNC, or drive-letter; both Unix and Windows syntaxes are recognized regardless of host OS | MEDIUM   | +8 per-dependency penalty                         |
 | Major-version redirect | Replacement path is the original module gaining or swapping a `/vN` (N ≥ 2) semantic-import-versioning suffix (same underlying module) | MEDIUM   | +8 per-dependency penalty                         |
 | Redirect              | Replacement path points to a genuinely different module                                         | HIGH     | +20 per-dependency penalty; floors the project headline to HIGH (51, or 60 for a direct dependency) |
 
 Every `exclude` directive renders as an INFO finding for transparency — it
-carries no score effect. A dependency with any replace directive gets the
-`replaced` risk factor regardless of class; only MEDIUM/HIGH classes add to
-the score.
+carries no score effect. A dependency with an applicable replace directive
+gets the `replaced` risk factor regardless of class; only MEDIUM/HIGH classes
+add to the score. A version-scoped replace (`replace A v1.2.3 => …`) only
+marks the dependency as replaced when the selected version matches; the
+directive itself still appears as a finding, annotated with the version it
+applies to.
 
 A HIGH-severity (redirect) replace on a non-test-only dependency is the
 `integrity_floor` headline candidate — it floors the project's overall score
