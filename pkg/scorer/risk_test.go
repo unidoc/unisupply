@@ -2670,6 +2670,54 @@ func TestScoreAll_ReplaceVersionPin_DoesNotFloorHeadline(t *testing.T) {
 	}
 }
 
+// TestScoreAll_InertVersionScopedReplace_NoFloorNoClass verifies that a
+// HIGH-class replace directive whose version scope does not match the selected
+// version (dep.Replaced == false) is fully inert: no ReplaceClass on the
+// dependency, no "replaced" risk factor, no score bonus, and no
+// integrity_floor on the headline.
+func TestScoreAll_InertVersionScopedReplace_NoFloorNoClass(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v2.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	// Replaced stays false: the go.mod replace is scoped to a version other
+	// than the selected v2.0.0 (parser.GoMod.ReplacementFor returns false).
+
+	input := twoAxisEmptyInput(graph)
+	input.Integrity["github.com/foo/bar"] = scanner.IntegrityHigh
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver == "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, inert version-scoped replace must not drive the headline", ps.HeadlineDriver)
+	}
+
+	baselineGraph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v2.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	baselinePS := ScoreAll(twoAxisEmptyInput(baselineGraph))
+	if ps.OverallScore != baselinePS.OverallScore {
+		t.Errorf("OverallScore = %d, want %d (inert replace carries no score bonus)", ps.OverallScore, baselinePS.OverallScore)
+	}
+
+	var ds *DependencyScore
+	for _, d := range ps.Dependencies {
+		if d.Module == "github.com/foo/bar" {
+			ds = d
+		}
+	}
+	if ds == nil {
+		t.Fatal("dependency not found in scored output")
+	}
+	if ds.ReplaceClass != "" {
+		t.Errorf("ReplaceClass = %q, want empty (replace does not apply to the selected version)", ds.ReplaceClass)
+	}
+	for _, rf := range ds.RiskFactors {
+		if rf == "replaced" {
+			t.Errorf("RiskFactors = %v, must not contain %q for an inert replace", ds.RiskFactors, "replaced")
+		}
+	}
+}
+
 // TestCVEFloor tests the cveFloor function with various CVE reachability +
 // severity combinations.
 func TestCVEFloor(t *testing.T) {

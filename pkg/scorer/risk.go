@@ -465,7 +465,15 @@ func scoreDependency(
 		Resilience:     resilience,
 		AIGenRisk:      aiGenRisk,
 		TrustIndex:     trustIndex,
-		ReplaceClass:   integrityClass,
+	}
+
+	// A version-scoped replace whose old-version does not match the selected
+	// version is inert: dep.Replaced (via parser.GoMod.ReplacementFor) is false
+	// and the directive has no effect on the build. Only record the class when
+	// the replace actually applies, so integrityFloor and the JSON
+	// replace_class field stay consistent with dep.Replaced.
+	if dep.Replaced {
+		ds.ReplaceClass = integrityClass
 	}
 
 	// 1. Vulnerability score (0-100).
