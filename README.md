@@ -15,7 +15,7 @@ supply chain risk assessment. It runs ten focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
 file inspection, `go.mod`/`go.sum` integrity audit (replace/exclude
-directives, go.sum completeness, sumdb verification), and Trust Index
+directives, go.sum completeness, go.sum verification), and Trust Index
 lookup — combines the in-tree scanner signals into a weighted risk score per
 dependency, attaches the optional Trust Index data to each report alongside
 that score, and renders the result as a colored terminal
@@ -266,7 +266,7 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
-- `require_sumdb_verified` — fail when `go mod verify` reported a checksum
+- `require_gosum_verified` — fail when `go mod verify` reported a checksum
   mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
   (offline, no go.sum, toolchain unavailable) do not fail this rule.
 

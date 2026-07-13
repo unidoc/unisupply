@@ -2596,20 +2596,20 @@ func TestIntegrityFloor(t *testing.T) {
 		}
 	})
 
-	t.Run("sumdb mismatch floors to CRITICAL", func(t *testing.T) {
+	t.Run("go.sum mismatch floors to CRITICAL", func(t *testing.T) {
 		deps := []*DependencyScore{
 			{Module: "github.com/clean/pkg", Direct: true, IsTestOnly: testutil.BoolPtr(false)},
 		}
 		candidate := integrityFloor(deps, true)
 		if candidate.Score != 76 {
-			t.Errorf("Score = %.0f, want 76 (sumdb mismatch → CRITICAL band floor)", candidate.Score)
+			t.Errorf("Score = %.0f, want 76 (go.sum mismatch → CRITICAL band floor)", candidate.Score)
 		}
 		if candidate.DrivingDep != "go.sum" {
 			t.Errorf("DrivingDep = %q, want go.sum", candidate.DrivingDep)
 		}
 	})
 
-	t.Run("sumdb mismatch outranks direct redirect", func(t *testing.T) {
+	t.Run("go.sum mismatch outranks direct redirect", func(t *testing.T) {
 		deps := []*DependencyScore{
 			{
 				Module:       "github.com/old/pkg",
@@ -2620,21 +2620,21 @@ func TestIntegrityFloor(t *testing.T) {
 		}
 		candidate := integrityFloor(deps, true)
 		if candidate.Score != 76 {
-			t.Errorf("Score = %.0f, want 76 (sumdb mismatch outranks the 60-point direct-redirect floor)", candidate.Score)
+			t.Errorf("Score = %.0f, want 76 (go.sum mismatch outranks the 60-point direct-redirect floor)", candidate.Score)
 		}
 	})
 }
 
-// TestScoreAll_SumDBMismatch_FloorsHeadlineToCritical verifies the end-to-end
+// TestScoreAll_GoSumMismatch_FloorsHeadlineToCritical verifies the end-to-end
 // path: a `go mod verify` mismatch floors the project headline into the
 // CRITICAL band via integrity_floor, even on an otherwise clean graph.
-func TestScoreAll_SumDBMismatch_FloorsHeadlineToCritical(t *testing.T) {
+func TestScoreAll_GoSumMismatch_FloorsHeadlineToCritical(t *testing.T) {
 	graph := testutil.MakeGraph(
 		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
 	)
 
 	input := twoAxisEmptyInput(graph)
-	input.SumDBMismatch = true
+	input.GoSumMismatch = true
 
 	ps := ScoreAll(input)
 

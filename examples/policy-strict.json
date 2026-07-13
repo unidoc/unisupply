@@ -8,5 +8,5 @@
   "no_typosquatting": true,
   "max_ci_score": 50,
   "forbid_replace_redirect": true,
-  "require_sumdb_verified": true
+  "require_gosum_verified": true
 }

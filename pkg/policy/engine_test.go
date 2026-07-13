@@ -164,8 +164,8 @@ func TestDefaultStrictPolicy(t *testing.T) {
 	if !p.ForbidReplaceRedirect {
 		t.Errorf("ForbidReplaceRedirect: expected true")
 	}
-	if !p.RequireSumDBVerified {
-		t.Errorf("RequireSumDBVerified: expected true")
+	if !p.RequireGoSumVerified {
+		t.Errorf("RequireGoSumVerified: expected true")
 	}
 }
 
@@ -626,18 +626,18 @@ func TestEvaluate_ForbidReplaceRedirect_VersionPinPasses(t *testing.T) {
 	}
 }
 
-// TestEvaluate_RequireSumDBVerified_Mismatch verifies that a confirmed
-// `go mod verify` mismatch fails the require_sumdb_verified rule and the
-// violation carries the sumdb_mismatch finding detail.
-func TestEvaluate_RequireSumDBVerified_Mismatch(t *testing.T) {
-	p := &policy.Policy{RequireSumDBVerified: true}
+// TestEvaluate_RequireGoSumVerified_Mismatch verifies that a confirmed
+// `go mod verify` mismatch fails the require_gosum_verified rule and the
+// violation carries the gosum_mismatch finding detail.
+func TestEvaluate_RequireGoSumVerified_Mismatch(t *testing.T) {
+	p := &policy.Policy{RequireGoSumVerified: true}
 
 	input := makeEvalInput(nil, 0)
 	input.IntegrityReport = &scanner.IntegrityReport{
-		SumDBVerified: scanner.SumDBVerifiedFalse,
+		GoSumVerified: scanner.GoSumVerifiedFalse,
 		Findings: []scanner.IntegrityFinding{
 			{
-				Category: "sumdb_mismatch",
+				Category: "gosum_mismatch",
 				Severity: scanner.IntegrityCritical,
 				Module:   "go.sum",
 				Detail:   "go mod verify failed: verifying gopkg.in/yaml.v3@v3.0.1/go.mod: checksum mismatch",
@@ -653,28 +653,28 @@ func TestEvaluate_RequireSumDBVerified_Mismatch(t *testing.T) {
 	if len(result.Violations) != 1 {
 		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
 	}
-	if result.Violations[0].Rule != "require_sumdb_verified" {
-		t.Errorf("expected rule 'require_sumdb_verified', got %s", result.Violations[0].Rule)
+	if result.Violations[0].Rule != "require_gosum_verified" {
+		t.Errorf("expected rule 'require_gosum_verified', got %s", result.Violations[0].Rule)
 	}
 	if result.Violations[0].Detail != input.IntegrityReport.Findings[0].Detail {
-		t.Errorf("expected violation to carry the sumdb_mismatch detail, got %q", result.Violations[0].Detail)
+		t.Errorf("expected violation to carry the gosum_mismatch detail, got %q", result.Violations[0].Detail)
 	}
 }
 
-// TestEvaluate_RequireSumDBVerified_UnknownStatesPass verifies the
+// TestEvaluate_RequireGoSumVerified_UnknownStatesPass verifies the
 // honest-UNKNOWN contract: "true", "offline", "skipped", and never-attempted
 // verification all pass — only a confirmed mismatch fails.
-func TestEvaluate_RequireSumDBVerified_UnknownStatesPass(t *testing.T) {
-	p := &policy.Policy{RequireSumDBVerified: true}
+func TestEvaluate_RequireGoSumVerified_UnknownStatesPass(t *testing.T) {
+	p := &policy.Policy{RequireGoSumVerified: true}
 
 	for _, state := range []string{
-		scanner.SumDBVerifiedTrue,
-		scanner.SumDBVerifiedOffline,
-		scanner.SumDBVerifiedSkipped,
+		scanner.GoSumVerifiedTrue,
+		scanner.GoSumVerifiedOffline,
+		scanner.GoSumVerifiedSkipped,
 		"", // verification never attempted
 	} {
 		input := makeEvalInput(nil, 0)
-		input.IntegrityReport = &scanner.IntegrityReport{SumDBVerified: state}
+		input.IntegrityReport = &scanner.IntegrityReport{GoSumVerified: state}
 
 		result := p.Evaluate(input)
 

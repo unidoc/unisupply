@@ -529,8 +529,8 @@ func writeIntegrityReportText(w io.Writer, ir *scanner.IntegrityReport, c func(s
 	fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
 	fmt.Fprintf(w, "  Replace directives: %d (%d redirect to a different module)\n", ir.ReplaceCount, ir.RedirectCount)
 	fmt.Fprintf(w, "  Exclude directives: %d\n", ir.ExcludeCount)
-	if ir.SumDBVerified != "" {
-		fmt.Fprintf(w, "  go.sum verification (go mod verify): %s\n", c(sumdbColor(ir.SumDBVerified), sumdbLabel(ir.SumDBVerified)))
+	if ir.GoSumVerified != "" {
+		fmt.Fprintf(w, "  go.sum verification (go mod verify): %s\n", c(gosumColor(ir.GoSumVerified), gosumLabel(ir.GoSumVerified)))
 	}
 	fmt.Fprintln(w)
 
@@ -590,29 +590,29 @@ func ciRiskColor(level scanner.CIRiskLevel) string {
 	}
 }
 
-// sumdbLabel renders IntegrityReport.SumDBVerified in honest-UNKNOWN style:
+// gosumLabel renders IntegrityReport.GoSumVerified in honest-UNKNOWN style:
 // only a confirmed pass says "verified", only a confirmed mismatch says
 // "FAILED"; everything else is explicitly not-a-result.
-func sumdbLabel(state string) string {
+func gosumLabel(state string) string {
 	switch state {
-	case scanner.SumDBVerifiedTrue:
+	case scanner.GoSumVerifiedTrue:
 		return "verified"
-	case scanner.SumDBVerifiedFalse:
+	case scanner.GoSumVerifiedFalse:
 		return "FAILED — checksum mismatch"
-	case scanner.SumDBVerifiedOffline:
+	case scanner.GoSumVerifiedOffline:
 		return "UNKNOWN (offline — verification skipped)"
-	case scanner.SumDBVerifiedSkipped:
-		return "UNKNOWN (skipped — no go.sum or go toolchain unavailable)"
+	case scanner.GoSumVerifiedSkipped:
+		return "UNKNOWN (skipped — verification could not run to completion)"
 	default:
 		return state
 	}
 }
 
-func sumdbColor(state string) string {
+func gosumColor(state string) string {
 	switch state {
-	case scanner.SumDBVerifiedTrue:
+	case scanner.GoSumVerifiedTrue:
 		return colorGreen
-	case scanner.SumDBVerifiedFalse:
+	case scanner.GoSumVerifiedFalse:
 		return colorRed
 	default:
 		return colorDim

@@ -227,12 +227,12 @@ func run(cfg *runConfig) error {
 	}
 
 	// go.sum presence/completeness (offline file logic, needs the resolved
-	// graph) and sumdb verification via `go mod verify` (local module cache
+	// graph) and go.sum verification via `go mod verify` (local module cache
 	// against go.sum; the toolchain handles GOPRIVATE/GONOSUMDB itself).
 	rep.Stage("Verifying go.sum (go mod verify)")
 	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
-	integrityScanner.VerifySumDB(ctx, gomodPath, integrityReport)
-	rep.Done("sumdb: %s", integrityReport.SumDBVerified)
+	integrityScanner.VerifyGoSum(ctx, gomodPath, integrityReport)
+	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
@@ -310,7 +310,7 @@ func run(cfg *runConfig) error {
 		AIGenRisks:    aiGenRisks,
 		TrustIndex:    trustIndex,
 		Integrity:     integrityClasses,
-		SumDBMismatch: integrityReport.SumDBVerified == scanner.SumDBVerifiedFalse,
+		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
 		DebugMode:     cfg.debugScoring,
 		Now:           scanStart,
 	})

@@ -69,11 +69,11 @@ type Policy struct {
 	// dependency is not a safe blind spot.
 	ForbidReplaceRedirect bool `json:"forbid_replace_redirect,omitempty"`
 
-	// RequireSumDBVerified fails when `go mod verify` reported a checksum
-	// mismatch (IntegrityReport.SumDBVerified == "false"). Honest-UNKNOWN
+	// RequireGoSumVerified fails when `go mod verify` reported a checksum
+	// mismatch (IntegrityReport.GoSumVerified == "false"). Honest-UNKNOWN
 	// outcomes ("offline", "skipped", or verification never attempted) do NOT
 	// fail — this rule rejects confirmed tampering, not missing data.
-	RequireSumDBVerified bool `json:"require_sumdb_verified,omitempty"`
+	RequireGoSumVerified bool `json:"require_gosum_verified,omitempty"`
 }
 
 // Violation represents a single policy violation.
@@ -237,19 +237,19 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 	}
 
-	// Sumdb verification: fail only on a confirmed mismatch. Use the
-	// sumdb_mismatch finding detail when present so the violation carries the
+	// Go.sum verification: fail only on a confirmed mismatch. Use the
+	// gosum_mismatch finding detail when present so the violation carries the
 	// actual `go mod verify` output.
-	if p.RequireSumDBVerified && input.IntegrityReport != nil &&
-		input.IntegrityReport.SumDBVerified == scanner.SumDBVerifiedFalse {
+	if p.RequireGoSumVerified && input.IntegrityReport != nil &&
+		input.IntegrityReport.GoSumVerified == scanner.GoSumVerifiedFalse {
 		detail := "go mod verify reported a checksum mismatch — go.sum does not match the local module cache"
 		for _, f := range input.IntegrityReport.Findings {
-			if f.Category == "sumdb_mismatch" {
+			if f.Category == "gosum_mismatch" {
 				detail = f.Detail
 				break
 			}
 		}
-		result.addError("require_sumdb_verified", "go.sum", detail)
+		result.addError("require_gosum_verified", "go.sum", detail)
 	}
 
 	return result
@@ -319,7 +319,7 @@ func DefaultStrictPolicy() *Policy {
 		NoTyposquatting:       true,
 		MaxCIScore:            &maxCI,
 		ForbidReplaceRedirect: true,
-		RequireSumDBVerified:  true,
+		RequireGoSumVerified:  true,
 	}
 }
 

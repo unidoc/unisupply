@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -370,34 +371,114 @@ func TestScanGoSum_VendorSkipsCompleteness(t *testing.T) {
 	}
 }
 
-// --- sumdb verification (VerifySumDB) ---
+// --- go.sum verification (VerifyGoSum) ---
 
-func TestVerifySumDB_Offline(t *testing.T) {
+func TestVerifyGoSum_Offline(t *testing.T) {
 	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
 
 	report := &IntegrityReport{}
 	is := NewIntegrityScanner()
 	is.Offline = true
-	is.VerifySumDB(context.Background(), gomodPath, report)
+	is.VerifyGoSum(context.Background(), gomodPath, report)
 
-	if report.SumDBVerified != SumDBVerifiedOffline {
-		t.Errorf("SumDBVerified = %q, want %q", report.SumDBVerified, SumDBVerifiedOffline)
+	if report.GoSumVerified != GoSumVerifiedOffline {
+		t.Errorf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedOffline)
 	}
 	if len(report.Findings) != 0 {
 		t.Errorf("Findings length = %d, want 0 (offline must never be a failure)", len(report.Findings))
 	}
 }
 
-func TestVerifySumDB_NoGoSum(t *testing.T) {
+func TestVerifyGoSum_NoGoSum(t *testing.T) {
 	gomodPath := gosumFixture(t, "")
 
 	report := &IntegrityReport{}
-	NewIntegrityScanner().VerifySumDB(context.Background(), gomodPath, report)
+	NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
 
-	if report.SumDBVerified != SumDBVerifiedSkipped {
-		t.Errorf("SumDBVerified = %q, want %q", report.SumDBVerified, SumDBVerifiedSkipped)
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedSkipped)
 	}
 	if len(report.Findings) != 0 {
 		t.Errorf("Findings length = %d, want 0 (missing go.sum is gosum_missing's job, not a mismatch)", len(report.Findings))
+	}
+}
+
+func TestVerifyGoSum_ContextCancelled(t *testing.T) {
+	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().VerifyGoSum(ctx, gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q (killed process is not an integrity signal)", report.GoSumVerified, GoSumVerifiedSkipped)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0 (cancellation must never be a failure)", len(report.Findings))
+	}
+}
+
+// fakeGo puts a shell script named "go" on PATH that prints output and exits
+// with code, so VerifyGoSum's handling of `go mod verify` failures can be
+// exercised without a real module cache or network.
+func fakeGo(t *testing.T, output string, code int) {
+	t.Helper()
+	binDir := t.TempDir()
+	outFile := filepath.Join(binDir, "output.txt")
+	if err := os.WriteFile(outFile, []byte(output+"\n"), 0o600); err != nil {
+		t.Fatalf("writing fake go output: %v", err)
+	}
+	// PATH is replaced wholesale below, so the script must not rely on it —
+	// use the absolute /bin/cat.
+	script := "#!/bin/sh\n/bin/cat " + outFile + "\nexit " + strconv.Itoa(code) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(script), 0o700); err != nil { //nolint:gosec // test helper must be executable
+		t.Fatalf("writing fake go: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
+func TestVerifyGoSum_NonMismatchFailureSkips(t *testing.T) {
+	gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+	fakeGo(t, "go: github.com/foo/bar@v1.0.0: Get \"https://proxy.golang.org/...\": dial tcp: no such host", 1)
+
+	report := &IntegrityReport{}
+	NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
+
+	if report.GoSumVerified != GoSumVerifiedSkipped {
+		t.Errorf("GoSumVerified = %q, want %q (cold cache / network failure is not tampering)", report.GoSumVerified, GoSumVerifiedSkipped)
+	}
+	if len(report.Findings) != 0 {
+		t.Errorf("Findings length = %d, want 0: %+v", len(report.Findings), report.Findings)
+	}
+}
+
+func TestVerifyGoSum_MismatchMarkersFail(t *testing.T) {
+	outputs := map[string]string{
+		"verify modified":   "github.com/foo/bar v1.0.0: dir has been modified (/cache/github.com/foo/bar@v1.0.0)",
+		"checksum mismatch": "verifying github.com/foo/bar@v1.0.0/go.mod: checksum mismatch\n\tdownloaded: h1:aaa=\n\tgo.sum:     h1:bbb=\n\nSECURITY ERROR",
+	}
+	for name, output := range outputs {
+		t.Run(name, func(t *testing.T) {
+			gomodPath := gosumFixture(t, "github.com/foo/bar v1.0.0/go.mod h1:def=\n")
+			fakeGo(t, output, 1)
+
+			report := &IntegrityReport{}
+			NewIntegrityScanner().VerifyGoSum(context.Background(), gomodPath, report)
+
+			if report.GoSumVerified != GoSumVerifiedFalse {
+				t.Fatalf("GoSumVerified = %q, want %q", report.GoSumVerified, GoSumVerifiedFalse)
+			}
+			if len(report.Findings) != 1 {
+				t.Fatalf("Findings length = %d, want 1: %+v", len(report.Findings), report.Findings)
+			}
+			if report.Findings[0].Category != "gosum_mismatch" {
+				t.Errorf("Category = %q, want gosum_mismatch", report.Findings[0].Category)
+			}
+			if report.Findings[0].Severity != IntegrityCritical {
+				t.Errorf("Severity = %q, want %q", report.Findings[0].Severity, IntegrityCritical)
+			}
+		})
 	}
 }

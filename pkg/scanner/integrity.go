@@ -30,14 +30,14 @@ const (
 	IntegrityCritical IntegrityRiskLevel = "CRITICAL"
 )
 
-// SumDBVerified states for IntegrityReport.SumDBVerified. String-valued (not
+// GoSumVerified states for IntegrityReport.GoSumVerified. String-valued (not
 // bool) so the report can distinguish honest-UNKNOWN outcomes ("offline",
 // "skipped") from a verified pass/fail.
 const (
-	SumDBVerifiedTrue    = "true"    // `go mod verify` exited 0
-	SumDBVerifiedFalse   = "false"   // `go mod verify` reported a mismatch
-	SumDBVerifiedOffline = "offline" // offline mode — verification not attempted
-	SumDBVerifiedSkipped = "skipped" // go.sum absent, or the go toolchain could not be run
+	GoSumVerifiedTrue    = "true"    // `go mod verify` exited 0
+	GoSumVerifiedFalse   = "false"   // `go mod verify` reported a mismatch
+	GoSumVerifiedOffline = "offline" // offline mode — verification not attempted
+	GoSumVerifiedSkipped = "skipped" // go.sum absent, cancelled, or verify could not complete for a non-integrity reason
 )
 
 // Integrity finding categories. Exported so consumers (e.g. the policy
@@ -62,7 +62,7 @@ type IntegrityFinding struct {
 // IntegrityReport holds the project-level go.mod directive audit.
 //
 // This is shared scaffolding for the integrity trio (plan 46 Phase A):
-// replace/exclude directives are audited here now; go.sum/sumdb checks and
+// replace/exclude directives are audited here now; go.sum checks and
 // pseudo-version findings are added by later plans (77, 79) as additional
 // fields/categories on this same report.
 type IntegrityReport struct {
@@ -71,17 +71,17 @@ type IntegrityReport struct {
 	ExcludeCount  int                `json:"exclude_count"`
 	RedirectCount int                `json:"redirect_count"` // HIGH-severity replaces (redirect to a different module)
 
-	// SumDBVerified records the outcome of `go mod verify` — one of the
-	// SumDBVerified* constants ("true"/"false"/"offline"/"skipped"), or empty
+	// GoSumVerified records the outcome of `go mod verify` — one of the
+	// GoSumVerified* constants ("true"/"false"/"offline"/"skipped"), or empty
 	// when verification was never attempted.
-	SumDBVerified string `json:"sumdb_verified,omitempty"`
+	GoSumVerified string `json:"gosum_verified,omitempty"`
 }
 
 // IntegrityScanner audits go.mod replace/exclude directives and go.sum
 // integrity for supply chain risk.
 type IntegrityScanner struct {
-	// Offline skips sumdb verification (`go mod verify`) entirely, reporting
-	// SumDBVerifiedOffline. Placeholder for the --offline CLI flag (plan 81).
+	// Offline skips go.sum verification (`go mod verify`) entirely, reporting
+	// GoSumVerifiedOffline. Placeholder for the --offline CLI flag (plan 81).
 	Offline bool
 }
 
@@ -247,7 +247,7 @@ const gosumIncompleteListCap = 10
 // full-graph join over-reports. A direct requirement is always an MVS root
 // whose go.mod hash must be recorded — its absence is a real gap. Transitive
 // integrity is covered by `go mod verify` and the toolchain's own load-time
-// checks (see VerifySumDB).
+// checks (see VerifyGoSum).
 //
 // Replaced modules are skipped — local-path and redirect replaces legitimately
 // have no go.sum entry for the original module. When a vendor/modules.txt is
@@ -315,24 +315,34 @@ func (is *IntegrityScanner) ScanGoSum(gomodPath string, gomod *parser.GoMod, gra
 	})
 }
 
-// sumdbDetailCap bounds how much of `go mod verify` output is embedded in the
-// sumdb_mismatch finding detail.
-const sumdbDetailCap = 500
+// gosumDetailCap bounds how much of `go mod verify` output is embedded in the
+// gosum_mismatch finding detail.
+const gosumDetailCap = 500
 
-// VerifySumDB shells out to `go mod verify` in gomodPath's directory and
-// records the outcome in report.SumDBVerified:
+// gosumMismatchMarkers are the `go mod verify` output fragments that identify
+// a genuine integrity failure. "has been modified" is verify's own report of
+// cache tampering; "checksum mismatch" / "SECURITY ERROR" are printed by the
+// toolchain when a hash disagrees with go.sum. Any other non-zero exit (cold
+// module cache with no network, proxy errors, …) is an environment problem,
+// not an integrity signal.
+var gosumMismatchMarkers = []string{"has been modified", "checksum mismatch", "SECURITY ERROR"}
+
+// VerifyGoSum shells out to `go mod verify` in gomodPath's directory and
+// records the outcome in report.GoSumVerified:
 //
 //   - exit 0 → "true"
-//   - non-zero exit → "false" + CRITICAL sumdb_mismatch finding with the
-//     command output as detail
-//   - Offline mode, go.sum absent, or the toolchain failing to run at all →
-//     honest-UNKNOWN "offline"/"skipped", never a failure
+//   - non-zero exit whose output carries a mismatch marker → "false" +
+//     CRITICAL gosum_mismatch finding with the command output as detail
+//   - Offline mode, go.sum absent, context cancellation, the toolchain
+//     failing to run, or any other non-mismatch failure (e.g. a cold module
+//     cache with no network) → honest-UNKNOWN "offline"/"skipped", never a
+//     failure
 //
 // `go mod verify` checks the local module cache against go.sum and honors
 // GOPRIVATE/GONOSUMDB itself, so the environment is inherited untouched.
-func (is *IntegrityScanner) VerifySumDB(ctx context.Context, gomodPath string, report *IntegrityReport) {
+func (is *IntegrityScanner) VerifyGoSum(ctx context.Context, gomodPath string, report *IntegrityReport) {
 	if is.Offline {
-		report.SumDBVerified = SumDBVerifiedOffline
+		report.GoSumVerified = GoSumVerifiedOffline
 		return
 	}
 
@@ -341,7 +351,7 @@ func (is *IntegrityScanner) VerifySumDB(ctx context.Context, gomodPath string, r
 		// Nothing to verify — gosum_missing (from ScanGoSum) already covers
 		// the risk; running verify anyway would only duplicate it as a
 		// misleading mismatch.
-		report.SumDBVerified = SumDBVerifiedSkipped
+		report.GoSumVerified = GoSumVerifiedSkipped
 		return
 	}
 
@@ -349,7 +359,14 @@ func (is *IntegrityScanner) VerifySumDB(ctx context.Context, gomodPath string, r
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		report.SumDBVerified = SumDBVerifiedTrue
+		report.GoSumVerified = GoSumVerifiedTrue
+		return
+	}
+
+	if ctx.Err() != nil {
+		// The scan deadline expired or was cancelled — the process was killed
+		// mid-run, so the non-zero exit says nothing about integrity.
+		report.GoSumVerified = GoSumVerifiedSkipped
 		return
 	}
 
@@ -357,21 +374,33 @@ func (is *IntegrityScanner) VerifySumDB(ctx context.Context, gomodPath string, r
 	if !errors.As(err, &exitErr) {
 		// The go binary is missing or could not be started — an environment
 		// problem, not an integrity signal.
-		report.SumDBVerified = SumDBVerifiedSkipped
+		report.GoSumVerified = GoSumVerifiedSkipped
 		return
 	}
 
 	detail := strings.TrimSpace(string(output))
-	if len(detail) > sumdbDetailCap {
-		detail = detail[:sumdbDetailCap] + "…"
+	mismatch := false
+	for _, marker := range gosumMismatchMarkers {
+		if strings.Contains(detail, marker) {
+			mismatch = true
+			break
+		}
 	}
-	if detail == "" {
-		detail = fmt.Sprintf("go mod verify exited with %s", exitErr)
+	if !mismatch {
+		// Non-zero exit without a mismatch marker: verify could not complete
+		// (e.g. it had to fetch a module missing from the cache and the
+		// network/proxy was unavailable). Not evidence of tampering.
+		report.GoSumVerified = GoSumVerifiedSkipped
+		return
 	}
 
-	report.SumDBVerified = SumDBVerifiedFalse
+	if len(detail) > gosumDetailCap {
+		detail = detail[:gosumDetailCap] + "…"
+	}
+
+	report.GoSumVerified = GoSumVerifiedFalse
 	report.Findings = append(report.Findings, IntegrityFinding{
-		Category:    "sumdb_mismatch",
+		Category:    "gosum_mismatch",
 		Severity:    IntegrityCritical,
 		Module:      "go.sum",
 		Detail:      "go mod verify failed: " + detail,
