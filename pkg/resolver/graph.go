@@ -75,7 +75,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 			if req.Indirect {
 				continue
 			}
-			_, replaced := gomod.Replaces[req.Path]
+			_, replaced := gomod.ReplacementFor(req.Path, req.Version)
 			graph.Dependencies[req.Path] = &Dependency{
 				Module:   req,
 				Direct:   true,
@@ -94,7 +94,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))
 		// Fall back: add everything from go.mod.
 		for _, req := range gomod.Requirements {
-			_, replaced := gomod.Replaces[req.Path]
+			_, replaced := gomod.ReplacementFor(req.Path, req.Version)
 			graph.Dependencies[req.Path] = &Dependency{
 				Module:   req,
 				Direct:   !req.Indirect,
@@ -224,7 +224,7 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 			continue
 		}
 
-		_, replaced := gomod.Replaces[modPath]
+		_, replaced := gomod.ReplacementFor(modPath, version)
 		isDirect := directPaths[modPath]
 
 		depth := 1 // default for modules not reached by BFS (shouldn't happen)
@@ -353,7 +353,7 @@ func addFromGoSum(sumPath string, graph *Graph, gomod *parser.GoMod) error {
 			continue
 		}
 
-		_, replaced := gomod.Replaces[entry.Path]
+		_, replaced := gomod.ReplacementFor(entry.Path, entry.Version)
 		graph.Dependencies[entry.Path] = &Dependency{
 			Module: parser.Module{
 				Path:     entry.Path,

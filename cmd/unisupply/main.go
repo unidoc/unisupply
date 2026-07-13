@@ -203,6 +203,13 @@ func run(cfg *runConfig) error {
 	projectDir := filepath.Dir(gomodPath)
 	rep.Done("%s", gomodPath)
 
+	// Audit replace/exclude directives. Pure go.mod analysis (no network calls);
+	// the per-module classification feeds the scorer below, and the report is
+	// wired into the text/JSON/PDF output next to the CI/CD report.
+	rep.Stage("Auditing go.mod directives")
+	integrityReport, integrityClasses := scanner.NewIntegrityScanner().ScanDirectives(gomod)
+	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
+
 	rep.Stage("Resolving dependency graph")
 	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
 	if err != nil {
@@ -293,6 +300,7 @@ func run(cfg *runConfig) error {
 		Resilience:  resilience,
 		AIGenRisks:  aiGenRisks,
 		TrustIndex:  trustIndex,
+		Integrity:   integrityClasses,
 		DebugMode:   cfg.debugScoring,
 		Now:         scanStart,
 	})
@@ -373,26 +381,29 @@ func run(cfg *runConfig) error {
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
-			NoColor:     cfg.noColor,
-			Verbose:     cfg.verbose,
-			MinRisk:     cfg.minRisk,
-			Writer:      writer,
-			CIReport:    ciReport,
-			Takeovers:   takeovers,
-			StdlibVulns: stdlibVulns,
+			NoColor:         cfg.noColor,
+			Verbose:         cfg.verbose,
+			MinRisk:         cfg.minRisk,
+			Writer:          writer,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
+			StdlibVulns:     stdlibVulns,
 		})
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
-			GoVersion: gomod.GoVersion,
-			CIReport:  ciReport,
-			Takeovers: takeovers,
+			GoVersion:       gomod.GoVersion,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
 		}, writer)
 	case "pdf":
 		err = report.WritePDF(ctx, graph, projectScore, report.PDFOptions{
-			OutputPath: cfg.output,
-			GoVersion:  gomod.GoVersion,
-			CIReport:   ciReport,
-			Takeovers:  takeovers,
+			OutputPath:      cfg.output,
+			GoVersion:       gomod.GoVersion,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
 		})
 	case "sbom-cyclonedx":
 		err = report.WriteCycloneDX(graph, projectScore, sbomOpts, writer)
@@ -434,10 +445,11 @@ func run(cfg *runConfig) error {
 		}
 
 		result := pol.Evaluate(policy.EvalInput{
-			ProjectScore: projectScore,
-			Maintainers:  maintainers,
-			Typosquats:   typosquats,
-			CIReport:     ciReport,
+			ProjectScore:    projectScore,
+			Maintainers:     maintainers,
+			Typosquats:      typosquats,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
 		})
 
 		if result.Pass {

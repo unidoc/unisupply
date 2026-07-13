@@ -161,6 +161,9 @@ func TestDefaultStrictPolicy(t *testing.T) {
 	if p.MaxCIScore == nil || *p.MaxCIScore != 50 {
 		t.Errorf("MaxCIScore: expected 50, got %v", p.MaxCIScore)
 	}
+	if !p.ForbidReplaceRedirect {
+		t.Errorf("ForbidReplaceRedirect: expected true")
+	}
 }
 
 func TestDefaultModeratePolicy(t *testing.T) {
@@ -535,6 +538,88 @@ func TestEvaluate_NoArchived(t *testing.T) {
 	}
 	if !strings.Contains(result.Violations[0].Detail, "archived") {
 		t.Errorf("expected detail to mention 'archived', got: %s", result.Violations[0].Detail)
+	}
+}
+
+// Tests for Evaluate - ForbidReplaceRedirect
+func TestEvaluate_ForbidReplaceRedirect_Redirect(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "replace_redirect",
+				Severity: scanner.IntegrityHigh,
+				Module:   "github.com/foo/bar",
+				Detail:   "github.com/foo/bar is redirected to a different module: github.com/attacker/bar",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "forbid_replace_redirect" {
+		t.Errorf("expected rule 'forbid_replace_redirect', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Module != "github.com/foo/bar" {
+		t.Errorf("expected module 'github.com/foo/bar', got %s", result.Violations[0].Module)
+	}
+}
+
+// TestEvaluate_ForbidReplaceRedirect_OtherHighFindingPasses verifies the rule
+// matches by finding category, not severity: a HIGH-severity finding of a
+// different kind (e.g. a future go.sum integrity check) must not trigger it.
+func TestEvaluate_ForbidReplaceRedirect_OtherHighFindingPasses(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "gosum_mismatch",
+				Severity: scanner.IntegrityHigh,
+				Module:   "github.com/foo/bar",
+				Detail:   "go.sum entry does not match module content",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (non-redirect HIGH finding must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidReplaceRedirect_VersionPinPasses verifies that a
+// version-pin (LOW) replace does not trigger the policy — only redirect
+// replaces are rejected.
+func TestEvaluate_ForbidReplaceRedirect_VersionPinPasses(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "replace_version_pin",
+				Severity: scanner.IntegrityLow,
+				Module:   "github.com/foo/bar",
+				Detail:   "github.com/foo/bar is version-pinned to v1.0.1",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (version-pin replace must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
 	}
 }
 

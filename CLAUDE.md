@@ -13,7 +13,7 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 9 security scanners        pkg/scanner/
+  ├── Run 10 security scanners       pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
@@ -21,8 +21,9 @@ CLI (pflag)
   │   ├── Resilience scoring
   │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
-  │   ├── Trust Index lookup (unitrust)
-  │   └── Build file scanning
+  │   ├── Build file scanning
+  │   ├── Integrity (go.mod replace/exclude audit)
+  │   └── Trust Index lookup (unitrust)
   ├── Compute risk scores             pkg/scorer/
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/
@@ -44,11 +45,12 @@ Risk Score (0-100) =
   + Typosquat Penalty      (0-20)
   + AI-Gen Penalty         (0-15)
   + Low-Resilience Penalty (0-6) // adds when resilience score < 30
+  + Replace Penalty        (0-20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
 ```
 
 Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
 
-## The 9 Scanners
+## The 10 Scanners
 
 | Scanner | What it checks | Data source |
 |---------|---------------|-------------|
@@ -60,6 +62,7 @@ Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
 | **AI-Generated** | Fresh modules, few releases, generic names | Heuristics |
 | **CI/CD** | Action pinning, permissions, secret exposure | .github/workflows/*.yml |
 | **Build Files** | Unpinned Docker images, curl\|bash patterns | Dockerfile, Makefile, *.sh |
+| **Integrity** | `go.mod` replace/exclude directive audit | `go.mod` (offline) |
 | **Trust Index** | Package trust scores from curated database | unitrust API |
 
 ## Integration with unitrust
@@ -98,6 +101,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 | `pkg/scanner/ci.go` | CI/CD pipeline audit |
 | `pkg/scanner/buildfiles.go` | Dockerfile/Makefile scanning |
 | `pkg/scanner/trustindex.go` | unitrust API integration |
+| `pkg/scanner/integrity.go` | `go.mod` replace/exclude directive audit |
 | `pkg/scorer/risk.go` | Risk score computation |
 | `pkg/policy/engine.go` | Organizational policy evaluation |
 | `pkg/report/text.go` | Terminal output |
@@ -160,6 +164,7 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
   "no_archived": true,
   "no_typosquatting": true,
   "max_ci_score": 50,
+  "forbid_replace_redirect": true,
   "blocked_modules": ["github.com/suspicious/pkg"],
   "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
@@ -231,7 +236,7 @@ just clean                     # remove artifacts
 
 ## Status
 
-**v0.4.0 — Feature complete.** All 9 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
+**v0.4.0 — Feature complete.** All 10 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
 
 ## Relationship to UniDoc ecosystem
 

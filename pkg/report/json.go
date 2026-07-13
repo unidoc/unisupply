@@ -23,9 +23,9 @@ type JSONReport struct {
 
 	// MeanDepRiskScore is the legacy weighted-mean axis (non-normative; retained
 	// for dashboards and trend lines). SeverityAdjustedVulnScore is the
-	// CVE-driven step-function axis. HeadlineDriver records which of the four
+	// CVE-driven step-function axis. HeadlineDriver records which of the five
 	// candidates produced overall_risk_score: "severity_adjusted", "p95_dep_risk",
-	// "archived_floor", or "cve_floor".
+	// "archived_floor", "cve_floor", or "integrity_floor".
 	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
 	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
 	HeadlineDriver            string `json:"headline_driver,omitempty"`
@@ -51,13 +51,14 @@ type JSONReport struct {
 
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
-	Warnings          []string          `json:"warnings,omitempty"`
-	Summary           JSONSummary       `json:"summary"`
-	Deps              []JSONDependency  `json:"dependencies"`
-	CI                *JSONCIReport     `json:"ci_cd_assessment,omitempty"`
-	CIFindings        []JSONFlatFinding `json:"ci_findings"`
-	BuildFileFindings []JSONFlatFinding `json:"build_file_findings"`
-	Takeovers         []JSONTakeover    `json:"takeover_candidates,omitempty"`
+	Warnings          []string             `json:"warnings,omitempty"`
+	Summary           JSONSummary          `json:"summary"`
+	Deps              []JSONDependency     `json:"dependencies"`
+	CI                *JSONCIReport        `json:"ci_cd_assessment,omitempty"`
+	CIFindings        []JSONFlatFinding    `json:"ci_findings"`
+	BuildFileFindings []JSONFlatFinding    `json:"build_file_findings"`
+	Integrity         *JSONIntegrityReport `json:"module_directives,omitempty"`
+	Takeovers         []JSONTakeover       `json:"takeover_candidates,omitempty"`
 
 	// TimeBombs lists every archived dependency and every CRITICAL CVE across
 	// all non-test dependencies, regardless of whether the headline score
@@ -127,6 +128,10 @@ type JSONDependency struct {
 	Maintainer     *JSONMaintainer     `json:"maintainer,omitempty"`
 	Typosquat      *JSONTyposquat      `json:"typosquat,omitempty"`
 	RiskFactors    []string            `json:"risk_factors,omitempty"`
+	// ReplaceClass mirrors scorer.DependencyScore.ReplaceClass: the severity of
+	// this dependency's go.mod replace directive ("LOW"/"MEDIUM"/"HIGH"), or
+	// omitted when the dependency is not replaced.
+	ReplaceClass string `json:"replace_class,omitempty"`
 }
 
 // JSONVuln is a vulnerability entry.
@@ -255,6 +260,23 @@ type JSONCIFinding struct {
 	Remediation string `json:"remediation"`
 }
 
+// JSONIntegrityReport holds the go.mod replace/exclude directive audit.
+type JSONIntegrityReport struct {
+	ReplaceCount  int                    `json:"replace_count"`
+	ExcludeCount  int                    `json:"exclude_count"`
+	RedirectCount int                    `json:"redirect_count"`
+	Findings      []JSONIntegrityFinding `json:"findings,omitempty"`
+}
+
+// JSONIntegrityFinding holds a single go.mod directive finding.
+type JSONIntegrityFinding struct {
+	Category    string `json:"category"`
+	Severity    string `json:"severity"`
+	Module      string `json:"module"`
+	Detail      string `json:"detail"`
+	Remediation string `json:"remediation"`
+}
+
 // JSONHeadline holds the project-level headline risk summary, including which
 // scoring candidate drove the overall score and its key driving dependency.
 type JSONHeadline struct {
@@ -263,7 +285,7 @@ type JSONHeadline struct {
 	Driver      string  `json:"driver"`
 	DrivingItem string  `json:"driving_item,omitempty"`
 	Reason      string  `json:"reason,omitempty"`
-	// Candidates contains the winning candidate only. All four candidate scores
+	// Candidates contains the winning candidate only. All five candidate scores
 	// will be included here once ProjectScore stores them all; for now use
 	// Driver/DrivingItem/Reason for the headline and per-dep data for the rest.
 	Candidates []JSONCandidate `json:"candidates"`
@@ -308,9 +330,10 @@ type JSONTakeover struct {
 
 // JSONOptions configures JSON output.
 type JSONOptions struct {
-	GoVersion string
-	CIReport  *scanner.CIReport
-	Takeovers []*scanner.MaintainerInfo
+	GoVersion       string
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
 }
 
 // WriteJSON generates JSON output.
@@ -369,6 +392,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			},
 			DependencyPath: ds.DependencyPath,
 			RiskFactors:    ds.RiskFactors,
+			ReplaceClass:   string(ds.ReplaceClass),
 		}
 
 		for i := range ds.Vulns {
@@ -544,6 +568,27 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		}
 
 		report.CI = ciJSON
+	}
+
+	// Module directives assessment. Always emitted when the scanner ran
+	// (opts.IntegrityReport != nil), including zero-finding scans, so
+	// consumers can distinguish "no directives" from "scanner not invoked".
+	if opts.IntegrityReport != nil {
+		integrityJSON := &JSONIntegrityReport{
+			ReplaceCount:  opts.IntegrityReport.ReplaceCount,
+			ExcludeCount:  opts.IntegrityReport.ExcludeCount,
+			RedirectCount: opts.IntegrityReport.RedirectCount,
+		}
+		for _, f := range opts.IntegrityReport.Findings {
+			integrityJSON.Findings = append(integrityJSON.Findings, JSONIntegrityFinding{
+				Category:    f.Category,
+				Severity:    string(f.Severity),
+				Module:      f.Module,
+				Detail:      f.Detail,
+				Remediation: f.Remediation,
+			})
+		}
+		report.Integrity = integrityJSON
 	}
 
 	// Takeover candidates.

@@ -28,13 +28,14 @@ const (
 
 // TextOptions configures text output.
 type TextOptions struct {
-	NoColor     bool
-	Verbose     bool
-	MinRisk     int
-	Writer      io.Writer
-	CIReport    *scanner.CIReport
-	Takeovers   []*scanner.MaintainerInfo
-	StdlibVulns []scanner.Vulnerability
+	NoColor         bool
+	Verbose         bool
+	MinRisk         int
+	Writer          io.Writer
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
+	StdlibVulns     []scanner.Vulnerability
 }
 
 // WriteText generates the human-readable terminal output.
@@ -60,7 +61,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score (four-candidate headline).
+	// Overall score (five-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
 	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
@@ -195,6 +196,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	// so reviewers can confirm the scanner ran even when there are no findings.
 	if opts.CIReport != nil {
 		writeCIReportText(w, opts.CIReport, c)
+	}
+
+	// Module directives section — always rendered when the scanner ran, so
+	// reviewers can confirm the audit happened even when there are no findings.
+	if opts.IntegrityReport != nil {
+		writeIntegrityReportText(w, opts.IntegrityReport, c)
 	}
 
 	// Takeover Candidates section.
@@ -448,6 +455,9 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	if ds.TyposquatBonus > 0 {
 		breakdown += fmt.Sprintf(" +typosquat=%.1f", ds.TyposquatBonus)
 	}
+	if ds.IntegrityBonus > 0 {
+		breakdown += fmt.Sprintf(" +integrity(replace)=%.1f", ds.IntegrityBonus)
+	}
 	if ds.FlooredTo > 0 {
 		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
 	}
@@ -514,6 +524,25 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 	fmt.Fprintln(w)
 }
 
+func writeIntegrityReportText(w io.Writer, ir *scanner.IntegrityReport, c func(string, string) string) {
+	fmt.Fprintf(w, "\n%s\n", c(colorBold, "MODULE DIRECTIVES"))
+	fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
+	fmt.Fprintf(w, "  Replace directives: %d (%d redirect to a different module)\n", ir.ReplaceCount, ir.RedirectCount)
+	fmt.Fprintf(w, "  Exclude directives: %d\n\n", ir.ExcludeCount)
+
+	if len(ir.Findings) == 0 {
+		fmt.Fprintf(w, "  No findings\n")
+		return
+	}
+
+	for _, f := range ir.Findings {
+		sColor := integrityRiskColor(f.Severity)
+		fmt.Fprintf(w, "  %s %s\n", c(sColor, "["+string(f.Severity)+"]"), f.Detail)
+		fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fix:"), f.Remediation)
+	}
+	fmt.Fprintln(w)
+}
+
 func writeTakeoverText(w io.Writer, takeovers []*scanner.MaintainerInfo, c func(string, string) string) {
 	fmt.Fprintf(w, "\n%s\n", c(colorCyan, "PACKAGES ELIGIBLE FOR MAINTENANCE TAKEOVER"))
 	fmt.Fprintf(w, "%s\n", c(colorCyan, strings.Repeat("─", 40)))
@@ -554,6 +583,19 @@ func ciRiskColor(level scanner.CIRiskLevel) string {
 		return colorYellow
 	default:
 		return colorGreen
+	}
+}
+
+func integrityRiskColor(level scanner.IntegrityRiskLevel) string {
+	switch level {
+	case scanner.IntegrityHigh:
+		return colorOrange
+	case scanner.IntegrityMedium:
+		return colorYellow
+	case scanner.IntegrityLow:
+		return colorGreen
+	default:
+		return colorDim
 	}
 }
 

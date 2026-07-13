@@ -496,7 +496,7 @@ func TestIsTrustedNamespace(t *testing.T) {
 func TestScoreDependency_NoRisk(t *testing.T) {
 	dep := testutil.MakeDep("golang.org/x/text", "v1.0.0", true, 0)
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 	// Using trusted namespace should result in minimal risk
 	if ds.RiskScore > 15 {
@@ -517,7 +517,7 @@ func TestScoreDependency_WithVuln(t *testing.T) {
 		testutil.MakeVuln("CVE-2024-1234", "CRITICAL", "v1.1.0"),
 	}
 
-	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 	if ds.RiskScore < 51 {
 		t.Errorf("expected RiskScore >= 51 (HIGH floor), got %d", ds.RiskScore)
@@ -537,7 +537,7 @@ func TestScoreDependency_TyposquatBonus(t *testing.T) {
 		Confidence: 1.0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil, "", time.Now())
 
 	// Score should be 0 base + 20 bonus = 20, gets rounded and adjusted
 	// Due to rounding, can be slightly higher
@@ -570,7 +570,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: true,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, time.Now())
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", time.Now())
 
 		// Score should be 0 base + (100 * 0.15) = 15 bonus.
 		if ds.RiskScore < 15 || ds.RiskScore > 26 {
@@ -596,7 +596,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: false,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, time.Now())
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", time.Now())
 
 		// Bonus still applied.
 		if ds.RiskScore < 15 {
@@ -617,7 +617,7 @@ func TestScoreDependency_ResilienceBonus(t *testing.T) {
 		Score: 0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, "", time.Now())
 
 	// Score should be 0 base + (30-0)*0.2 = 6 bonus, can be slightly higher due to rounding
 	if ds.RiskScore < 6 || ds.RiskScore > 17 {
@@ -648,7 +648,7 @@ func TestScoreDependency_CappedAt100(t *testing.T) {
 	aiGen := &scanner.AIGenRisk{Score: 100}
 	resilience := &scanner.ResilienceInfo{Score: 0}
 
-	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil, time.Now())
+	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil, "", time.Now())
 
 	if ds.RiskScore > 100 {
 		t.Errorf("expected RiskScore <= 100, got %d", ds.RiskScore)
@@ -664,7 +664,7 @@ func TestScoreDependency_RiskFactors(t *testing.T) {
 	maint := testutil.MakeMaintenanceInfo(36, true, true)
 	maintainer := testutil.MakeMaintainerInfo(1, 5, false)
 
-	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil, "", time.Now())
 
 	expectedFactors := map[string]bool{
 		"archived":          true,
@@ -969,7 +969,7 @@ func TestScoreDependency_InactiveFlag(t *testing.T) {
 		ActivityPattern:  "inactive",
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -993,7 +993,7 @@ func TestScoreDependency_TakeoverCandidate(t *testing.T) {
 		TakeoverCandidate: true,
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -1182,8 +1182,8 @@ func TestScoreDependency_MaintainerDataUnavailable(t *testing.T) {
 		DataAvailable: false,
 	}
 
-	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil, time.Now())
-	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil, time.Now())
+	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil, "", time.Now())
+	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil, "", time.Now())
 
 	// nil maintainer: 5-weight denominator, unknown penalty included → 26
 	expectedNil := 26
@@ -1320,7 +1320,7 @@ func TestSeverityFloor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
-			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil, time.Now())
+			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 			if tt.wantMinScore > 0 && ds.RiskScore < tt.wantMinScore {
 				t.Errorf("RiskScore = %d, want >= %d", ds.RiskScore, tt.wantMinScore)
@@ -1342,7 +1342,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 400 days ago → RiskScore >= 26", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 500, 400, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 		if ds.RiskScore < 26 {
 			t.Errorf("RiskScore = %d, want >= 26 (fix available 400 days ago)", ds.RiskScore)
@@ -1352,7 +1352,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 10 days ago → no amplifier floor", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 30, 10, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 		// 10 days is below the 30-day threshold: amplifier must NOT raise to 26.
 		if ds.RiskScore >= 26 {
@@ -1367,7 +1367,7 @@ func TestUnknownSeverityFloor(t *testing.T) {
 	dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 	vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "UNKNOWN", 90, 0, true)
 	// EnrichmentFailed = true, so the scorer must apply the conservative MEDIUM floor.
-	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 	if ds.RiskScore < 26 {
 		t.Errorf("RiskScore = %d, want >= 26 (conservative floor for enrichment-failed UNKNOWN)", ds.RiskScore)
@@ -1497,6 +1497,7 @@ func twoAxisEmptyInput(graph *resolver.Graph) ScoreInput {
 		Resilience:  make(map[string]*scanner.ResilienceInfo),
 		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
 		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
+		Integrity:   make(map[string]scanner.IntegrityRiskLevel),
 	}
 }
 
@@ -2265,7 +2266,7 @@ func TestRequiredOnly_PerDepBandDrivenByLevelFromScore(t *testing.T) {
 	// Use a non-trusted namespace so the maturity-trusted shortcut doesn't mask
 	// the assertion, and depth 0 / direct so other components are deterministic.
 	dep := testutil.MakeDep("github.com/required-only/pkg", "v1.0.0", true, 0)
-	ds := scoreDependency(dep, requiredVulns, nil, nil, nil, nil, nil, nil, time.Now())
+	ds := scoreDependency(dep, requiredVulns, nil, nil, nil, nil, nil, nil, "", time.Now())
 
 	wantLevel := levelFromScore(ds.RiskScore)
 	if ds.RiskLevel != wantLevel {
@@ -2502,6 +2503,219 @@ func TestArchivedFloor(t *testing.T) {
 			t.Errorf("DrivingDep = %q after reversal, want github.com/old/stale (tie-break must be deterministic)", candidate2.DrivingDep)
 		}
 	})
+}
+
+// TestIntegrityFloor tests the integrityFloor function directly with various
+// dep configurations.
+func TestIntegrityFloor(t *testing.T) {
+	t.Run("transitive redirect", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       false,
+				IsTestOnly:   testutil.BoolPtr(false),
+				ReplaceClass: scanner.IntegrityHigh,
+			},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 51 {
+			t.Errorf("Score = %.0f, want 51 (transitive redirect)", candidate.Score)
+		}
+		if candidate.Name != "integrity_floor" {
+			t.Errorf("Name = %q, want integrity_floor", candidate.Name)
+		}
+	})
+
+	t.Run("direct redirect", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       true,
+				IsTestOnly:   testutil.BoolPtr(false),
+				ReplaceClass: scanner.IntegrityHigh,
+			},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 60 {
+			t.Errorf("Score = %.0f, want 60 (direct redirect)", candidate.Score)
+		}
+	})
+
+	t.Run("test-only redirect (no floor)", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       true,
+				IsTestOnly:   testutil.BoolPtr(true), // test-only → skip
+				ReplaceClass: scanner.IntegrityHigh,
+			},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (test-only redirect → no floor)", candidate.Score)
+		}
+	})
+
+	t.Run("version-pin does not floor", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       true,
+				IsTestOnly:   testutil.BoolPtr(false),
+				ReplaceClass: scanner.IntegrityLow,
+			},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (version-pin must never drive the headline)", candidate.Score)
+		}
+	})
+
+	t.Run("local-path does not floor", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{
+				Module:       "github.com/old/pkg",
+				Direct:       true,
+				IsTestOnly:   testutil.BoolPtr(false),
+				ReplaceClass: scanner.IntegrityMedium,
+			},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (local-path must never drive the headline)", candidate.Score)
+		}
+	})
+
+	t.Run("no replaces", func(t *testing.T) {
+		deps := []*DependencyScore{
+			{Module: "github.com/clean/pkg", Direct: true, IsTestOnly: testutil.BoolPtr(false)},
+		}
+		candidate := integrityFloor(deps)
+		if candidate.Score != 0 {
+			t.Errorf("Score = %.0f, want 0 (no replace directives)", candidate.Score)
+		}
+	})
+}
+
+// TestScoreAll_ReplaceRedirect_FloorsHeadlineToHigh verifies the end-to-end
+// path: a replace directive that redirects to a different module path floors
+// the project headline into the HIGH band via integrity_floor.
+func TestScoreAll_ReplaceRedirect_FloorsHeadlineToHigh(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	graph.Dependencies["github.com/foo/bar"].Replaced = true
+
+	input := twoAxisEmptyInput(graph)
+	input.Integrity["github.com/foo/bar"] = scanner.IntegrityHigh
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver != "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, want integrity_floor", ps.HeadlineDriver)
+	}
+	if ps.OverallScore != 60 {
+		t.Errorf("OverallScore = %d, want 60 (direct redirect → integrity_floor=60)", ps.OverallScore)
+	}
+	if ps.OverallLevel != RiskHigh {
+		t.Errorf("OverallLevel = %q, want HIGH", ps.OverallLevel)
+	}
+}
+
+// TestScoreAll_ReplaceVersionPin_DoesNotFloorHeadline verifies that a
+// version-pin replace (LOW severity) is surfaced as a per-dep risk factor but
+// never drives the project headline.
+func TestScoreAll_ReplaceVersionPin_DoesNotFloorHeadline(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	graph.Dependencies["github.com/foo/bar"].Replaced = true
+
+	input := twoAxisEmptyInput(graph)
+	input.Integrity["github.com/foo/bar"] = scanner.IntegrityLow
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver == "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, version-pin replace must never drive the headline", ps.HeadlineDriver)
+	}
+
+	// A version-pin replace must add no score bonus: rescoring the identical
+	// graph with no Integrity classification must produce the same OverallScore.
+	baselineGraph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v1.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	baselinePS := ScoreAll(twoAxisEmptyInput(baselineGraph))
+	if ps.OverallScore != baselinePS.OverallScore {
+		t.Errorf("OverallScore = %d, want %d (version-pin replace carries no score bonus)", ps.OverallScore, baselinePS.OverallScore)
+	}
+
+	var ds *DependencyScore
+	for _, d := range ps.Dependencies {
+		if d.Module == "github.com/foo/bar" {
+			ds = d
+		}
+	}
+	if ds == nil {
+		t.Fatal("dependency not found in scored output")
+	}
+	found := false
+	for _, rf := range ds.RiskFactors {
+		if rf == "replaced" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("RiskFactors = %v, want to contain %q", ds.RiskFactors, "replaced")
+	}
+}
+
+// TestScoreAll_InertVersionScopedReplace_NoFloorNoClass verifies that a
+// HIGH-class replace directive whose version scope does not match the selected
+// version (dep.Replaced == false) is fully inert: no ReplaceClass on the
+// dependency, no "replaced" risk factor, no score bonus, and no
+// integrity_floor on the headline.
+func TestScoreAll_InertVersionScopedReplace_NoFloorNoClass(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v2.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	// Replaced stays false: the go.mod replace is scoped to a version other
+	// than the selected v2.0.0 (parser.GoMod.ReplacementFor returns false).
+
+	input := twoAxisEmptyInput(graph)
+	input.Integrity["github.com/foo/bar"] = scanner.IntegrityHigh
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver == "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, inert version-scoped replace must not drive the headline", ps.HeadlineDriver)
+	}
+
+	baselineGraph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/foo/bar", Version: "v2.0.0", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+	)
+	baselinePS := ScoreAll(twoAxisEmptyInput(baselineGraph))
+	if ps.OverallScore != baselinePS.OverallScore {
+		t.Errorf("OverallScore = %d, want %d (inert replace carries no score bonus)", ps.OverallScore, baselinePS.OverallScore)
+	}
+
+	var ds *DependencyScore
+	for _, d := range ps.Dependencies {
+		if d.Module == "github.com/foo/bar" {
+			ds = d
+		}
+	}
+	if ds == nil {
+		t.Fatal("dependency not found in scored output")
+	}
+	if ds.ReplaceClass != "" {
+		t.Errorf("ReplaceClass = %q, want empty (replace does not apply to the selected version)", ds.ReplaceClass)
+	}
+	for _, rf := range ds.RiskFactors {
+		if rf == "replaced" {
+			t.Errorf("RiskFactors = %v, must not contain %q for an inert replace", ds.RiskFactors, "replaced")
+		}
+	}
 }
 
 // TestCVEFloor tests the cveFloor function with various CVE reachability +
