@@ -71,8 +71,9 @@ type ThreatIntelClient struct {
 	now          func() time.Time
 }
 
-// NewThreatIntelClient creates a new ThreatIntelClient. The returned client is
-// safe for concurrent use by multiple goroutines.
+// NewThreatIntelClient creates a new ThreatIntelClient. The client is intended
+// for serial use: its on-disk cache reads and writes are not synchronized, so
+// it is not safe for concurrent use by multiple goroutines.
 func NewThreatIntelClient(opts ThreatIntelOptions) *ThreatIntelClient {
 	now := opts.clockFn
 	if now == nil {

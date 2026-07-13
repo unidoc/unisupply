@@ -133,7 +133,8 @@ Both are keyed by CVE ID: for `GO-*`/`GHSA-*` vulns the first `CVE-*` alias
 is used. Vulnerabilities without a CVE alias (common for fresh Go advisories)
 have no threat-intel data — that is expected, not an error.
 
-**Field-presence semantics.** `epss_score` absent means the lookup failed or
+**Field-presence semantics.** `epss_score` absent means EPSS has no score for
+that CVE (a normal gap — EPSS does not score every CVE), the lookup failed, or
 no CVE alias exists; a present `0.0` is a real score. `in_kev` absent means
 "not checked" (KEV fetch failed or no CVE alias); `false` means "checked and
 not listed".

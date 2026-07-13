@@ -290,3 +290,31 @@ func TestCollectTimeBombs_KEV(t *testing.T) {
 		t.Errorf("time-bombs kev=%d critical_cve=%d, want 1 kev and 0 critical_cve (KEV wins the dedup)", kevCount, critCount)
 	}
 }
+
+// TestCollectTimeBombs_DedupeByCVEAlias verifies that the same CVE surfaced
+// under different advisory IDs (GO-* and GHSA-*) produces one time-bomb, not
+// one per advisory.
+func TestCollectTimeBombs_DedupeByCVEAlias(t *testing.T) {
+	goVuln := makeVulnTI("GO-2024-0001", "CRITICAL", "called", nil, true)
+	goVuln.Aliases = []string{"CVE-2024-1015"}
+	ghsaVuln := makeVulnTI("GHSA-aaaa-bbbb-cccc", "CRITICAL", "called", nil, true)
+	ghsaVuln.Aliases = []string{"CVE-2024-1015"}
+
+	input := reachabilityScoreInput(
+		"github.com/risky/pkg",
+		testutil.BoolPtr(false),
+		[]scanner.Vulnerability{goVuln, ghsaVuln},
+	)
+	ps := ScoreAll(input)
+	bombs := CollectTimeBombs(ps)
+
+	var kevCount int
+	for _, b := range bombs {
+		if b.Kind == "kev" {
+			kevCount++
+		}
+	}
+	if kevCount != 1 {
+		t.Errorf("time-bombs kev=%d, want 1 (GO-* and GHSA-* advisories share CVE-2024-1015)", kevCount)
+	}
+}

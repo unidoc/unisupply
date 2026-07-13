@@ -697,10 +697,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		case "imported", "required":
 			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
 		}
-		ti := ""
-		if v.EPSSPercentile != nil {
-			ti = fmt.Sprintf(" [EPSS %.0f%%]", *v.EPSSPercentile*100)
-		}
+		ti := epssBadge(v)
 		if v.InKEV {
 			ti += " [KEV — exploited in the wild]"
 		}
@@ -742,6 +739,21 @@ func epssOrZero(v *scanner.Vulnerability) float64 {
 		return 0
 	}
 	return *v.EPSSScore
+}
+
+// epssBadge renders the " [EPSS NN%]" badge from the vuln's EPSS score — the
+// estimated exploitation probability, the same signal the scorer acts on (not
+// the percentile). Empty when no score is available. Scores that would round
+// to 0% render as "<1%" so a real, tiny probability is not shown as zero.
+func epssBadge(v *scanner.Vulnerability) string {
+	if v.EPSSScore == nil {
+		return ""
+	}
+	pct := *v.EPSSScore * 100
+	if pct > 0 && pct < 1 {
+		return " [EPSS <1%]"
+	}
+	return fmt.Sprintf(" [EPSS %.0f%%]", pct)
 }
 
 func pdfRiskColor(level scorer.RiskLevel) creator.Color {

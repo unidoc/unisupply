@@ -209,7 +209,8 @@ feed the risk score — see
 ```
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
-Absent `epss_score` means the lookup failed or the vuln has no CVE alias;
+Absent `epss_score` means EPSS has no score for that CVE (expected — EPSS does
+not score every CVE), the lookup failed, or the vuln has no CVE alias;
 absent `in_kev` means the KEV catalog was not consulted (`false` means
 "checked, not listed").
 

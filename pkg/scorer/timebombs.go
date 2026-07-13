@@ -1,6 +1,10 @@
 package scorer
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/unidoc/unisupply/pkg/scanner"
+)
 
 // TimeBomb represents a dependency that poses an undeniable, immediate risk
 // regardless of overall scoring. Each entry appears in the report even when
@@ -60,10 +64,17 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 			if !isKEV && effectiveTier(v) != "CRITICAL" {
 				continue
 			}
-			if seenCVE[v.ID] {
+			// Dedupe by the underlying CVE ID when one exists, so the same
+			// CVE surfaced under different advisory IDs (GO-*, GHSA-*)
+			// produces one entry. Fall back to the advisory ID otherwise.
+			dedupeKey := scanner.CVEAlias(v)
+			if dedupeKey == "" {
+				dedupeKey = v.ID
+			}
+			if seenCVE[dedupeKey] {
 				continue
 			}
-			seenCVE[v.ID] = true
+			seenCVE[dedupeKey] = true
 
 			reachTag := v.Reachability
 			reachSuffix := ""

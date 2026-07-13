@@ -288,11 +288,11 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	return results, warnings, nil
 }
 
-// cveAlias returns the CVE ID to use for threat-intel lookups on v: the ID
+// CVEAlias returns the CVE ID to use for threat-intel lookups on v: the ID
 // itself when it is a CVE, otherwise the first valid CVE-* alias. Empty when
 // the vuln has no CVE identifier — EPSS and KEV only index CVE IDs, so such
 // vulns (common for fresh GO-* advisories) have no threat-intel data.
-func cveAlias(v *Vulnerability) string {
+func CVEAlias(v *Vulnerability) string {
 	if strings.HasPrefix(v.ID, "CVE-") && validateVulnID(v.ID) {
 		return v.ID
 	}
@@ -312,7 +312,7 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 	cveSet := make(map[string]bool)
 	for _, modVulns := range results {
 		for i := range modVulns {
-			if cve := cveAlias(&modVulns[i]); cve != "" {
+			if cve := CVEAlias(&modVulns[i]); cve != "" {
 				cveSet[cve] = true
 			}
 		}
@@ -328,14 +328,8 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 
 	epss, epssErr := ti.LookupEPSS(ctx, cveIDs)
 	if epssErr != nil {
-		missing := 0
-		for _, cve := range cveIDs {
-			if _, ok := epss[cve]; !ok {
-				missing++
-			}
-		}
 		warnings = append(warnings, fmt.Sprintf(
-			"EPSS lookup failed for %d CVE(s); exploitation probability unavailable: %v", missing, epssErr))
+			"EPSS lookup incomplete; exploitation probability may be missing for some CVEs: %v", epssErr))
 	}
 
 	kev, kevErr := ti.LoadKEV(ctx)
@@ -347,7 +341,7 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 	for modPath, modVulns := range results {
 		for i := range modVulns {
 			v := &modVulns[i]
-			cve := cveAlias(v)
+			cve := CVEAlias(v)
 			if cve == "" {
 				continue
 			}

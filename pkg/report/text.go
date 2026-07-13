@@ -298,12 +298,10 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				displaySev = "UNKNOWN"
 			}
-			// Threat-intel badges: EPSS percentile and KEV status. KEV is
-			// colored like CRITICAL — confirmed exploitation in the wild.
-			ti := ""
-			if v.EPSSPercentile != nil {
-				ti = fmt.Sprintf(" [EPSS %.0f%%]", *v.EPSSPercentile*100)
-			}
+			// Threat-intel badges: EPSS exploitation probability and KEV
+			// status. KEV is colored like CRITICAL — confirmed exploitation
+			// in the wild.
+			ti := epssBadge(v)
 			if v.InKEV {
 				ti += " " + c(colorRed, "[KEV]")
 			}
