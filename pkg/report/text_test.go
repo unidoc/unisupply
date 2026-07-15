@@ -353,6 +353,105 @@ func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 	}
 }
 
+// TestWriteText_LowRiskVulnDetail tests that low-risk dependencies carrying
+// vulnerabilities render full detail in both verbose and non-verbose modes,
+// while vuln-free low-risk dependencies stay compact under verbose.
+func TestWriteText_LowRiskVulnDetail(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "vulnerable-low-pkg",
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   1,
+		},
+		testutil.DepSpec{
+			Path:    "clean-low-pkg",
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   1,
+		},
+	)
+
+	makeScore := func() *scorer.ProjectScore {
+		return &scorer.ProjectScore{
+			OverallScore: 10,
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{
+				{
+					Module:    "vulnerable-low-pkg",
+					Version:   "v1.0.0",
+					Direct:    false,
+					RiskScore: 12,
+					RiskLevel: scorer.RiskLow,
+					Vulns: []scanner.Vulnerability{
+						{
+							ID:           "GO-2026-5005",
+							Summary:      "Critical flaw in low-risk dep",
+							Severity:     "CRITICAL",
+							FixedVersion: "v1.1.0",
+						},
+					},
+				},
+				{
+					Module:    "clean-low-pkg",
+					Version:   "v1.0.0",
+					Direct:    false,
+					RiskScore: 5,
+					RiskLevel: scorer.RiskLow,
+				},
+			},
+			LowRiskCount: 2,
+			TotalVulns:   1,
+		}
+	}
+
+	for _, verbose := range []bool{true, false} {
+		opts := TextOptions{
+			NoColor: true,
+			Writer:  &bytes.Buffer{},
+			Verbose: verbose,
+		}
+
+		err := WriteText(graph, makeScore(), &opts)
+		if err != nil {
+			t.Fatalf("WriteText(verbose=%v) failed: %v", verbose, err)
+		}
+
+		output := opts.Writer.(*bytes.Buffer).String()
+
+		if !strings.Contains(output, "GO-2026-5005") {
+			t.Errorf("verbose=%v: output should contain vulnerability ID 'GO-2026-5005' for low-risk dep", verbose)
+		}
+
+		if !strings.Contains(output, "Fix available: v1.1.0") {
+			t.Errorf("verbose=%v: output should contain fix version for low-risk dep vulnerability", verbose)
+		}
+
+		if verbose {
+			// Vuln-free low-risk deps stay compact: the bullet line renders
+			// but no detail lines (├─) follow it.
+			lines := strings.Split(output, "\n")
+			found := false
+			for i, line := range lines {
+				if !strings.Contains(line, "clean-low-pkg") {
+					continue
+				}
+				found = true
+				if i+1 < len(lines) && (strings.Contains(lines[i+1], "├─") || strings.Contains(lines[i+1], "└─")) {
+					t.Errorf("verbose=true: vuln-free low-risk dep should render compact, got detail line: %q", lines[i+1])
+				}
+			}
+			if !found {
+				t.Error("verbose=true: output should list vuln-free low-risk dep")
+			}
+		} else {
+			if !strings.Contains(output, "[1 more without vulnerabilities — use --verbose]") {
+				t.Error("verbose=false: output should note remaining vuln-free low-risk deps")
+			}
+		}
+	}
+}
+
 // TestWriteText_SummaryStatistics tests that summary section contains key metrics.
 func TestWriteText_SummaryStatistics(t *testing.T) {
 	graph := testutil.MakeGraph(
