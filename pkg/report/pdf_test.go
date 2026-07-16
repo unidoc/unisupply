@@ -117,6 +117,67 @@ func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
 	writeDependencyBlock(c, ds, regular, bold, true)
 }
 
+// TestWriteLowRiskSection_VulnDetailSmoke verifies that a low-risk dependency
+// carrying a vulnerability gets its CVE detail rendered, and that the
+// section as a whole does not panic when mixed with a clean dependency.
+func TestWriteLowRiskSection_VulnDetailSmoke(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	ps := &scorer.ProjectScore{
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "golang.org/x/crypto",
+				Version:   "v0.48.0",
+				RiskScore: 12,
+				RiskLevel: scorer.RiskLow,
+				Vulns: []scanner.Vulnerability{
+					{ID: "GO-2026-5005", Severity: "CRITICAL", FixedVersion: "v0.49.0"},
+				},
+			},
+			{
+				Module:    "github.com/example/clean-pkg",
+				Version:   "v1.0.0",
+				RiskScore: 5,
+				RiskLevel: scorer.RiskLow,
+			},
+		},
+	}
+
+	// Must not panic.
+	writeLowRiskSection(c, ps, regular, bold)
+}
+
+// TestWriteVulnDetailBlocks_SkipsCleanDeps documents the contract that the
+// shared helper is a no-op (draws nothing) when the bucket has no
+// vulnerability-bearing deps.
+func TestWriteVulnDetailBlocks_SkipsCleanDeps(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	bucket := []*scorer.DependencyScore{
+		{Module: "github.com/example/clean-a", Version: "v1.0.0", RiskScore: 5, RiskLevel: scorer.RiskLow},
+		{Module: "github.com/example/clean-b", Version: "v2.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow},
+	}
+
+	// Must not panic and must draw nothing extra.
+	writeVulnDetailBlocks(c, bucket, regular, bold)
+}
+
 // TestEPSSBadge verifies the badge renders the EPSS score (exploitation
 // probability, the signal the scorer acts on) — not the percentile — and that
 // tiny non-zero scores are shown as "<1%" instead of a misleading "0%".

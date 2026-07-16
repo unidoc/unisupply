@@ -374,6 +374,8 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 	}
 
 	_ = c.Draw(table)
+
+	writeVulnDetailBlocks(c, medRisk, regular, bold)
 }
 
 func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
@@ -401,6 +403,27 @@ func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, b
 	}
 
 	_ = c.Draw(table)
+
+	writeVulnDetailBlocks(c, lowRisk, regular, bold)
+}
+
+// writeVulnDetailBlocks appends full dependency blocks for the deps in
+// bucket that carry vulnerabilities. No-op when none do.
+func writeVulnDetailBlocks(c *creator.Creator, bucket []*scorer.DependencyScore, regular, bold *model.PdfFont) {
+	var vulnDeps []*scorer.DependencyScore
+	for _, ds := range bucket {
+		if len(ds.Vulns) > 0 {
+			vulnDeps = append(vulnDeps, ds)
+		}
+	}
+	if len(vulnDeps) == 0 {
+		return
+	}
+
+	subheading(c, "Vulnerability Details", bold)
+	for _, ds := range vulnDeps {
+		writeDependencyBlock(c, ds, regular, bold, true)
+	}
 }
 
 func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bold *model.PdfFont) {
