@@ -169,8 +169,8 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "%s\n", c(colorGreen, strings.Repeat("─", 40)))
 		if opts.Verbose {
 			for _, ds := range low {
-				// Always show details if dep has vulns, even in low risk.
-				writeDependencyDetail(w, ds, c, len(ds.Vulns) > 0)
+				// Verbose shows full detail for every dep, regardless of vulns.
+				writeDependencyDetail(w, ds, c, true)
 			}
 		} else {
 			// Always show deps with vulns even in low risk.

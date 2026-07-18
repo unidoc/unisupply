@@ -355,7 +355,7 @@ func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 
 // TestWriteText_LowRiskVulnDetail tests that low-risk dependencies carrying
 // vulnerabilities render full detail in both verbose and non-verbose modes,
-// while vuln-free low-risk dependencies stay compact under verbose.
+// and that verbose mode also expands vuln-free low-risk dependencies.
 func TestWriteText_LowRiskVulnDetail(t *testing.T) {
 	graph := testutil.MakeGraph(
 		testutil.DepSpec{
@@ -428,8 +428,8 @@ func TestWriteText_LowRiskVulnDetail(t *testing.T) {
 		}
 
 		if verbose {
-			// Vuln-free low-risk deps stay compact: the bullet line renders
-			// but no detail lines (├─) follow it.
+			// Vuln-free low-risk deps now expand fully under verbose: the
+			// bullet line renders and a detail line (├─ or └─) follows it.
 			lines := strings.Split(output, "\n")
 			found := false
 			for i, line := range lines {
@@ -437,8 +437,8 @@ func TestWriteText_LowRiskVulnDetail(t *testing.T) {
 					continue
 				}
 				found = true
-				if i+1 < len(lines) && (strings.Contains(lines[i+1], "├─") || strings.Contains(lines[i+1], "└─")) {
-					t.Errorf("verbose=true: vuln-free low-risk dep should render compact, got detail line: %q", lines[i+1])
+				if i+1 >= len(lines) || (!strings.Contains(lines[i+1], "├─") && !strings.Contains(lines[i+1], "└─")) {
+					t.Errorf("verbose=true: vuln-free low-risk dep should render detail lines after %q", line)
 				}
 			}
 			if !found {

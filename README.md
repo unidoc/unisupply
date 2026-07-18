@@ -403,7 +403,7 @@ The most frequently used flags:
 | `--policy`              | Path to a custom policy JSON file                             |
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
 | `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts |
-| `--min-risk`            | Hide dependencies below the given score                       |
+| `--min-risk`            | Hide dependencies below the given score (e.g. `--min-risk 26` for medium+) |
 | `--direct-only`         | Skip transitive dependencies                                  |
 | `-v, --verbose`         | Per-dependency breakdown                                      |
 
