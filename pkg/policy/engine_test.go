@@ -33,19 +33,21 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	policyPath := filepath.Join(tempDir, "policy.json")
 
 	policyData := map[string]interface{}{
-		"max_risk_score":         75,
-		"max_overall_score":      60,
-		"no_known_vulns":         true,
-		"no_critical_vulns":      true,
-		"no_single_maintainer":   true,
-		"no_unmaintained_months": 24,
-		"no_archived":            true,
-		"no_deprecated":          true,
-		"no_typosquatting":       true,
-		"max_depth":              5,
-		"max_ci_score":           50,
-		"allowed_modules":        []string{"github.com/allowed/*"},
-		"blocked_modules":        []string{"github.com/blocked/*"},
+		"max_risk_score":          75,
+		"max_overall_score":       60,
+		"no_known_vulns":          true,
+		"no_critical_vulns":       true,
+		"no_single_maintainer":    true,
+		"no_unmaintained_months":  24,
+		"no_archived":             true,
+		"no_deprecated":           true,
+		"no_typosquatting":        true,
+		"max_depth":               5,
+		"max_ci_score":            50,
+		"allowed_modules":         []string{"github.com/allowed/*"},
+		"blocked_modules":         []string{"github.com/blocked/*"},
+		"forbid_replace_redirect": true,
+		"require_gosum_verified":  true,
 	}
 
 	data, err := json.Marshal(policyData)
@@ -103,6 +105,38 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	}
 	if len(p.BlockedModules) != 1 || p.BlockedModules[0] != "github.com/blocked/*" {
 		t.Errorf("BlockedModules: expected [github.com/blocked/*], got %v", p.BlockedModules)
+	}
+	if !p.ForbidReplaceRedirect {
+		t.Errorf("ForbidReplaceRedirect: expected true, got %v", p.ForbidReplaceRedirect)
+	}
+	if !p.RequireGoSumVerified {
+		t.Errorf("RequireGoSumVerified: expected true, got %v", p.RequireGoSumVerified)
+	}
+}
+
+func TestLoadPolicy_UnknownFieldRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	policyPath := filepath.Join(tempDir, "typo_policy.json")
+
+	if err := os.WriteFile(policyPath, []byte(`{"require_gosum_verifed": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write policy file: %v", err)
+	}
+
+	_, err := policy.LoadPolicy(policyPath)
+	if err == nil {
+		t.Fatal("expected error for unknown field, got nil")
+	}
+	if !strings.Contains(err.Error(), "require_gosum_verifed") {
+		t.Errorf("expected error to name the offending key 'require_gosum_verifed', got: %v", err)
+	}
+}
+
+func TestLoadPolicy_ShippedExamplesAreValid(t *testing.T) {
+	for _, name := range []string{"policy-strict.json", "policy-custom.json"} {
+		path := filepath.Join("..", "..", "examples", name)
+		if _, err := policy.LoadPolicy(path); err != nil {
+			t.Errorf("LoadPolicy(%s) failed: %v", name, err)
+		}
 	}
 }
 

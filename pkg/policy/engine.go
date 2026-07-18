@@ -2,6 +2,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -98,7 +99,9 @@ func LoadPolicy(path string) (*Policy, error) {
 	}
 
 	var p Policy
-	if err := json.Unmarshal(data, &p); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("parsing policy file: %w", err)
 	}
 

@@ -56,6 +56,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   descending; text and PDF reports show `[EPSS NN%]` and `[KEV]` badges per
   CVE.
 
+### Bug Fixes
+
+- Policy files with unknown or misspelled rule keys are now rejected at load
+  time instead of silently ignoring the rule.
+
 ## [0.5.0] - 2026-06-29
 
 Compliance, hardening, and scoring-accuracy release. The focus is making
