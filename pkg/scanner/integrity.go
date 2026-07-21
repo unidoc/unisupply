@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/module"
+
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -48,6 +50,7 @@ const (
 	IntegrityCategoryReplaceMajorVersion = "replace_major_version"
 	IntegrityCategoryReplaceRedirect     = "replace_redirect"
 	IntegrityCategoryExclude             = "exclude"
+	IntegrityCategoryPseudoVersion       = "pseudo_version"
 )
 
 // IntegrityFinding represents a single go.mod directive finding.
@@ -75,6 +78,10 @@ type IntegrityReport struct {
 	// GoSumVerified* constants ("true"/"false"/"offline"/"skipped"), or empty
 	// when verification was never attempted.
 	GoSumVerified string `json:"gosum_verified,omitempty"`
+
+	// PseudoVersionCount is the number of resolved dependencies pinned to a
+	// pseudo-version (see ScanPseudoVersions).
+	PseudoVersionCount int `json:"pseudo_version_count,omitempty"`
 }
 
 // IntegrityScanner audits go.mod replace/exclude directives and go.sum
@@ -131,6 +138,66 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 	}
 
 	return report, classes
+}
+
+// ScanPseudoVersions flags every resolved dependency whose pinned go.mod
+// version is a pseudo-version (golang.org/x/mod/module.IsPseudoVersion),
+// appending findings to report and returning a per-module severity map for
+// the scorer.
+//
+// This is a distinct signal from the aigen scanner's "pseudo_version_only"
+// indicator (pkg/scanner/aigen.go), which fires when a module has zero
+// tagged releases ever — a historical property of the module proxy's
+// version list. This check fires on the version *currently pinned* in
+// go.mod, which can happen even for a module with real tagged releases
+// (e.g. pinned to a commit between tags). See docs/scanners.md.
+//
+// Runs after graph resolution (unlike ScanDirectives) because severity
+// depends on dep.Direct and dep.IsTestOnly, which only the resolver
+// populates.
+func (is *IntegrityScanner) ScanPseudoVersions(graph *resolver.Graph, report *IntegrityReport) map[string]IntegrityRiskLevel {
+	classes := make(map[string]IntegrityRiskLevel)
+
+	paths := make([]string, 0, len(graph.Dependencies))
+	for path := range graph.Dependencies {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		dep := graph.Dependencies[path]
+		if !module.IsPseudoVersion(dep.Module.Version) {
+			continue
+		}
+
+		testOnly := dep.IsTestOnly != nil && *dep.IsTestOnly
+
+		var severity IntegrityRiskLevel
+		var detail string
+		switch {
+		case testOnly:
+			severity = IntegrityInfo
+			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (test-only; no score impact)", path, dep.Module.Version)
+		case dep.Direct:
+			severity = IntegrityMedium
+			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (direct dependency)", path, dep.Module.Version)
+		default:
+			severity = IntegrityLow
+			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (transitive dependency)", path, dep.Module.Version)
+		}
+
+		classes[path] = severity
+		report.Findings = append(report.Findings, IntegrityFinding{
+			Category:    IntegrityCategoryPseudoVersion,
+			Severity:    severity,
+			Module:      path,
+			Detail:      detail,
+			Remediation: "Pin to a tagged release if one exists, or confirm the commit-pinned version is intentional (e.g. no tags have been published yet).",
+		})
+		report.PseudoVersionCount++
+	}
+
+	return classes
 }
 
 // classifyReplace determines the severity of a single replace directive by

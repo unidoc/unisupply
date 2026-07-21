@@ -75,6 +75,17 @@ type Policy struct {
 	// outcomes ("offline", "skipped", or verification never attempted) do NOT
 	// fail — this rule rejects confirmed tampering, not missing data.
 	RequireGoSumVerified bool `json:"require_gosum_verified,omitempty"`
+
+	// ForbidPseudoVersions fails if any non-test-only dependency is pinned to
+	// a pseudo-version (scorer.DependencyScore.PseudoVersion).
+	//
+	// Deliberate asymmetry with ForbidReplaceRedirect (which fires even on
+	// test-only deps because test code still runs in CI with access to
+	// secrets): a pseudo-version pin is a provenance/pinning-hygiene signal,
+	// not a hijack vector, so this rule exempts confirmed test-only deps.
+	// A nil (unknown) IsTestOnly is treated as not-test-only — deny — matching
+	// the scorer convention of under-discounting unverified classifications.
+	ForbidPseudoVersions bool `json:"forbid_pseudo_versions,omitempty"`
 }
 
 // Violation represents a single policy violation.
@@ -165,6 +176,17 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 					result.addError("no_single_maintainer", ds.Module,
 						fmt.Sprintf("bus factor is %d (single maintainer risk)", mi.BusFactor))
 				}
+			}
+		}
+
+		// Forbid pseudo-versions on the import path. Confirmed test-only deps
+		// (IsTestOnly == &true) are exempted; nil (unknown) is treated as
+		// not-test-only and denied.
+		if p.ForbidPseudoVersions && ds.PseudoVersion {
+			testOnly := ds.IsTestOnly != nil && *ds.IsTestOnly
+			if !testOnly {
+				result.addError("forbid_pseudo_versions", ds.Module,
+					fmt.Sprintf("pinned to pseudo-version %s", ds.Version))
 			}
 		}
 
@@ -323,6 +345,7 @@ func DefaultStrictPolicy() *Policy {
 		MaxCIScore:            &maxCI,
 		ForbidReplaceRedirect: true,
 		RequireGoSumVerified:  true,
+		ForbidPseudoVersions:  true,
 	}
 }
 
