@@ -134,7 +134,7 @@ unisupply ./ --policy-preset strict
 unisupply ./ --policy ./my-policy.json
 
 # Filter output
-unisupply ./ --min-risk medium --show-only vulnerabilities,maintenance
+unisupply ./ --min-risk 26 --show-only vulnerabilities,maintenance
 
 # Progress output (default: auto — TTY spinner if stderr is a terminal,
 # timestamped lines otherwise). Always writes to stderr; never contaminates
