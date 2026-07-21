@@ -270,6 +270,10 @@ Notable fields:
   mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
   (offline, no go.sum, toolchain unavailable) do not fail this rule.
 
+Policy files are decoded strictly: any key that is not a recognized field is
+rejected at load time (exit 1, naming the offending key), so a typo'd or
+outdated rule name can never silently disable a check.
+
 <!-- TODO (PR 08 / M6.5): once the examples/ directory lands, link to ready-to-copy policy files here. -->
 
 ## Trust Index integration
