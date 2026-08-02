@@ -81,7 +81,7 @@ type IntegrityReport struct {
 
 	// PseudoVersionCount is the number of resolved dependencies pinned to a
 	// pseudo-version (see ScanPseudoVersions).
-	PseudoVersionCount int `json:"pseudo_version_count,omitempty"`
+	PseudoVersionCount int `json:"pseudo_version_count"`
 }
 
 // IntegrityScanner audits go.mod replace/exclude directives and go.sum

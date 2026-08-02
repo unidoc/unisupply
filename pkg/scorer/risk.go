@@ -586,12 +586,15 @@ func scoreDependency(
 
 	// Pseudo-version pin: a distinct signal from aigen's pseudo_version_only
 	// indicator (fires on zero-tagged-releases-ever, a historical property;
-	// see scanner.ScanPseudoVersions doc comment for the full distinction).
-	// INFO (test-only) carries no score impact by design — only MEDIUM
-	// (direct) and LOW (transitive) add a bonus. Kept intentionally small: a
-	// dep can trigger both this bonus (max 4) and the aigen bonus (max 1.5,
-	// i.e. 10*0.15) simultaneously, capping the combined pseudo-version
-	// contribution at 5.5 — well below any single-factor promotion threshold.
+	// see the (*scanner.IntegrityScanner).ScanPseudoVersions doc comment for
+	// the full distinction). INFO (test-only) carries no score impact by
+	// design — only MEDIUM (direct) and LOW (transitive) add a bonus. Kept
+	// intentionally small: a dep can trigger both this bonus (max 4) and the
+	// pseudo_version_only indicator's share of the aigen bonus (that indicator
+	// contributes 10 to the aigen score, i.e. 10*0.15 = 1.5 points here — the
+	// aigen bonus as a whole can be larger) simultaneously, capping the
+	// combined pseudo-version contribution at 5.5 — well below any
+	// single-factor promotion threshold.
 	pseudoVersionBonus := 0.0
 	if pseudoVersionClass != "" {
 		ds.PseudoVersion = true

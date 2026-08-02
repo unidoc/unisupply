@@ -269,7 +269,7 @@ type JSONIntegrityReport struct {
 	ReplaceCount       int `json:"replace_count"`
 	ExcludeCount       int `json:"exclude_count"`
 	RedirectCount      int `json:"redirect_count"`
-	PseudoVersionCount int `json:"pseudo_version_count,omitempty"`
+	PseudoVersionCount int `json:"pseudo_version_count"`
 	// GoSumVerified is the `go mod verify` outcome: "true", "false",
 	// "offline", or "skipped" — string-valued so honest-UNKNOWN states are
 	// distinguishable from a verified pass/fail. Omitted when verification
