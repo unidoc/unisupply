@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/progress"
 )
@@ -130,6 +131,8 @@ func depthFromIndirect(indirect bool) int {
 
 func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
 	dir := filepath.Dir(gomodPath)
+	netlog.Subprocess("go mod graph", "module proxy/VCS may be contacted by the go toolchain; see GOPROXY")
+
 	cmd := exec.CommandContext(ctx, "go", "mod", "graph")
 	cmd.Dir = dir
 
@@ -320,6 +323,8 @@ func listModulePaths(ctx context.Context, dir string, withTest bool) (map[string
 		args = append(args, "-test")
 	}
 	args = append(args, "all")
+
+	netlog.Subprocess("go "+strings.Join(args, " "), "module proxy/VCS may be contacted by the go toolchain; see GOPROXY")
 
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir

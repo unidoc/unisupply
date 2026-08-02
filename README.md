@@ -447,6 +447,34 @@ of discovered module paths — equivalent to your published `go.mod`. No
 versions, no source. The feature is opt-in and off by default; see the
 [Trust Index section](#trust-index-integration) for full details.
 
+**Verify the contract yourself.** `--network-log` prints every outbound HTTP
+request to stderr — method, host, purpose, status, size, duration — so you can
+confirm the table above matches real behavior rather than taking it on trust:
+
+```bash
+unisupply ./ --network-log 2> net.log
+grep '^NET ' net.log | awk '{print $3}' | sort -u   # every host contacted
+```
+
+```
+NET SUBPROCESS go mod graph (module proxy/VCS may be contacted by the go toolchain; see GOPROXY)
+NET SUBPROCESS govulncheck (queries vuln.go.dev for the vulnerability database)
+NET GET vuln.go.dev vulndb → 200 (59116 bytes, 55ms)
+NET GET proxy.golang.org maintenance:latest → 200 (78 bytes, 380ms)
+NET HEAD api.github.com resilience:governance → 403 (279 bytes, 55ms)
+```
+
+A response whose length the server does not declare (chunked, or transparently
+decompressed) reports `? bytes`; a failed request reports `→ error: …`.
+
+Traffic from child processes (`go mod graph`, `go list`, `go mod verify`)
+cannot be logged per-request, so it is reported as a `NET SUBPROCESS`
+lifecycle line naming what the `go` toolchain may contact. Requests are
+written to stderr only — `--network-log --format json > out.json` still
+produces clean JSON. The flag downgrades an auto-detected TTY progress
+spinner to plain lines so the two do not overwrite each other; `--progress
+none` stays silent.
+
 **Air-gapped environments.** Allow only the hosts above at your network
 boundary; each scanner degrades gracefully with explicit warnings when a
 host is unreachable.

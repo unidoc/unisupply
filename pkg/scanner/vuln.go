@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/vuln/scan"
+
+	"github.com/unidoc/unisupply/pkg/netlog"
 )
 
 // Vulnerability represents a known vulnerability for a module.
@@ -232,6 +234,11 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	var stdout bytes.Buffer
 
 	var stderrBuf bytes.Buffer
+
+	// govulncheck runs in-process but uses http.DefaultClient internally, so
+	// its vuln.go.dev requests are logged by the netlog transport (labeled
+	// "vulndb"); this line marks where they originate.
+	netlog.Subprocess("govulncheck", "queries vuln.go.dev for the vulnerability database")
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
 	cmd.Stdout = &stdout

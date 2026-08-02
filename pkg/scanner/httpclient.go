@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/unidoc/unisupply/pkg/netlog"
 )
 
 // DefaultMaxBytes is the default response-body byte cap used by Client.Get
@@ -41,6 +43,12 @@ type GetOptions struct {
 	// Accept, if non-empty, is set as the request Accept header. Non-credential
 	// so it's safe to attach at the request level (not the transport).
 	Accept string
+
+	// Purpose labels why this request is made ("maintainer:contributors").
+	// Used only by the --network-log diagnostic; it never affects the request
+	// itself. Every call site should set it — an unset Purpose logs as
+	// "unlabeled".
+	Purpose string
 }
 
 // Client is a hardened HTTP helper enforcing per-request timeout, host
@@ -157,6 +165,7 @@ func (c *Client) Get(ctx context.Context, url string, opts GetOptions) ([]byte, 
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
@@ -193,6 +202,7 @@ func (c *Client) Post(ctx context.Context, url, contentType string, reqBody io.R
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, reqBody)
 	if err != nil {
@@ -230,6 +240,7 @@ func (c *Client) Head(ctx context.Context, url string, opts GetOptions) (*http.R
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, http.NoBody)
 	if err != nil {

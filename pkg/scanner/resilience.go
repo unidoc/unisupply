@@ -213,7 +213,8 @@ func (rs *ResilienceScanner) fetchVersionList(ctx context.Context, modPath strin
 	url := fmt.Sprintf("%s/%s/@v/list", rs.proxyURL, escapedPath)
 
 	body, resp, err := rs.client.Get(ctx, url, GetOptions{
-		Host: proxyHost(rs.proxyURL),
+		Host:    proxyHost(rs.proxyURL),
+		Purpose: "resilience:version-list",
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil
@@ -234,7 +235,8 @@ func (rs *ResilienceScanner) fetchVersionTime(ctx context.Context, modPath, vers
 	url := fmt.Sprintf("%s/%s/@v/%s.info", rs.proxyURL, escapedPath, version)
 
 	body, resp, err := rs.client.Get(ctx, url, GetOptions{
-		Host: proxyHost(rs.proxyURL),
+		Host:    proxyHost(rs.proxyURL),
+		Purpose: "resilience:version-info",
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return time.Time{}
@@ -263,7 +265,8 @@ func (rs *ResilienceScanner) checkGovernanceFiles(ctx context.Context, owner, re
 	for _, f := range files {
 		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, f.path)
 		resp, err := rs.client.Head(ctx, url, GetOptions{
-			Host: "api.github.com",
+			Host:    "api.github.com",
+			Purpose: "resilience:governance",
 		})
 		if err == nil && resp.StatusCode == http.StatusOK {
 			*f.flag = true

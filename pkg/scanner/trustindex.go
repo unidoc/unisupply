@@ -190,6 +190,7 @@ func (c *TrustIndexClient) LookupAll(ctx context.Context, graph *resolver.Graph)
 	body, resp, err := c.client.Post(ctx, lookupURL, "application/json", bytes.NewReader(reqBody), GetOptions{
 		Host:     c.host,
 		MaxBytes: 4 * 1024 * 1024, // 4 MB — Trust Index response may include many modules.
+		Purpose:  "trustindex:lookup",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("trust index lookup: %w", err)

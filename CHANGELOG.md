@@ -7,6 +7,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### New Features
 
+- **`--network-log`: observable outbound requests.** Prints every outbound
+  HTTP request to stderr as `NET <METHOD> <host> <purpose> → <status>
+  (<bytes>, <duration>)`, so the network contract documented in the README can
+  be verified rather than trusted. Each of the scanner call sites carries an
+  explicit purpose label (`maintainer:contributors`, `threatintel:kev`, …);
+  traffic from dependencies that bypass the shared client — `golang.org/x/vuln`
+  reaching `vuln.go.dev`, UniPDF reaching `cloud.unidoc.io` — is labeled from
+  its host. Child-process traffic (`go mod graph`, `go list`, `go mod verify`)
+  cannot be intercepted per-request and is reported as a `NET SUBPROCESS`
+  lifecycle line. Logging goes to stderr only, so `--format json` output stays
+  clean; nothing is installed and no behavior changes when the flag is off.
+
 - **`go.mod` replace/exclude directive audit (Integrity scanner).** Every
   `replace` directive is classified as a version-pin (LOW), local-path
   override (MEDIUM), or redirect to a different module (HIGH); `exclude`

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
@@ -55,6 +56,7 @@ func main() {
 		trustIndexAllowPrivate bool
 		progressMode           string
 		debugScoring           bool
+		networkLog             bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -76,6 +78,7 @@ func main() {
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
 	flag.BoolVar(&trustIndexAllowPrivate, "trust-index-allow-private", false, "Allow --trust-index-url to target RFC1918/link-local addresses (e.g. self-hosted on a private network)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
+	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
 	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
 	flag.Parse()
@@ -124,6 +127,7 @@ func main() {
 		trustIndexAllowPrivate: trustIndexAllowPrivate,
 		progressMode:           progressMode,
 		debugScoring:           debugScoring,
+		networkLog:             networkLog,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -161,6 +165,7 @@ type runConfig struct {
 	trustIndexAllowPrivate bool
 	progressMode           string
 	debugScoring           bool
+	networkLog             bool
 }
 
 func run(cfg *runConfig) error {
@@ -185,6 +190,22 @@ func run(cfg *runConfig) error {
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
+	}
+
+	if cfg.networkLog {
+		// Install the logging transport before any request is issued. This is
+		// the single interception point: the hardened scanner client delegates
+		// to http.DefaultTransport, as do dependencies that use
+		// http.DefaultClient directly (x/vuln → vuln.go.dev, UniPDF →
+		// cloud.unidoc.io).
+		netlog.Enable(os.Stderr)
+
+		// The TTY reporter repaints lines in place, which raw log lines would
+		// corrupt. Downgrade auto to plain; an explicit --progress none stays
+		// silent.
+		if mode == progress.ModeAuto {
+			mode = progress.ModePlain
+		}
 	}
 	rep := progress.New(mode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -500,6 +521,7 @@ func printUsage() {
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
+	fmt.Println("  unisupply --network-log 2>net.log            # Log every outbound request to stderr")
 	fmt.Println()
 	fmt.Println("Exit codes:")
 	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")

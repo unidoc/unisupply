@@ -319,7 +319,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 
 func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) (*githubRepo, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	body, err := ms.githubGet(ctx, url)
+	body, err := ms.githubGet(ctx, url, "maintainer:repo")
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +339,7 @@ func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githu
 	ms.mu.Unlock()
 
 	url := fmt.Sprintf("https://api.github.com/users/%s", login)
-	body, err := ms.githubGet(ctx, url)
+	body, err := ms.githubGet(ctx, url, "maintainer:user")
 	if err != nil {
 		return nil
 	}
@@ -357,7 +357,7 @@ func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githu
 
 func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo string) []githubContributor {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contributors?per_page=100", owner, repo)
-	body, err := ms.githubGet(ctx, url)
+	body, err := ms.githubGet(ctx, url, "maintainer:contributors")
 	if err != nil {
 		return nil
 	}
@@ -372,7 +372,7 @@ func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo 
 // the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
 // response body on HTTP 200, and returns the body. Non-200 responses are not
 // cached — the error is returned directly to the caller as before.
-func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte, error) {
+func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string) ([]byte, error) {
 	// Consult the disk cache first.
 	if ms.diskCache != nil {
 		if cached, hit, err := ms.diskCache.Get(url); err == nil && hit {
@@ -389,6 +389,7 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url string) ([]byte,
 		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
 		AuthHeader: auth,
 		Accept:     "application/vnd.github.v3+json",
+		Purpose:    purpose,
 	})
 	if err != nil {
 		return nil, err
