@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -117,7 +118,9 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration, allowPrivate boo
 	// Pin the startup-validated IPs at dial time to close the DNS-rebinding window.
 	// Without this, http.Client re-resolves on every dial, giving an attacker a
 	// second opportunity to return a private/metadata IP after passing startup checks.
-	dt, ok := http.DefaultTransport.(*http.Transport)
+	// Unwrap first: with --network-log the default transport is the netlog
+	// wrapper, not *http.Transport.
+	dt, ok := netlog.Unwrap(http.DefaultTransport).(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("trust-index: unexpected http.DefaultTransport type; cannot pin dial IPs")
 	}
@@ -142,7 +145,8 @@ func NewTrustIndexClient(baseURL string, timeout time.Duration, allowPrivate boo
 		}
 		return nil, fmt.Errorf("trust-index: failed to connect to %s: %w", addr, errors.Join(errs...))
 	}
-	c.Transport = dialTransport
+	// Re-wrap so Trust Index requests are still logged; no-op when disabled.
+	c.Transport = netlog.Wrap(dialTransport)
 	return &TrustIndexClient{
 		client:  c,
 		baseURL: baseURL,

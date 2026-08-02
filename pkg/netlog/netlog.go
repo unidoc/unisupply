@@ -54,6 +54,16 @@ func Enable(w io.Writer) {
 // Enabled reports whether Enable has been called.
 func Enabled() bool { return global.Load() != nil }
 
+// Disable reverses Enable, restoring the transport that was wrapped. Production
+// enables once at startup and never disables; this exists so tests can exercise
+// the logging-enabled paths without leaking global state into later tests.
+func Disable() {
+	if t, ok := http.DefaultTransport.(*transport); ok {
+		http.DefaultTransport = t.inner
+	}
+	global.Store(nil)
+}
+
 // Subprocess logs the lifecycle of an external command whose network traffic
 // happens in a child process and therefore cannot be intercepted per-request.
 // The note should state honestly what may be contacted. No-op when disabled.
@@ -67,6 +77,29 @@ func Subprocess(command, note string) {
 // Enable, and directly by tests.
 func NewTransport(inner http.RoundTripper, w io.Writer) http.RoundTripper {
 	return &transport{inner: inner, sink: &sink{w: w}}
+}
+
+// Unwrap returns the round-tripper rt wraps when rt is a logging transport,
+// and rt itself otherwise. Callers that need to inspect or clone the concrete
+// transport underneath (for example to pin dial addresses) must go through
+// this so they keep working with --network-log enabled.
+func Unwrap(rt http.RoundTripper) http.RoundTripper {
+	if t, ok := rt.(*transport); ok {
+		return t.inner
+	}
+	return rt
+}
+
+// Wrap re-applies logging to a transport derived from an unwrapped one, so its
+// requests still appear in the log. It shares the sink installed by Enable, so
+// writes stay serialized with everything else. Returns rt unchanged when
+// logging is disabled.
+func Wrap(rt http.RoundTripper) http.RoundTripper {
+	s := global.Load()
+	if s == nil {
+		return rt
+	}
+	return &transport{inner: rt, sink: s}
 }
 
 // sink serializes writes so concurrent scanners cannot interleave partial

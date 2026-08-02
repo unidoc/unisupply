@@ -151,3 +151,53 @@ func TestSinkSerializesConcurrentWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestUnwrapReturnsInnerTransport(t *testing.T) {
+	base := &testTransport{resp: newResponse(200, "x")}
+
+	if got := Unwrap(base); got != http.RoundTripper(base) {
+		t.Errorf("Unwrap of a plain transport must return it unchanged, got %T", got)
+	}
+	if got := Unwrap(NewTransport(base, io.Discard)); got != http.RoundTripper(base) {
+		t.Errorf("Unwrap of a logging transport must return its inner, got %T", got)
+	}
+}
+
+func TestWrapLogsThroughGlobalSink(t *testing.T) {
+	base := &testTransport{resp: newResponse(200, "body")}
+
+	if got := Wrap(base); got != http.RoundTripper(base) {
+		t.Errorf("Wrap must be a no-op when logging is disabled, got %T", got)
+	}
+
+	var buf bytes.Buffer
+	global.Store(&sink{w: &buf})
+	t.Cleanup(func() { global.Store(nil) })
+
+	doRequest(t, Wrap(base), "trustindex:lookup", "POST", "https://trust.example.com/api/v1/lookup")
+
+	if !strings.Contains(buf.String(), "NET POST trust.example.com trustindex:lookup → 200") {
+		t.Errorf("want a logged line via the global sink, got %q", buf.String())
+	}
+}
+
+// TestEnableDisableRestoresGlobalState guards the inverse property scanner
+// tests depend on: they enable logging to exercise the wrapped-transport paths,
+// and a Disable that failed to restore would leak into every later test.
+func TestEnableDisableRestoresGlobalState(t *testing.T) {
+	prev := http.DefaultTransport
+	var buf bytes.Buffer
+
+	Enable(&buf)
+	if !Enabled() || http.DefaultTransport == prev {
+		t.Fatal("Enable did not install the logging transport")
+	}
+
+	Disable()
+	if Enabled() {
+		t.Error("Disable left the global sink installed")
+	}
+	if http.DefaultTransport != prev {
+		t.Errorf("Disable did not restore http.DefaultTransport, got %T", http.DefaultTransport)
+	}
+}

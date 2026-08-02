@@ -453,12 +453,12 @@ confirm the table above matches real behavior rather than taking it on trust:
 
 ```bash
 unisupply ./ --network-log 2> net.log
-grep '^NET ' net.log | awk '{print $3}' | sort -u   # every host contacted
+grep -E '^NET (GET|POST|HEAD|PUT|PATCH|DELETE) ' net.log \
+  | awk '{print $3}' | sort -u   # every host contacted
 ```
 
 ```
 NET SUBPROCESS go mod graph (module proxy/VCS may be contacted by the go toolchain; see GOPROXY)
-NET SUBPROCESS govulncheck (queries vuln.go.dev for the vulnerability database)
 NET GET vuln.go.dev vulndb → 200 (59116 bytes, 55ms)
 NET GET proxy.golang.org maintenance:latest → 200 (78 bytes, 380ms)
 NET HEAD api.github.com resilience:governance → 403 (279 bytes, 55ms)
