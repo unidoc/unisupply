@@ -318,9 +318,13 @@ module proxy's published version list (`ResilienceInfo.VersionScheme ==
 "pseudo" && TotalReleases == 0`). The integrity check here fires on the
 version **currently pinned** in `go.mod`, which can happen even for a module
 with real tagged releases (e.g. pinned to a commit between tags). A
-dependency can trigger both signals at once — the aigen bonus (max 1.5 =
-10 × 0.15) and the pseudo-version bonus (max 4) are additive but capped at a
-combined 5.5, which alone cannot promote a dependency into the HIGH band.
+dependency can trigger both signals at once, and the two contributions are
+additive: the `pseudo_version_only` indicator adds 10 to the aigen score,
+i.e. 1.5 points here (10 × 0.15), and the pseudo-version bonus adds at most 4
+— so the pseudo-version-related contributions sum to at most 5.5, which alone
+cannot promote a dependency into the HIGH band. Note this is not an enforced
+cap: the aigen bonus as a whole can reach 15 when other aigen indicators fire
+alongside `pseudo_version_only`.
 
 Pseudo-version pins are **per-dependency risk factors only** — they do not
 feed the `integrity_floor` headline candidate and cannot, on their own, push

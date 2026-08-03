@@ -39,8 +39,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   dependencies get LOW (+2), and confirmed test-only dependencies get INFO
   with no score impact. Distinct from the AI-generated-code scanner's
   `pseudo_version_only` indicator, which fires on zero-tagged-releases-ever
-  rather than the currently pinned version — both signals can coexist, with
-  a combined additive cap of 5.5. Pseudo-version findings are per-dependency
+  rather than the currently pinned version — both signals can coexist, and
+  their pseudo-version-related contributions sum to at most 5.5 (1.5 from the
+  `pseudo_version_only` indicator plus 4 from this bonus); the aigen bonus as
+  a whole can be larger. Pseudo-version findings are per-dependency
   risk factors only and never drive the project headline. New
   `forbid_pseudo_versions` policy rule (enabled in the strict preset) fails
   CI on any non-test-only pseudo-version pin.
