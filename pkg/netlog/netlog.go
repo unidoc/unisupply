@@ -17,9 +17,12 @@ package netlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,8 +131,8 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	elapsed := time.Since(start)
 
 	if err != nil {
-		t.sink.printf("NET %s %s %s → error: %v (%s)",
-			req.Method, req.URL.Host, purpose, err, formatDuration(elapsed))
+		t.sink.printf("NET %s %s %s → error: %s (%s)",
+			req.Method, req.URL.Host, purpose, errorText(req.URL, err), formatDuration(elapsed))
 		return resp, err
 	}
 	t.sink.printf("NET %s %s %s → %d (%s, %s)",
@@ -151,6 +154,52 @@ func purposeOf(req *http.Request) string {
 		return "unipdf-license"
 	}
 	return "unlabeled"
+}
+
+// errorText renders err for the log line without disclosing the request path or
+// query. The log prints hosts and purposes only, and the README tells users to
+// attach it to approval tickets, so a failed request to proxy.golang.org must
+// not write a private module path into it. *url.Error stringifies the complete
+// URL; net/http's own transport errors do not, but an inner round-tripper's
+// might, so unwrap url.Error to its cause and then redact whatever URL text
+// survives — the line cannot render a URL regardless of the error's origin.
+func errorText(u *url.URL, err error) string {
+	var msg string
+
+	// Read the cause directly rather than through Error(), which would render
+	// the URL — and panics on a url.Error with no cause.
+	var urlErr *url.Error
+	switch {
+	case !errors.As(err, &urlErr):
+		msg = err.Error()
+	case urlErr.Err == nil:
+		msg = urlErr.Op
+	case urlErr.Op == "":
+		msg = urlErr.Err.Error()
+	default:
+		msg = urlErr.Op + ": " + urlErr.Err.Error()
+	}
+
+	msg = redactURL(u, msg)
+	if msg == "" {
+		return "unknown error"
+	}
+	return msg
+}
+
+// redactURL removes the request URL and its identifying components from msg.
+// Longest form first, so the full URL is replaced before its own substrings.
+// Both the escaped and decoded path are listed — they differ when the path is
+// percent-encoded, and an error quoting the escaped form alone would match
+// neither u.Path nor u.RequestURI() (which carries the query too).
+func redactURL(u *url.URL, msg string) string {
+	for _, s := range []string{u.String(), u.RequestURI(), u.RawQuery, u.EscapedPath(), u.Path} {
+		if s == "" || s == "/" {
+			continue
+		}
+		msg = strings.ReplaceAll(msg, s, "<redacted>")
+	}
+	return msg
 }
 
 // formatBytes renders a Content-Length. A response with unknown length

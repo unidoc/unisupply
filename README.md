@@ -465,7 +465,9 @@ NET HEAD api.github.com resilience:governance → 403 (279 bytes, 55ms)
 ```
 
 A response whose length the server does not declare (chunked, or transparently
-decompressed) reports `? bytes`; a failed request reports `→ error: …`.
+decompressed) reports `? bytes`; a failed request reports `→ error: …` with the
+URL stripped from the error text, so a failure cannot disclose a request path or
+query that the success line would not have printed.
 
 Traffic from child processes (`go mod graph`, `go list`, `go mod verify`)
 cannot be logged per-request, so it is reported as a `NET SUBPROCESS`

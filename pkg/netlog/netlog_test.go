@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +97,107 @@ func TestTransportLogsErrors(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, "→ error: ") || !strings.Contains(got, "threatintel:kev") {
 		t.Errorf("want error line with purpose, got %q", got)
+	}
+}
+
+// The log promises hosts and purposes only, and the README tells users to attach
+// it to approval tickets — a private module path or query token on the error
+// line would break that.
+func TestTransportRedactsURLFromErrorLine(t *testing.T) {
+	const target = "https://proxy.golang.org/github.com/acme/private-module/@latest?token=SECRET"
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "url.Error is unwrapped to its cause",
+			err:  &url.Error{Op: "Get", URL: target, Err: errors.New("dial tcp: connection refused")},
+			want: "Get: dial tcp: connection refused",
+		},
+		{
+			name: "url.Error without a cause keeps only the op",
+			err:  &url.Error{Op: "Post", URL: target},
+			want: "Post",
+		},
+		{
+			name: "url.Error with nothing to report",
+			err:  &url.Error{},
+			want: "unknown error",
+		},
+		{
+			name: "plain error embedding the full URL",
+			err:  fmt.Errorf("inner transport refused %q", target),
+			want: "<redacted>",
+		},
+		{
+			name: "plain error embedding only path and query",
+			err:  errors.New("proxy fetch failed for /github.com/acme/private-module/@latest?token=SECRET"),
+			want: "<redacted>",
+		},
+		{
+			name: "error carrying no URL passes through unchanged",
+			err:  errStub,
+			want: "dial tcp: connection refused",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			rt := NewTransport(&testTransport{err: tc.err}, &buf)
+
+			req, err := http.NewRequest("GET", target, http.NoBody)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			if _, err := rt.RoundTrip(req); err == nil {
+				t.Fatal("RoundTrip: want error from stub transport")
+			}
+
+			got := buf.String()
+			for _, leak := range []string{"private-module", "SECRET", "@latest", "/github.com/acme"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("error line leaks %q: %s", leak, got)
+				}
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("want error line containing %q, got %s", tc.want, got)
+			}
+			// The host is logged from req.URL.Host, not from the error text.
+			if !strings.Contains(got, "NET GET proxy.golang.org ") {
+				t.Errorf("want host still logged, got %s", got)
+			}
+		})
+	}
+}
+
+// An error may quote the escaped path alone — which matches neither the decoded
+// u.Path nor u.RequestURI() (that one carries the query too) when the two forms
+// diverge.
+func TestTransportRedactsEscapedPath(t *testing.T) {
+	const target = "https://proxy.golang.org/github.com/acme/private%2Dmodule/@latest?token=SECRET"
+
+	var buf bytes.Buffer
+	rt := NewTransport(&testTransport{
+		err: errors.New(`fetch failed: /github.com/acme/private%2Dmodule/@latest`),
+	}, &buf)
+
+	req, err := http.NewRequest("GET", target, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if _, err := rt.RoundTrip(req); err == nil {
+		t.Fatal("RoundTrip: want error from stub transport")
+	}
+
+	got := buf.String()
+	if strings.Contains(got, "private") {
+		t.Errorf("error line leaks the escaped path: %s", got)
+	}
+	if !strings.Contains(got, "<redacted>") {
+		t.Errorf("want redacted error line, got %s", got)
 	}
 }
 
