@@ -132,6 +132,9 @@ type JSONDependency struct {
 	// this dependency's go.mod replace directive ("LOW"/"MEDIUM"/"HIGH"), or
 	// omitted when the dependency is not replaced.
 	ReplaceClass string `json:"replace_class,omitempty"`
+	// PseudoVersion mirrors scorer.DependencyScore.PseudoVersion: true when
+	// this dependency's pinned go.mod version is a pseudo-version.
+	PseudoVersion bool `json:"pseudo_version,omitempty"`
 }
 
 // JSONVuln is a vulnerability entry.
@@ -263,9 +266,10 @@ type JSONCIFinding struct {
 // JSONIntegrityReport holds the go.mod replace/exclude directive audit and
 // the go.sum verification outcome.
 type JSONIntegrityReport struct {
-	ReplaceCount  int `json:"replace_count"`
-	ExcludeCount  int `json:"exclude_count"`
-	RedirectCount int `json:"redirect_count"`
+	ReplaceCount       int `json:"replace_count"`
+	ExcludeCount       int `json:"exclude_count"`
+	RedirectCount      int `json:"redirect_count"`
+	PseudoVersionCount int `json:"pseudo_version_count"`
 	// GoSumVerified is the `go mod verify` outcome: "true", "false",
 	// "offline", or "skipped" — string-valued so honest-UNKNOWN states are
 	// distinguishable from a verified pass/fail. Omitted when verification
@@ -399,6 +403,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			DependencyPath: ds.DependencyPath,
 			RiskFactors:    ds.RiskFactors,
 			ReplaceClass:   string(ds.ReplaceClass),
+			PseudoVersion:  ds.PseudoVersion,
 		}
 
 		for i := range ds.Vulns {
@@ -581,10 +586,11 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	// consumers can distinguish "no directives" from "scanner not invoked".
 	if opts.IntegrityReport != nil {
 		integrityJSON := &JSONIntegrityReport{
-			ReplaceCount:  opts.IntegrityReport.ReplaceCount,
-			ExcludeCount:  opts.IntegrityReport.ExcludeCount,
-			RedirectCount: opts.IntegrityReport.RedirectCount,
-			GoSumVerified: opts.IntegrityReport.GoSumVerified,
+			ReplaceCount:       opts.IntegrityReport.ReplaceCount,
+			ExcludeCount:       opts.IntegrityReport.ExcludeCount,
+			RedirectCount:      opts.IntegrityReport.RedirectCount,
+			GoSumVerified:      opts.IntegrityReport.GoSumVerified,
+			PseudoVersionCount: opts.IntegrityReport.PseudoVersionCount,
 		}
 		for _, f := range opts.IntegrityReport.Findings {
 			integrityJSON.Findings = append(integrityJSON.Findings, JSONIntegrityFinding{

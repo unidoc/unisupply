@@ -530,6 +530,7 @@ func writeIntegrityReportText(w io.Writer, ir *scanner.IntegrityReport, c func(s
 	fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
 	fmt.Fprintf(w, "  Replace directives: %d (%d redirect to a different module)\n", ir.ReplaceCount, ir.RedirectCount)
 	fmt.Fprintf(w, "  Exclude directives: %d\n", ir.ExcludeCount)
+	fmt.Fprintf(w, "  Pseudo-version pins: %d\n", ir.PseudoVersionCount)
 	if ir.GoSumVerified != "" {
 		fmt.Fprintf(w, "  go.sum verification (go mod verify): %s\n", c(gosumColor(ir.GoSumVerified), gosumLabel(ir.GoSumVerified)))
 	}

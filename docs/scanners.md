@@ -18,7 +18,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.{yml,yaml}` |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
-| Integrity        | `go.mod` `replace`/`exclude` directive audit               | `go.mod` (offline)          |
+| Integrity        | `go.mod` `replace`/`exclude` directive audit, `go.sum` verification, pseudo-version pin audit | `go.mod`/`go.sum` (offline) |
 
 The CI/CD and Build-files scanners are off by default; enable them with
 `--scan-workflows` (workflow files `*.yml` and `*.yaml` only) or `--scan-ci`
@@ -291,6 +291,53 @@ hash against `go.sum` when loading the build list, but verifies module zips
 against the cache's own integrity records — so `gosum_verified: "true"` means
 the build graph's checksums are consistent, not that every archive byte was
 re-hashed against `go.sum`.
+
+### Pseudo-version pins
+
+The Integrity scanner also flags every resolved dependency whose **pinned**
+`go.mod` version is a pseudo-version (`v0.0.0-YYYYMMDDHHMMSS-abcdefabcdef`,
+including the "pseudo-version on top of a tag" form
+`v0.4.1-0.20220921163831-...`), using
+`golang.org/x/mod/module.IsPseudoVersion` — no custom regex.
+
+| Condition                                     | Severity | Score effect                    |
+| ---------------------------------------------- | -------- | -------------------------------- |
+| Direct dependency, not test-only               | MEDIUM   | +4 per-dependency penalty         |
+| Transitive dependency, not test-only           | LOW      | +2 per-dependency penalty         |
+| Confirmed test-only (`IsTestOnly == &true`)     | INFO     | None — surfaced for transparency  |
+
+An unknown test-only classification (`IsTestOnly == nil`) is treated as
+**not** test-only, consistent with the scorer's general convention of
+under-discounting rather than silently applying a discount on unverified
+data.
+
+This is a **distinct signal** from the AI-generated-code scanner's
+`pseudo_version_only` indicator (see above): that indicator fires when a
+module has **zero tagged releases ever** — a historical property of the
+module proxy's published version list (`ResilienceInfo.VersionScheme ==
+"pseudo" && TotalReleases == 0`). The integrity check here fires on the
+version **currently pinned** in `go.mod`, which can happen even for a module
+with real tagged releases (e.g. pinned to a commit between tags). A
+dependency can trigger both signals at once, and the two contributions are
+additive: the `pseudo_version_only` indicator adds 10 to the aigen score,
+i.e. 1.5 points here (10 × 0.15), and the pseudo-version bonus adds at most 4
+— so the pseudo-version-related contributions sum to at most 5.5, which alone
+cannot promote a dependency into the HIGH band. Note this is not an enforced
+cap: the aigen bonus as a whole can reach 15 when other aigen indicators fire
+alongside `pseudo_version_only`.
+
+Pseudo-version pins are **per-dependency risk factors only** — they do not
+feed the `integrity_floor` headline candidate and cannot, on their own, push
+a project's overall score into the HIGH band. This is deliberate: routine
+pins such as `golang.org/x/telemetry` (which has no tagged releases) are
+common in the Go ecosystem and must not push projects to HIGH.
+
+Enable the `forbid_pseudo_versions` policy rule (on by default in the strict
+preset) to fail CI on any non-test-only pseudo-version pin. Unlike
+`forbid_replace_redirect`, this rule **does** exempt confirmed test-only
+dependencies — a pseudo-version pin is a provenance/pinning-hygiene signal,
+not a hijack vector, so test-time exposure to CI secrets is not the relevant
+threat model here.
 
 ## Risk bands
 

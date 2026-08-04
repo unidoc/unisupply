@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/mod/module"
+
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -230,6 +232,134 @@ func TestIntegrityScanner_NoDirectives(t *testing.T) {
 	}
 	if len(classes) != 0 {
 		t.Errorf("classes should be empty, got %d entries", len(classes))
+	}
+}
+
+// --- pseudo-version audit (ScanPseudoVersions) ---
+
+// TestIsPseudoVersion_Classification is a table test over
+// golang.org/x/mod/module.IsPseudoVersion, including the tricky
+// "pseudo-version on top of a tag" form (v0.4.1-0.20220921...) that a naive
+// regex over the numeric-prefix alone could misclassify.
+func TestIsPseudoVersion_Classification(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{"zero-base pseudo-version", "v0.0.0-20220702200334-8c7cb25baa11", true},
+		{"pseudo-version on top of a tag", "v0.4.1-0.20220921163831-64d0910b0f3a", true},
+		{"plain pre-release (not pseudo)", "v1.2.3-beta.1", false},
+		{"real tagged release", "v1.2.3", false},
+		{"v2 module tagged release", "v2.0.0", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := module.IsPseudoVersion(tt.version)
+			if got != tt.want {
+				t.Errorf("IsPseudoVersion(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScanPseudoVersions_SeverityMapping verifies direct/indirect/test-only/
+// unknown severity classification end-to-end through ScanPseudoVersions.
+func TestScanPseudoVersions_SeverityMapping(t *testing.T) {
+	trueVal, falseVal := true, false
+
+	graph := &resolver.Graph{
+		Dependencies: map[string]*resolver.Dependency{
+			"github.com/direct/pkg": {
+				Module:     parser.Module{Path: "github.com/direct/pkg", Version: "v0.0.0-20220702200334-8c7cb25baa11"},
+				Direct:     true,
+				IsTestOnly: &falseVal,
+			},
+			"github.com/indirect/pkg": {
+				Module:     parser.Module{Path: "github.com/indirect/pkg", Version: "v0.0.0-20260625142307-59b4966ccb57"},
+				Direct:     false,
+				IsTestOnly: &falseVal,
+			},
+			"github.com/testonly/pkg": {
+				Module:     parser.Module{Path: "github.com/testonly/pkg", Version: "v0.4.1-0.20220921163831-64d0910b0f3a"},
+				Direct:     true,
+				IsTestOnly: &trueVal,
+			},
+			"github.com/unknown/pkg": {
+				Module:     parser.Module{Path: "github.com/unknown/pkg", Version: "v0.0.0-20220101000000-abc123def456"},
+				Direct:     false,
+				IsTestOnly: nil,
+			},
+			"github.com/tagged/pkg": {
+				Module: parser.Module{Path: "github.com/tagged/pkg", Version: "v1.2.3"},
+				Direct: true,
+			},
+		},
+	}
+
+	report := &IntegrityReport{}
+	classes := NewIntegrityScanner().ScanPseudoVersions(graph, report)
+
+	if got := classes["github.com/direct/pkg"]; got != IntegrityMedium {
+		t.Errorf("direct: severity = %q, want MEDIUM", got)
+	}
+	if got := classes["github.com/indirect/pkg"]; got != IntegrityLow {
+		t.Errorf("indirect: severity = %q, want LOW", got)
+	}
+	if got := classes["github.com/testonly/pkg"]; got != IntegrityInfo {
+		t.Errorf("test-only: severity = %q, want INFO", got)
+	}
+	if got := classes["github.com/unknown/pkg"]; got != IntegrityLow {
+		t.Errorf("unknown test-only (nil, indirect): severity = %q, want LOW (nil treated as not-test-only)", got)
+	}
+	if _, ok := classes["github.com/tagged/pkg"]; ok {
+		t.Errorf("tagged release must not be classified as a pseudo-version pin")
+	}
+
+	if report.PseudoVersionCount != 4 {
+		t.Errorf("PseudoVersionCount = %d, want 4", report.PseudoVersionCount)
+	}
+	for _, f := range report.Findings {
+		if f.Category != IntegrityCategoryPseudoVersion {
+			t.Errorf("finding category = %q, want %q", f.Category, IntegrityCategoryPseudoVersion)
+		}
+	}
+}
+
+// TestScanPseudoVersions_SelfScanFixture is the acceptance-criteria-1 guard:
+// a fixture graph mirroring unisupply's own known pseudo-version pins
+// (garabic, go-cmdtest, x/telemetry) must all be flagged.
+func TestScanPseudoVersions_SelfScanFixture(t *testing.T) {
+	falseVal := false
+
+	graph := &resolver.Graph{
+		Dependencies: map[string]*resolver.Dependency{
+			"github.com/unidoc/garabic": {
+				Module:     parser.Module{Path: "github.com/unidoc/garabic", Version: "v0.0.0-20220702200334-8c7cb25baa11"},
+				Direct:     true,
+				IsTestOnly: &falseVal,
+			},
+			"github.com/google/go-cmdtest": {
+				Module:     parser.Module{Path: "github.com/google/go-cmdtest", Version: "v0.4.1-0.20220921163831-55ab3332a786"},
+				Direct:     true,
+				IsTestOnly: &falseVal,
+			},
+			"golang.org/x/telemetry": {
+				Module:     parser.Module{Path: "golang.org/x/telemetry", Version: "v0.0.0-20260625142307-59b4966ccb57"},
+				Direct:     false,
+				IsTestOnly: &falseVal,
+			},
+		},
+	}
+
+	report := &IntegrityReport{}
+	classes := NewIntegrityScanner().ScanPseudoVersions(graph, report)
+
+	for _, mod := range []string{"github.com/unidoc/garabic", "github.com/google/go-cmdtest", "golang.org/x/telemetry"} {
+		if _, ok := classes[mod]; !ok {
+			t.Errorf("%s: not flagged as a pseudo-version pin", mod)
+		}
 	}
 }
 
