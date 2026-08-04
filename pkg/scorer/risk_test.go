@@ -496,7 +496,7 @@ func TestIsTrustedNamespace(t *testing.T) {
 func TestScoreDependency_NoRisk(t *testing.T) {
 	dep := testutil.MakeDep("golang.org/x/text", "v1.0.0", true, 0)
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 	// Using trusted namespace should result in minimal risk
 	if ds.RiskScore > 15 {
@@ -517,7 +517,7 @@ func TestScoreDependency_WithVuln(t *testing.T) {
 		testutil.MakeVuln("CVE-2024-1234", "CRITICAL", "v1.1.0"),
 	}
 
-	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, vulns, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 	if ds.RiskScore < 51 {
 		t.Errorf("expected RiskScore >= 51 (HIGH floor), got %d", ds.RiskScore)
@@ -537,7 +537,7 @@ func TestScoreDependency_TyposquatBonus(t *testing.T) {
 		Confidence: 1.0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, typosquat, nil, nil, nil, "", "", time.Now())
 
 	// Score should be 0 base + 20 bonus = 20, gets rounded and adjusted
 	// Due to rounding, can be slightly higher
@@ -570,7 +570,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: true,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", time.Now())
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", "", time.Now())
 
 		// Score should be 0 base + (100 * 0.15) = 15 bonus.
 		if ds.RiskScore < 15 || ds.RiskScore > 26 {
@@ -596,7 +596,7 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 			RiskLevel:          "high",
 			MeetsPromotionGate: false,
 		}
-		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", time.Now())
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", "", time.Now())
 
 		// Bonus still applied.
 		if ds.RiskScore < 15 {
@@ -617,7 +617,7 @@ func TestScoreDependency_ResilienceBonus(t *testing.T) {
 		Score: 0,
 	}
 
-	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, "", "", time.Now())
 
 	// Score should be 0 base + (30-0)*0.2 = 6 bonus, can be slightly higher due to rounding
 	if ds.RiskScore < 6 || ds.RiskScore > 17 {
@@ -648,7 +648,7 @@ func TestScoreDependency_CappedAt100(t *testing.T) {
 	aiGen := &scanner.AIGenRisk{Score: 100}
 	resilience := &scanner.ResilienceInfo{Score: 0}
 
-	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil, "", time.Now())
+	ds := scoreDependency(dep, vulns, maint, maintainer, typosquat, resilience, aiGen, nil, "", "", time.Now())
 
 	if ds.RiskScore > 100 {
 		t.Errorf("expected RiskScore <= 100, got %d", ds.RiskScore)
@@ -664,7 +664,7 @@ func TestScoreDependency_RiskFactors(t *testing.T) {
 	maint := testutil.MakeMaintenanceInfo(36, true, true)
 	maintainer := testutil.MakeMaintainerInfo(1, 5, false)
 
-	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, maint, maintainer, nil, nil, nil, nil, "", "", time.Now())
 
 	expectedFactors := map[string]bool{
 		"archived":          true,
@@ -969,7 +969,7 @@ func TestScoreDependency_InactiveFlag(t *testing.T) {
 		ActivityPattern:  "inactive",
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", "", time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -993,7 +993,7 @@ func TestScoreDependency_TakeoverCandidate(t *testing.T) {
 		TakeoverCandidate: true,
 	}
 
-	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, nil, nil, maintainer, nil, nil, nil, nil, "", "", time.Now())
 
 	found := false
 	for _, factor := range ds.RiskFactors {
@@ -1182,8 +1182,8 @@ func TestScoreDependency_MaintainerDataUnavailable(t *testing.T) {
 		DataAvailable: false,
 	}
 
-	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil, "", time.Now())
-	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil, "", time.Now())
+	dsNilMaintainer := scoreDependency(dep, nil, maint, nil, nil, nil, nil, nil, "", "", time.Now())
+	dsDataUnavailable := scoreDependency(dep, nil, maint, maintainerUnavailable, nil, nil, nil, nil, "", "", time.Now())
 
 	// nil maintainer: 5-weight denominator, unknown penalty included → 26
 	expectedNil := 26
@@ -1320,7 +1320,7 @@ func TestSeverityFloor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
-			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil, "", time.Now())
+			ds := scoreDependency(dep, tt.vulns, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 			if tt.wantMinScore > 0 && ds.RiskScore < tt.wantMinScore {
 				t.Errorf("RiskScore = %d, want >= %d", ds.RiskScore, tt.wantMinScore)
@@ -1342,7 +1342,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 400 days ago → RiskScore >= 26", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 500, 400, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 		if ds.RiskScore < 26 {
 			t.Errorf("RiskScore = %d, want >= 26 (fix available 400 days ago)", ds.RiskScore)
@@ -1352,7 +1352,7 @@ func TestLowFixAge(t *testing.T) {
 	t.Run("LOW with fix 10 days ago → no amplifier floor", func(t *testing.T) {
 		dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 		vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "LOW", 30, 10, false)
-		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
+		ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 		// 10 days is below the 30-day threshold: amplifier must NOT raise to 26.
 		if ds.RiskScore >= 26 {
@@ -1367,7 +1367,7 @@ func TestUnknownSeverityFloor(t *testing.T) {
 	dep := testutil.MakeDep("github.com/test/pkg", "v1.0.0", true, 0)
 	vuln := testutil.MakeVulnWithDates("CVE-2024-0001", "UNKNOWN", 90, 0, true)
 	// EnrichmentFailed = true, so the scorer must apply the conservative MEDIUM floor.
-	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, []scanner.Vulnerability{vuln}, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 	if ds.RiskScore < 26 {
 		t.Errorf("RiskScore = %d, want >= 26 (conservative floor for enrichment-failed UNKNOWN)", ds.RiskScore)
@@ -1489,15 +1489,16 @@ func twoAxisCleanDeps(n int, headline testutil.DepSpec) []testutil.DepSpec {
 
 func twoAxisEmptyInput(graph *resolver.Graph) ScoreInput {
 	return ScoreInput{
-		Graph:       graph,
-		Vulns:       make(map[string][]scanner.Vulnerability),
-		Maintenance: make(map[string]*scanner.MaintenanceInfo),
-		Maintainers: make(map[string]*scanner.MaintainerInfo),
-		Typosquats:  make(map[string]*scanner.TyposquatResult),
-		Resilience:  make(map[string]*scanner.ResilienceInfo),
-		AIGenRisks:  make(map[string]*scanner.AIGenRisk),
-		TrustIndex:  make(map[string]*scanner.TrustIndexEntry),
-		Integrity:   make(map[string]scanner.IntegrityRiskLevel),
+		Graph:         graph,
+		Vulns:         make(map[string][]scanner.Vulnerability),
+		Maintenance:   make(map[string]*scanner.MaintenanceInfo),
+		Maintainers:   make(map[string]*scanner.MaintainerInfo),
+		Typosquats:    make(map[string]*scanner.TyposquatResult),
+		Resilience:    make(map[string]*scanner.ResilienceInfo),
+		AIGenRisks:    make(map[string]*scanner.AIGenRisk),
+		TrustIndex:    make(map[string]*scanner.TrustIndexEntry),
+		Integrity:     make(map[string]scanner.IntegrityRiskLevel),
+		PseudoVersion: make(map[string]scanner.IntegrityRiskLevel),
 	}
 }
 
@@ -2266,7 +2267,7 @@ func TestRequiredOnly_PerDepBandDrivenByLevelFromScore(t *testing.T) {
 	// Use a non-trusted namespace so the maturity-trusted shortcut doesn't mask
 	// the assertion, and depth 0 / direct so other components are deterministic.
 	dep := testutil.MakeDep("github.com/required-only/pkg", "v1.0.0", true, 0)
-	ds := scoreDependency(dep, requiredVulns, nil, nil, nil, nil, nil, nil, "", time.Now())
+	ds := scoreDependency(dep, requiredVulns, nil, nil, nil, nil, nil, nil, "", "", time.Now())
 
 	wantLevel := levelFromScore(ds.RiskScore)
 	if ds.RiskLevel != wantLevel {
@@ -2767,6 +2768,129 @@ func TestScoreAll_InertVersionScopedReplace_NoFloorNoClass(t *testing.T) {
 		if rf == "replaced" {
 			t.Errorf("RiskFactors = %v, must not contain %q for an inert replace", ds.RiskFactors, "replaced")
 		}
+	}
+}
+
+// TestScoreDependency_PseudoVersionBonus verifies severity mapping: direct →
+// MEDIUM bonus (4), indirect → LOW bonus (2), test-only → INFO with no score
+// impact, and the "pseudo_version_pin" risk factor is always surfaced when a
+// classification is present.
+func TestScoreDependency_PseudoVersionBonus(t *testing.T) {
+	t.Run("direct MEDIUM", func(t *testing.T) {
+		dep := testutil.MakeDep("github.com/unidoc/garabic", "v0.0.0-20220101000000-abc123def456", true, 0)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", scanner.IntegrityMedium, time.Now())
+		if ds.PseudoVersionBonus != 4 {
+			t.Errorf("PseudoVersionBonus = %v, want 4", ds.PseudoVersionBonus)
+		}
+		if !ds.PseudoVersion {
+			t.Errorf("PseudoVersion = false, want true")
+		}
+	})
+
+	t.Run("indirect LOW", func(t *testing.T) {
+		dep := testutil.MakeDep("golang.org/x/telemetry", "v0.0.0-20260101000000-abc123def456", false, 1)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", scanner.IntegrityLow, time.Now())
+		if ds.PseudoVersionBonus != 2 {
+			t.Errorf("PseudoVersionBonus = %v, want 2", ds.PseudoVersionBonus)
+		}
+	})
+
+	t.Run("test-only INFO carries no score impact", func(t *testing.T) {
+		dep := testutil.MakeDep("github.com/google/go-cmdtest", "v0.4.1-0.20220921163831-64d0910b0f3a", true, 0)
+		dep.IsTestOnly = testutil.BoolPtr(true)
+
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", scanner.IntegrityInfo, time.Now())
+		if ds.PseudoVersionBonus != 0 {
+			t.Errorf("PseudoVersionBonus = %v, want 0 (test-only is INFO, no score impact)", ds.PseudoVersionBonus)
+		}
+		if !ds.PseudoVersion {
+			t.Errorf("PseudoVersion = false, want true (still surfaced for transparency)")
+		}
+
+		baseline := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", "", time.Now())
+		if ds.RiskScore != baseline.RiskScore {
+			t.Errorf("RiskScore = %d, want %d (INFO pseudo-version must not change the score)", ds.RiskScore, baseline.RiskScore)
+		}
+	})
+
+	t.Run("risk factor tag present", func(t *testing.T) {
+		dep := testutil.MakeDep("github.com/unidoc/garabic", "v0.0.0-20220101000000-abc123def456", true, 0)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", scanner.IntegrityMedium, time.Now())
+		found := false
+		for _, rf := range ds.RiskFactors {
+			if rf == "pseudo_version_pin" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("RiskFactors = %v, want to contain %q", ds.RiskFactors, "pseudo_version_pin")
+		}
+	})
+
+	t.Run("no classification means no bonus, no factor", func(t *testing.T) {
+		dep := testutil.MakeDep("golang.org/x/text", "v1.0.0", true, 0)
+		ds := scoreDependency(dep, nil, nil, nil, nil, nil, nil, nil, "", "", time.Now())
+		if ds.PseudoVersion {
+			t.Errorf("PseudoVersion = true, want false")
+		}
+		if ds.PseudoVersionBonus != 0 {
+			t.Errorf("PseudoVersionBonus = %v, want 0", ds.PseudoVersionBonus)
+		}
+	})
+}
+
+// TestScoreAll_PseudoVersionOnly_DoesNotEnterHighBand is the acceptance-
+// criteria-2 check: a project whose only findings are pseudo-version pins
+// must not enter the HIGH band (>= 51) via either integrityFloor (explicitly
+// excluded, plan 79 Task 4) or p95_dep_risk (the bonus is small enough that
+// it cannot push a dep's RiskScore past the HIGH boundary on its own).
+func TestScoreAll_PseudoVersionOnly_DoesNotEnterHighBand(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/unidoc/garabic", Version: "v0.0.0-20220101000000-abc123def456", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false)},
+		testutil.DepSpec{Path: "golang.org/x/telemetry", Version: "v0.0.0-20260101000000-abc123def456", Direct: false, Depth: 1, IsTestOnly: testutil.BoolPtr(false)},
+		testutil.DepSpec{Path: "github.com/google/go-cmdtest", Version: "v0.4.1-0.20220921163831-64d0910b0f3a", Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(true)},
+	)
+
+	input := twoAxisEmptyInput(graph)
+	input.PseudoVersion["github.com/unidoc/garabic"] = scanner.IntegrityMedium
+	input.PseudoVersion["golang.org/x/telemetry"] = scanner.IntegrityLow
+	input.PseudoVersion["github.com/google/go-cmdtest"] = scanner.IntegrityInfo
+
+	ps := ScoreAll(input)
+
+	if ps.HeadlineDriver == "integrity_floor" {
+		t.Errorf("HeadlineDriver = %q, pseudo-version findings must never drive integrity_floor", ps.HeadlineDriver)
+	}
+	if ps.OverallScore >= 51 {
+		t.Errorf("OverallScore = %d, want < 51 (pseudo-version-only project must stay below HIGH)", ps.OverallScore)
+	}
+	if ps.OverallLevel == RiskHigh || ps.OverallLevel == RiskCritical {
+		t.Errorf("OverallLevel = %q, want LOW or MEDIUM", ps.OverallLevel)
+	}
+}
+
+// TestScoreDependency_PseudoVersionNoDoubleDip verifies that a dependency
+// triggering both aigen's pseudo_version_only indicator and the integrity
+// pseudo-version flag scores sanely: the combined additive contribution from
+// both bonuses is capped at 5.5 (aigen max 1.5 = 10*0.15, integrity max 4 for
+// MEDIUM), never dilutive-stacking into a false HIGH promotion on their own.
+func TestScoreDependency_PseudoVersionNoDoubleDip(t *testing.T) {
+	dep := testutil.MakeDep("github.com/freshly/registered", "v0.0.0-20260101000000-abc123def456", true, 0)
+	aiGen := &scanner.AIGenRisk{
+		Score:              10,
+		RiskLevel:          "low",
+		Indicators:         []string{"pseudo_version_only"},
+		MeetsPromotionGate: false,
+	}
+
+	ds := scoreDependency(dep, nil, nil, nil, nil, nil, aiGen, nil, "", scanner.IntegrityMedium, time.Now())
+
+	combined := ds.AIGenBonus + ds.PseudoVersionBonus
+	if combined > 5.5 {
+		t.Errorf("combined aigen+pseudo-version bonus = %v, want <= 5.5 (documented no-double-dip cap)", combined)
+	}
+	if ds.RiskScore >= 51 {
+		t.Errorf("RiskScore = %d, want < 51 (pseudo-version + aigen alone must not reach HIGH)", ds.RiskScore)
 	}
 }
 

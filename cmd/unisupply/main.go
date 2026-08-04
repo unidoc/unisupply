@@ -226,6 +226,12 @@ func run(cfg *runConfig) error {
 		return nil
 	}
 
+	// Pseudo-version audit (offline; needs the resolved graph for Direct/
+	// IsTestOnly, so it runs here rather than alongside ScanDirectives above).
+	rep.Stage("Auditing pseudo-version pins")
+	pseudoVersionClasses := integrityScanner.ScanPseudoVersions(graph, integrityReport)
+	rep.Done("%d pseudo-version pins", integrityReport.PseudoVersionCount)
+
 	// go.sum presence/completeness (offline file logic, needs the resolved
 	// graph) and go.sum verification via `go mod verify` (local module cache
 	// against go.sum; the toolchain handles GOPRIVATE/GONOSUMDB itself).
@@ -310,6 +316,7 @@ func run(cfg *runConfig) error {
 		AIGenRisks:    aiGenRisks,
 		TrustIndex:    trustIndex,
 		Integrity:     integrityClasses,
+		PseudoVersion: pseudoVersionClasses,
 		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
 		DebugMode:     cfg.debugScoring,
 		Now:           scanStart,

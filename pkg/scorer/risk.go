@@ -66,6 +66,12 @@ type DependencyScore struct {
 	// scanner.IntegrityScanner.ScanDirectives.
 	ReplaceClass scanner.IntegrityRiskLevel `json:"replace_class,omitempty"`
 
+	// PseudoVersion is true when this dependency's pinned go.mod version is a
+	// pseudo-version (see scanner.IntegrityScanner.ScanPseudoVersions). Set
+	// regardless of test-only status — IsTestOnly is the honest signal for
+	// whether it carried score/policy impact, this field is purely descriptive.
+	PseudoVersion bool `json:"pseudo_version,omitempty"`
+
 	// IsTestOnly carries the three-state test-only classification from the
 	// resolver. See resolver.Dependency.IsTestOnly for the full semantics.
 	// Task 10's discount logic MUST only apply the discount when this is &true
@@ -80,10 +86,11 @@ type DependencyScore struct {
 	MaturityScore    float64 `json:"-"`
 
 	// Additive bonus terms applied after the weighted base (for verbose output).
-	ResilienceBonus float64 `json:"-"`
-	AIGenBonus      float64 `json:"-"`
-	TyposquatBonus  float64 `json:"-"`
-	IntegrityBonus  float64 `json:"-"`
+	ResilienceBonus    float64 `json:"-"`
+	AIGenBonus         float64 `json:"-"`
+	TyposquatBonus     float64 `json:"-"`
+	IntegrityBonus     float64 `json:"-"`
+	PseudoVersionBonus float64 `json:"-"`
 	// FlooredTo is non-zero when severityFloor overrode the weighted total.
 	// The gap is NOT additive — rendered as "floored→N".
 	FlooredTo int `json:"-"`
@@ -266,6 +273,11 @@ type ScoreInput struct {
 	// dependency is not replaced.
 	Integrity map[string]scanner.IntegrityRiskLevel
 
+	// PseudoVersion maps a module path to its pseudo-version pin severity
+	// (see scanner.IntegrityScanner.ScanPseudoVersions). A missing entry means
+	// the dependency is not pinned to a pseudo-version.
+	PseudoVersion map[string]scanner.IntegrityRiskLevel
+
 	// GoSumMismatch is true when `go mod verify` reported a checksum mismatch
 	// (scanner.IntegrityReport.GoSumVerified == "false"). It floors the
 	// headline into the CRITICAL band via the integrity_floor candidate.
@@ -326,6 +338,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 			input.AIGenRisks[dep.Module.Path],
 			input.TrustIndex[dep.Module.Path],
 			input.Integrity[dep.Module.Path],
+			input.PseudoVersion[dep.Module.Path],
 			now,
 		)
 		ps.Dependencies = append(ps.Dependencies, ds)
@@ -444,6 +457,7 @@ func scoreDependency(
 	aiGenRisk *scanner.AIGenRisk,
 	trustIndex *scanner.TrustIndexEntry,
 	integrityClass scanner.IntegrityRiskLevel,
+	pseudoVersionClass scanner.IntegrityRiskLevel,
 	now time.Time,
 ) *DependencyScore {
 	// Backfill Maintenance.Archived from the maintainer scanner before building
@@ -570,6 +584,29 @@ func scoreDependency(
 		}
 	}
 
+	// Pseudo-version pin: a distinct signal from aigen's pseudo_version_only
+	// indicator (fires on zero-tagged-releases-ever, a historical property;
+	// see the (*scanner.IntegrityScanner).ScanPseudoVersions doc comment for
+	// the full distinction). INFO (test-only) carries no score impact by
+	// design — only MEDIUM (direct) and LOW (transitive) add a bonus. Kept
+	// intentionally small: a dep can trigger both this bonus (max 4) and the
+	// pseudo_version_only indicator's share of the aigen bonus (that indicator
+	// contributes 10 to the aigen score, i.e. 10*0.15 = 1.5 points here — the
+	// aigen bonus as a whole can be larger) simultaneously, capping the
+	// combined pseudo-version contribution at 5.5 — well below any
+	// single-factor promotion threshold.
+	pseudoVersionBonus := 0.0
+	if pseudoVersionClass != "" {
+		ds.PseudoVersion = true
+		ds.RiskFactors = append(ds.RiskFactors, "pseudo_version_pin")
+		switch pseudoVersionClass {
+		case scanner.IntegrityMedium:
+			pseudoVersionBonus = 4
+		case scanner.IntegrityLow:
+			pseudoVersionBonus = 2
+		}
+	}
+
 	// Weighted total.
 	//
 	// Normal case: the five weights sum to 1.0 (0.40 + 0.25 + 0.15 + 0.10 + 0.10).
@@ -604,12 +641,14 @@ func scoreDependency(
 	ds.AIGenBonus = aiGenBonus
 	ds.ResilienceBonus = resilienceBonus
 	ds.IntegrityBonus = integrityBonus
+	ds.PseudoVersionBonus = pseudoVersionBonus
 
 	weighted := weightedBase/denominator +
 		typosquatBonus +
 		aiGenBonus +
 		resilienceBonus +
-		integrityBonus
+		integrityBonus +
+		pseudoVersionBonus
 
 	ds.RiskScore = int(math.Round(weighted))
 

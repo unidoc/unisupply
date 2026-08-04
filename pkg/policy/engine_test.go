@@ -201,6 +201,9 @@ func TestDefaultStrictPolicy(t *testing.T) {
 	if !p.RequireGoSumVerified {
 		t.Errorf("RequireGoSumVerified: expected true")
 	}
+	if !p.ForbidPseudoVersions {
+		t.Errorf("ForbidPseudoVersions: expected true")
+	}
 }
 
 func TestDefaultModeratePolicy(t *testing.T) {
@@ -657,6 +660,104 @@ func TestEvaluate_ForbidReplaceRedirect_VersionPinPasses(t *testing.T) {
 
 	if !result.Pass {
 		t.Errorf("expected Pass=true (version-pin replace must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_NonTestOnly verifies that a non-test-only
+// dependency pinned to a pseudo-version fails the policy.
+func TestEvaluate_ForbidPseudoVersions_NonTestOnly(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	isTestOnly := false
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "github.com/unidoc/garabic",
+			Version:       "v0.0.0-20220101000000-abc123def456",
+			Direct:        true,
+			PseudoVersion: true,
+			IsTestOnly:    &isTestOnly,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "forbid_pseudo_versions" {
+		t.Errorf("expected rule 'forbid_pseudo_versions', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Module != "github.com/unidoc/garabic" {
+		t.Errorf("expected module 'github.com/unidoc/garabic', got %s", result.Violations[0].Module)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_ConfirmedTestOnlyPasses verifies that a
+// confirmed test-only (IsTestOnly == &true) pseudo-version pin is exempted.
+func TestEvaluate_ForbidPseudoVersions_ConfirmedTestOnlyPasses(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	isTestOnly := true
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "github.com/google/go-cmdtest",
+			Version:       "v0.4.1-0.20220921163831-64d0910b0f3a",
+			Direct:        true,
+			PseudoVersion: true,
+			IsTestOnly:    &isTestOnly,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (confirmed test-only pseudo-version must be exempted), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_UnknownTestOnlyDenies verifies that a
+// nil (unknown) IsTestOnly classification is treated as not-test-only and
+// denied, matching the scorer's under-discount-when-unverified convention.
+func TestEvaluate_ForbidPseudoVersions_UnknownTestOnlyDenies(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "golang.org/x/telemetry",
+			Version:       "v0.0.0-20260101000000-abc123def456",
+			Direct:        false,
+			PseudoVersion: true,
+			IsTestOnly:    nil,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if result.Pass {
+		t.Errorf("expected Pass=false (unknown test-only must be denied, not exempted), got true")
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_NoPin verifies that a dependency without
+// a pseudo-version pin never triggers the policy.
+func TestEvaluate_ForbidPseudoVersions_NoPin(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:  "golang.org/x/text",
+			Version: "v1.0.0",
+			Direct:  true,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true, got false: %+v", result.Violations)
 	}
 }
 
