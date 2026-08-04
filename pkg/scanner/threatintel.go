@@ -176,6 +176,7 @@ func (t *ThreatIntelClient) fetchEPSSBatch(ctx context.Context, batch []string) 
 		Host:     epssHost,
 		MaxBytes: epssMaxBytes,
 		Accept:   "application/json",
+		Purpose:  "threatintel:epss",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("EPSS fetch error: %w", err)
@@ -227,6 +228,7 @@ func (t *ThreatIntelClient) LoadKEV(ctx context.Context) (map[string]KEVEntry, e
 		Host:     kevHost,
 		MaxBytes: kevMaxBytes,
 		Accept:   "application/json",
+		Purpose:  "threatintel:kev",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("KEV catalog fetch error: %w", err)

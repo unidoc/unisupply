@@ -141,6 +141,9 @@ unisupply ./ --min-risk 26 --show-only vulnerabilities,maintenance
 # stdout, so it is safe with `--format json` piped to a consumer.
 unisupply ./ --progress plain 2> progress.log         # capture log
 unisupply ./ --progress none --format json > out.json # fully silent
+
+# Observe outbound network traffic (stderr only; verifies the README contract)
+unisupply ./ --network-log 2> net.log
 ```
 
 ### Environment variables

@@ -163,7 +163,8 @@ func (ms *MaintenanceScanner) fetchVersionInfo(ctx context.Context, modPath, ver
 	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, escapedPath, version)
 
 	body, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host: proxyHost(ms.proxyURL),
+		Host:    proxyHost(ms.proxyURL),
+		Purpose: "maintenance:version-info",
 	})
 	if err != nil {
 		return nil, err
@@ -185,7 +186,8 @@ func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath st
 	url := fmt.Sprintf("%s/%s/@latest", ms.proxyURL, escapedPath)
 
 	body, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host: proxyHost(ms.proxyURL),
+		Host:    proxyHost(ms.proxyURL),
+		Purpose: "maintenance:latest",
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return "", time.Time{}
@@ -207,7 +209,8 @@ func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath stri
 	url := fmt.Sprintf("%s/%s/@v/list", ms.proxyURL, escapedPath)
 
 	_, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host: proxyHost(ms.proxyURL),
+		Host:    proxyHost(ms.proxyURL),
+		Purpose: "maintenance:version-list",
 	})
 	if err != nil {
 		return

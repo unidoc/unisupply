@@ -1,14 +1,17 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -699,5 +702,39 @@ func TestTrustIndexEntry_Struct(t *testing.T) {
 
 	if unmarshaled.TrustScore != entry.TrustScore {
 		t.Error("trust score mismatch after marshal/unmarshal")
+	}
+}
+
+// TestNewTrustIndexClient_NetworkLogEnabled guards the --network-log +
+// --trust-index-url combination on both sides: netlog.Enable replaces
+// http.DefaultTransport with its logging wrapper, so NewTrustIndexClient must
+// unwrap it to reach the *http.Transport it clones for dial-IP pinning, and it
+// must re-wrap the pinned clone so Trust Index requests still reach the log.
+func TestNewTrustIndexClient_NetworkLogEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	netlog.Enable(&buf)
+	t.Cleanup(netlog.Disable)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":{}}`)
+	}))
+	defer server.Close()
+
+	client, err := NewTrustIndexClient(server.URL, 5*time.Second, false)
+	if err != nil {
+		t.Fatalf("unexpected error with network logging enabled: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+
+	graph := makeTiGraph(tiDepSpec{path: "github.com/foo/bar", ver: "v1.0.0", direct: true, depth: 1})
+	if _, err := client.LookupAll(context.Background(), graph); err != nil {
+		t.Fatalf("LookupAll: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "NET POST") || !strings.Contains(buf.String(), "trustindex:lookup") {
+		t.Errorf("Trust Index request was not logged; got %q", buf.String())
 	}
 }
