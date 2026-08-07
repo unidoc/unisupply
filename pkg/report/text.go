@@ -735,7 +735,11 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		reasons = append(reasons, fmt.Sprintf("name suspiciously similar to %s — verify this is the intended package", ds.Typosquat.SimilarTo))
 	}
 
-	if ds.Resilience != nil && ds.Resilience.Score < 30 {
+	// DataAvailable gates this for the same reason it gates the scorer's
+	// low_resilience factor: an unreachable proxy leaves Score at 0, and this
+	// prose asserts specifics ("few releases, no governance files") that were
+	// never measured.
+	if ds.Resilience != nil && ds.Resilience.DataAvailable && ds.Resilience.Score < 30 {
 		reasons = append(reasons, "low resilience — few releases, no governance files, uncertain long-term viability")
 	}
 

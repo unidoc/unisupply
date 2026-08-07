@@ -562,8 +562,14 @@ func scoreDependency(
 	}
 
 	// Low resilience adds to score.
+	//
+	// DataAvailable gates this: when the proxy could not be reached the whole
+	// struct is zero-valued, so Score is 0 and an ungated check would flag
+	// every module as low-resilience on the strength of data it never had.
+	// ResilienceInfo.DataAvailable documents exactly this ("all numeric fields
+	// are zero-valued and MUST NOT be interpreted as real measurements").
 	resilienceBonus := 0.0
-	if resilience != nil && resilience.Score < 30 {
+	if resilience != nil && resilience.DataAvailable && resilience.Score < 30 {
 		resilienceBonus = float64(30-resilience.Score) * 0.2 // up to 6 extra points for very low resilience
 		ds.RiskFactors = append(ds.RiskFactors, "low_resilience")
 	}

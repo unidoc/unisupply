@@ -87,6 +87,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Policy files with unknown or misspelled rule keys are now rejected at load
   time instead of silently ignoring the rule.
+- **`low_resilience` no longer fires on missing resilience data.** The risk
+  factor was gated on `resilience.Score < 30` without checking
+  `DataAvailable`, so a module whose release history could not be fetched —
+  leaving the whole struct zero-valued, and its score therefore 0 — was
+  flagged as low-resilience on the strength of data that was never collected,
+  and charged up to 6 points for it. Both the factor and the bonus now require
+  `DataAvailable`, as does the matching explanation line in text reports.
+  Affects any scan where the module proxy is unreachable or rate-limits.
 
 ## [0.5.0] - 2026-06-29
 

@@ -613,8 +613,12 @@ func TestScoreDependency_AIGenBonus(t *testing.T) {
 // TestScoreDependency_ResilienceBonus tests that low resilience adds points.
 func TestScoreDependency_ResilienceBonus(t *testing.T) {
 	dep := testutil.MakeDep("github.com/fragile/pkg", "v1.0.0", true, 0)
+	// DataAvailable must be true: a measured score of 0 is what earns the
+	// penalty. Without it this fixture is indistinguishable from a failed
+	// proxy lookup, which must not be penalized.
 	resilience := &scanner.ResilienceInfo{
-		Score: 0,
+		DataAvailable: true,
+		Score:         0,
 	}
 
 	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, "", "", time.Now())
@@ -632,6 +636,34 @@ func TestScoreDependency_ResilienceBonus(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'low_resilience' in risk factors, got %v", ds.RiskFactors)
+	}
+}
+
+// TestScoreDependency_ResilienceUnavailableIsNotLowResilience pins the
+// distinction the bonus depends on: a resilience score of 0 because the proxy
+// was unreachable is absent data, not a measurement of fragility. Flagging it
+// would fabricate a finding — universally so under --offline, where every
+// module's ResilienceInfo is zero-valued.
+func TestScoreDependency_ResilienceUnavailableIsNotLowResilience(t *testing.T) {
+	dep := testutil.MakeDep("github.com/unreachable/pkg", "v1.0.0", true, 0)
+	resilience := &scanner.ResilienceInfo{
+		DataAvailable: false,
+		Score:         0,
+	}
+
+	ds := scoreDependency(dep, nil, nil, nil, nil, resilience, nil, nil, "", "", time.Now())
+
+	for _, factor := range ds.RiskFactors {
+		if factor == "low_resilience" {
+			t.Errorf("low_resilience flagged from unavailable data; risk factors: %v", ds.RiskFactors)
+		}
+	}
+
+	withData := &scanner.ResilienceInfo{DataAvailable: true, Score: 0}
+	measured := scoreDependency(dep, nil, nil, nil, nil, withData, nil, nil, "", "", time.Now())
+	if ds.RiskScore >= measured.RiskScore {
+		t.Errorf("unavailable resilience scored %d, measured-zero scored %d — absent data must not cost as much as a real low score",
+			ds.RiskScore, measured.RiskScore)
 	}
 }
 
