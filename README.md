@@ -481,6 +481,45 @@ none` stays silent.
 boundary; each scanner degrades gracefully with explicit warnings when a
 host is unreachable.
 
+For a scan that makes **no outbound requests at all**, use `--offline`:
+
+```bash
+unisupply ./ --offline
+```
+
+Enforcement is not advisory. Every in-process request is refused before a
+socket is opened, and the `go` toolchain is run with `GOPROXY=off` so child
+processes read only your local module cache. You can confirm this the same way
+you confirm anything else here — combine the two flags and read the log:
+
+```bash
+unisupply ./ --offline --network-log 2> net.log
+grep -c 'error: offline mode' net.log   # every attempt, refused
+```
+
+What `--offline` costs you, and how each loss is reported:
+
+| Scanner | Offline behavior |
+|---------|------------------|
+| Vulnerability (govulncheck) | Skipped — warning states no local vuln DB mirror is configured |
+| Maintenance | Not measured — warning names the module count |
+| Maintainer, Resilience | UNKNOWN; the maintainer axis is excluded from scores rather than counted as zero |
+| Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
+| go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
+| Typosquat, AI-gen, CI/CD, build files, `go.mod` integrity | Unaffected — these never used the network |
+
+Degraded axes are marked, never fabricated: an unavailable signal is reported
+as unavailable and dropped from the weighting, so an offline scan cannot read
+as a clean bill of health.
+
+`--offline` is rejected alongside `--trust-index-url` (a network service by
+definition) and `--format pdf` (UniPDF validates its license over the network
+before rendering). Use `--format text`, `json`, or `sbom-*` offline.
+
+Offline scans currently report no vulnerabilities, because govulncheck needs
+the Go vulnerability database. A documented local-mirror workflow is not yet
+available — track it before relying on `--offline` for vulnerability findings.
+
 ## Documentation
 
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula

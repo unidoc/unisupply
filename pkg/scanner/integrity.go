@@ -15,6 +15,7 @@ import (
 	"golang.org/x/mod/module"
 
 	"github.com/unidoc/unisupply/pkg/netlog"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -423,7 +424,7 @@ func (is *IntegrityScanner) VerifyGoSum(ctx context.Context, gomodPath string, r
 		return
 	}
 
-	netlog.Subprocess("go mod verify", "verifies the local module cache; a cold cache may fetch via GOPROXY and sum.golang.org")
+	netlog.Subprocess("go mod verify", offline.SubprocessNote("verifies the local module cache; a cold cache may fetch via GOPROXY and sum.golang.org"))
 
 	cmd := exec.CommandContext(ctx, "go", "mod", "verify")
 	cmd.Dir = dir

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/vuln/scan"
+
+	"github.com/unidoc/unisupply/pkg/offline"
 )
 
 // Vulnerability represents a known vulnerability for a module.
@@ -229,6 +231,15 @@ func classifyReachability(trace []traceEntry) string {
 // reachability levels (called, imported, required) in the JSON stream — no
 // additional CLI flag is needed to enable reachability data.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
+	if offline.Enabled() {
+		// govulncheck runs in-process and reaches vuln.go.dev through
+		// http.DefaultClient, so offline mode would refuse its requests and
+		// leave a transport error dressed up as a scan failure. Skip it
+		// outright and say why: an empty vulnerability set with no explanation
+		// reads as "no vulnerabilities found", which is the one wrong answer.
+		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, nil
+	}
+
 	var stdout bytes.Buffer
 
 	var stderrBuf bytes.Buffer

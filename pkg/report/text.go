@@ -239,6 +239,18 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
 	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
 	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
+	// Scan limitations. Without this block a degraded scan — offline, rate
+	// limited, vuln DB unreachable — renders identically to a complete one,
+	// and "Vulnerabilities found: 0" reads as a clean bill of health rather
+	// than as a scan that never looked. Warnings reached JSON only until now.
+	if len(ps.Warnings) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN LIMITATIONS — the results above are incomplete\n")
+		for _, warning := range ps.Warnings {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Full report: unisupply -f pdf\n")

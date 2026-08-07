@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### New Features
 
+- **`--offline`: a scan that makes no outbound requests.** Enforcement is
+  structural, not advisory: in-process requests are refused before a socket is
+  opened — covering `golang.org/x/vuln` and UniPDF, which bypass the shared
+  scanner client — and `go` subprocesses run with `GOPROXY=off` so they read
+  only the local module cache. Combine with `--network-log` to observe every
+  refusal. Degraded axes are marked rather than fabricated: the vulnerability
+  scan is skipped with a warning naming the missing local vuln DB mirror,
+  maintenance reports the count of unmeasured modules, the maintainer axis is
+  excluded from scoring rather than counted as zero, and go.sum verification
+  reports `UNKNOWN (offline — verification skipped)` instead of a failure.
+  Degraded scans now also print a `SCAN LIMITATIONS` block in text output, so
+  an incomplete scan no longer renders identically to a clean one.
+  `--offline` is rejected alongside `--trust-index-url` and `--format pdf`
+  (both require the network); it warns but proceeds alongside
+  `--require-github-token`. A documented air-gapped vuln-DB mirror workflow is
+  not yet included, so offline scans report no vulnerabilities.
+
 - **`--network-log`: observable outbound requests.** Prints every outbound
   HTTP request to stderr as `NET <METHOD> <host> <purpose> → <status>
   (<bytes>, <duration>)`, so the network contract documented in the README can

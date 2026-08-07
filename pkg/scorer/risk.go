@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -376,8 +377,15 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	}
 
 	if maintainerUnavailable > 0 {
+		// Name the actual cause. Offline is not a rate-limit problem, and
+		// telling an air-gapped user their token is missing sends them after
+		// a fix that cannot work.
+		cause := "GitHub API unauthenticated"
+		if offline.Enabled() {
+			cause = "offline"
+		}
 		ps.Warnings = append(ps.Warnings,
-			fmt.Sprintf("GitHub API unauthenticated — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", maintainerUnavailable),
+			fmt.Sprintf("%s — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", cause, maintainerUnavailable),
 		)
 	}
 
