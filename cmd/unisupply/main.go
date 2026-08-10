@@ -273,11 +273,11 @@ func run(cfg *runConfig) error {
 	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
 
 	rep.Stage("Resolving dependency graph")
-	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
+	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
 	if err != nil {
 		return fmt.Errorf("resolving dependencies: %w", err)
 	}
-	for _, w := range warnings {
+	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)
 	}
 	rep.Done("%d modules", len(graph.Dependencies))
@@ -302,7 +302,12 @@ func run(cfg *runConfig) error {
 	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
+	// The scanner reports availability directly. Deriving it here from err would
+	// miss the common case: govulncheck failures come back as a warning with a
+	// nil error, so `err != nil` reads a failed scan as a clean one and the
+	// scorer then counts the 40% vulnerability axis as measured.
+	vulnScanUnavailable := !vulnScanned
 	if err != nil {
 		rep.Warn("Vulnerability scan failed: %v", err)
 	}
@@ -318,13 +323,27 @@ func run(cfg *runConfig) error {
 	var maintWarnings []string
 	if err != nil {
 		if cfg.offlineMode {
-			// The scanner already phrased this as a degradation; prefixing it
-			// with "failed" would contradict it. Carry it into the report
-			// warnings too — an unmeasured maintenance axis that shows up only
-			// on stderr leaves the JSON consumer reading defaults as findings.
-			maintWarnings = append(maintWarnings, err.Error())
+			// Stderr only. The scorer already emits one authoritative report
+			// warning for this — cause, affected module count, and the scoring
+			// consequence — and its count is per-dependency rather than the
+			// scanner's lookup-failure tally. Appending the scanner's message
+			// too put two near-identical lines in the SCAN LIMITATIONS block.
 			rep.Warn("%v", err)
 		} else {
+			// Same reasoning as the offline branch — a degradation that shows up
+			// only on stderr leaves the final report looking complete, and an
+			// API outage is exactly the degraded case this needs to cover.
+			//
+			// The wrapped error is deliberately NOT carried into the report:
+			// unlike the offline message, which the scanner phrases itself, this
+			// err wraps a *url.Error embedding the full proxy URL — a module
+			// path. ps.Warnings reaches the JSON and text reports, and the
+			// network-transparency docs promise disclosing hosts, not paths. The
+			// scorer already reports the affected module count (it counts every
+			// dependency whose maintenance weight was excluded), so this
+			// contributes the cause and leaves the count to it.
+			maintWarnings = append(maintWarnings,
+				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
 			rep.Warn("Some maintenance checks failed: %v", err)
 		}
 	}
@@ -359,7 +378,10 @@ func run(cfg *runConfig) error {
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
 	aiGenScanner.ScanStart = scanStart
-	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	for _, w := range aiGenWarnings {
+		rep.Warn("%s", w)
+	}
 	rep.Done("%d flagged", len(aiGenRisks))
 
 	var trustIndex map[string]*scanner.TrustIndexEntry
@@ -391,11 +413,22 @@ func run(cfg *runConfig) error {
 		Integrity:     integrityClasses,
 		PseudoVersion: pseudoVersionClasses,
 		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
-		DebugMode:     cfg.debugScoring,
-		Now:           scanStart,
+
+		VulnScanUnavailable: vulnScanUnavailable,
+
+		DebugMode: cfg.debugScoring,
+		Now:       scanStart,
 	})
+	// Resolver degradations belong in the report, not just on stderr. A cold
+	// offline cache makes `go mod graph` fail, and the fallback go.mod/go.sum
+	// parse yields a flatter graph — every transitive dep collapses to depth 1,
+	// which feeds the depth axis directly — while `go list` failing leaves
+	// IsTestOnly nil for every dep, disabling the test-only discount. Both change
+	// the numbers, so both have to be visible next to them.
+	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
+	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport

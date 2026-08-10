@@ -50,6 +50,21 @@ Risk Score (0-100) =
 
 Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
 
+**Unavailable axes are excluded, not fabricated.** When a signal could not be
+collected (offline, rate-limited, scan failed) its weight is dropped from both
+the numerator and the denominator, and the surviving weights renormalize to 1.0.
+Vulnerabilities, Maintenance and Maintainer Risk are all excludable; Depth and
+Maturity never are, so the denominator floors at 0.25. Scoring an unmeasured
+axis as 0 would report a clean bill of health nobody earned; scoring it with an
+"unknown" constant reports a fabricated measurement as a finding.
+
+**A headline band requires enough measurement to earn one.** If the
+vulnerability scan did not run, three of the five headline candidates are
+CVE-derived and score 0, leaving the headline to rest on graph position and
+version scheme alone. In that case `overall_risk_level` is `UNKNOWN` with
+`headline_unscored_reason` set; `overall_risk_score` is still reported but is
+indicative only. Per-dependency `risk_level` always carries a real band.
+
 ## The 10 Scanners
 
 | Scanner | What it checks | Data source |

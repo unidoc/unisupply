@@ -10,12 +10,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`--offline`: a scan that makes no outbound requests.** Enforcement is
   structural, not advisory: in-process requests are refused before a socket is
   opened — covering `golang.org/x/vuln` and UniPDF, which bypass the shared
-  scanner client — and `go` subprocesses run with `GOPROXY=off` so they read
-  only the local module cache. Combine with `--network-log` to observe every
+  scanner client — and `go` subprocesses run with `GOPROXY=off`, cleared
+  `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`, and `GOSUMDB=off` so they read only the
+  local module cache. Clearing the private-module patterns is required: the
+  toolchain matches them ahead of `GOPROXY=off`, so a `GOPRIVATE` entry would
+  otherwise permit a direct VCS fetch, and the checksum database falls back to
+  contacting its host directly. Combine with `--network-log` to observe every
   refusal. Degraded axes are marked rather than fabricated: the vulnerability
   scan is skipped with a warning naming the missing local vuln DB mirror,
-  maintenance reports the count of unmeasured modules, the maintainer axis is
-  excluded from scoring rather than counted as zero, and go.sum verification
+  maintenance reports the count of unmeasured modules, and go.sum verification
   reports `UNKNOWN (offline — verification skipped)` instead of a failure.
   Degraded scans now also print a `SCAN LIMITATIONS` block in text output, so
   an incomplete scan no longer renders identically to a clean one.
@@ -92,6 +95,64 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   on-disk caches — threat-intel unavailability never fails a scan.
 
 ### Improvements
+
+#### Scoring: unmeasured axes no longer counted as measured
+
+- **An unavailable axis is excluded from the weighting, not scored.** Its weight
+  now leaves both the numerator and the denominator, and the surviving weights
+  renormalize to 1.0 — the treatment the maintainer axis already received, now
+  applied to vulnerabilities (0.40) and maintenance (0.25) as well. Previously a
+  skipped vulnerability scan scored the 40% axis as clean, indistinguishable from
+  a verified-clean project, and a failed maintenance lookup was scored with a
+  hard-coded unknown constant of 30. Depth and maturity are never excludable, so
+  the denominator floors at 0.25. An online scan whose vulnerability scan
+  *succeeds* is unaffected; one where govulncheck **fails** is now treated as
+  unmeasured too, so a CI job with a flaking govulncheck will see the 40% axis
+  excluded and the headline reported as `UNKNOWN` where it previously received a
+  band. That is deliberate — a failed scan found nothing because it never
+  looked — but it is a behavior change for consumers that gate on the level.
+  Policy exit codes are unchanged: the preset ceilings (strict 70/50, moderate
+  85/70) sit far above the scores a degraded scan can reach.
+- **The headline reports `UNKNOWN` when the vulnerability scan did not run.**
+  Three of the five headline candidates are CVE-derived and score 0 without
+  vulnerability data, which left the headline resting on dependency-graph
+  position and version scheme alone — enough to promote UniOffice from LOW to
+  MEDIUM in an offline scan that performed no CVE check. `overall_risk_level` is
+  now `UNKNOWN` with a new `headline_unscored_reason` field; the numeric score is
+  still reported and labelled indicative. Per-dependency `risk_level` is
+  unchanged.
+- **JSON breakdowns distinguish "nothing found" from "nothing looked."**
+  `vuln_score`, `maintenance_score` and `maintainer_score` serialize as `null`
+  when the axis was unavailable, alongside new `measured_weight` and
+  `excluded_axes` fields. Text reports print effective weights, so the breakdown
+  multiplies out to the score it sits next to.
+- Project warnings now name every unmeasured axis — maintenance and resilience
+  join the existing maintainer warning, and resilience unavailability discloses
+  that AI-generated-code detection is disabled with it.
+- **Resolver degradations reach the report, not just stderr.** A cold cache makes
+  `go mod graph` fail, and the go.mod/go.sum fallback flattens the graph so every
+  transitive dependency collapses to depth 1 — which feeds the depth axis
+  directly. `go list` failing leaves the test-only classification unavailable for
+  every dependency, disabling the test-only discount. Both now appear in
+  `warnings` and the `SCAN LIMITATIONS` block.
+- **Maintenance failures on online scans are reported too.** Previously only the
+  offline branch recorded a warning, so a module-proxy outage produced a report
+  that looked complete. The wrapped error is deliberately not carried into the
+  report — it embeds a proxy URL, i.e. a module path — so the warning names the
+  cause and the scorer supplies the affected module count.
+- `scanner.ScanVulns` now returns whether govulncheck actually analyzed the module
+  graph. Most govulncheck failures surface as a warning with a nil error, so
+  availability could not be inferred from the error alone — a failed scan was
+  being scored as clean.
+- **AI-generated-code detection reports when it did not run.** Every indicator it
+  uses derives from the module's first-release date, so without that date the
+  module is unexamined, not cleared — but both outcomes produced `risk_level:
+  "none"` with score 0 and were dropped from the results, making an unexamined
+  module indistinguishable from a cleared one. `AIGenRisk` gains a
+  `data_available` field, `AIGenScanner.ScanAll` returns warnings naming the
+  affected module count, and the README no longer lists AI-gen among the scanners
+  `--offline` leaves intact (it never worked offline — resilience data, which it
+  depends on, comes from the module proxy).
 
 - The CRITICAL verdict text "could be actively exploited" is now
   evidence-gated: it appears only when a CVE is KEV-listed or has EPSS ≥ 0.5;

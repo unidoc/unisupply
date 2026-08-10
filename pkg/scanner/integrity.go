@@ -428,6 +428,12 @@ func (is *IntegrityScanner) VerifyGoSum(ctx context.Context, gomodPath string, r
 
 	cmd := exec.CommandContext(ctx, "go", "mod", "verify")
 	cmd.Dir = dir
+	// Belt and braces. The is.Offline check above already returns before we get
+	// here, but that flag and offline.Enabled() are set independently, so a
+	// caller that wires one and not the other would spawn the toolchain with an
+	// unconstrained environment. Env is nil when offline is disabled, which
+	// exec reads as "inherit the parent's" — the online path is unchanged.
+	cmd.Env = offline.Env(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		report.GoSumVerified = GoSumVerifiedTrue

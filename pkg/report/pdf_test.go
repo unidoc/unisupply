@@ -1,6 +1,7 @@
 package report
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/unidoc/unipdf/v3/creator"
@@ -200,5 +201,31 @@ func TestEPSSBadge(t *testing.T) {
 		if got := epssBadge(&tc.vuln); got != tc.want {
 			t.Errorf("%s: epssBadge = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestPDFHeadlineText_Unscored covers the PDF rendering of an UNKNOWN headline.
+// This path is only reachable when an ONLINE scan's govulncheck fails, since
+// --offline rejects --format pdf — so it gets no coverage from an offline run,
+// and a PDF is the artifact most likely to be forwarded to someone who never
+// saw the scan output.
+func TestPDFHeadlineText_Unscored(t *testing.T) {
+	unscored := &scorer.ProjectScore{OverallScore: 26, OverallLevel: scorer.RiskUnknown}
+	got := pdfHeadlineText(unscored)
+	if !strings.Contains(got, "UNKNOWN") || !strings.Contains(got, "indicative: 26/100") {
+		t.Errorf("pdfHeadlineText() = %q, want UNKNOWN with an indicative score", got)
+	}
+	if strings.Contains(got, "26/100 (UNKNOWN)") {
+		t.Errorf("pdfHeadlineText() = %q; the band must lead, not the number", got)
+	}
+
+	scored := &scorer.ProjectScore{OverallScore: 45, OverallLevel: scorer.RiskMedium}
+	if want := "45/100 (MEDIUM)"; pdfHeadlineText(scored) != want {
+		t.Errorf("pdfHeadlineText() = %q, want %q", pdfHeadlineText(scored), want)
+	}
+
+	// Grey, not the default green: an unscored headline must not read as a pass.
+	if pdfRiskColor(scorer.RiskUnknown) == pdfRiskColor(scorer.RiskLow) {
+		t.Error("UNKNOWN renders in the same colour as LOW")
 	}
 }

@@ -148,7 +148,7 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 	// Supply-chain risk score — large indicator.
 	scoreColor := pdfRiskColor(ps.OverallLevel)
 	scorePara := c.NewStyledParagraph()
-	sChunk := scorePara.Append(fmt.Sprintf("Supply-Chain Risk: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
+	sChunk := scorePara.Append("Supply-Chain Risk: " + pdfHeadlineText(ps))
 	sChunk.Style.Font = bold
 	sChunk.Style.FontSize = 24
 	sChunk.Style.Color = scoreColor
@@ -221,7 +221,10 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Direct Dependencies", fmt.Sprintf("%d", directCount), regular, bold)
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
-	addTableRow(c, table, "Supply-Chain Risk", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	addTableRow(c, table, "Supply-Chain Risk", pdfHeadlineText(ps), regular, bold)
+	if ps.HeadlineUnscoredReason != "" {
+		addTableRow(c, table, "Not Scored Because", ps.HeadlineUnscoredReason, regular, bold)
+	}
 	if ps.HeadlineDriver != "" {
 		addTableRow(c, table, "Headline Driver", ps.HeadlineDriver, regular, bold)
 		addTableRow(c, table, "Mean Dep Risk", fmt.Sprintf("%d", ps.MeanDepRiskScore), regular, bold)
@@ -823,6 +826,17 @@ func epssBadge(v *scanner.Vulnerability) string {
 	return fmt.Sprintf(" [EPSS %.0f%%]", pct)
 }
 
+// pdfHeadlineText renders the headline for both the cover indicator and the
+// summary table. An unscored headline leads with UNKNOWN and labels the number
+// as indicative — a PDF gets forwarded to people who never ran the scan, so
+// "26/100 (UNKNOWN)" would be read as a scored 26.
+func pdfHeadlineText(ps *scorer.ProjectScore) string {
+	if ps.OverallLevel == scorer.RiskUnknown {
+		return fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)
+	}
+	return fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)
+}
+
 func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 	switch level {
 	case scorer.RiskCritical:
@@ -831,6 +845,10 @@ func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 		return creator.ColorRGBFromHex("#e67300")
 	case scorer.RiskMedium:
 		return creator.ColorRGBFromHex("#ccaa00")
+	case scorer.RiskUnknown:
+		// Grey, not the default green — an unscored headline must not read as a
+		// pass in a report that gets forwarded to people who never ran the scan.
+		return creator.ColorRGBFromHex("#666666")
 	default:
 		return creator.ColorRGBFromHex("#009900")
 	}

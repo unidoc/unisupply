@@ -230,14 +230,20 @@ func classifyReachability(trace []traceEntry) string {
 // The default govulncheck invocation (-json ./...) already emits all three
 // reachability levels (called, imported, required) in the JSON stream — no
 // additional CLI flag is needed to enable reachability data.
-func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
+// The `scanned` return reports whether govulncheck actually analyzed the module
+// graph. It exists because an empty vulns map is ambiguous — "scanned, nothing
+// found" and "never ran" look identical — and because most failures here surface
+// as a warning with a nil error, so a caller checking only err would read a
+// failed scan as a clean one. The scorer excludes the 40% vulnerability weight
+// when this is false; see scorer.ScoreInput.VulnScanUnavailable.
+func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
 		// govulncheck runs in-process and reaches vuln.go.dev through
 		// http.DefaultClient, so offline mode would refuse its requests and
 		// leave a transport error dressed up as a scan failure. Skip it
 		// outright and say why: an empty vulnerability set with no explanation
 		// reads as "no vulnerabilities found", which is the one wrong answer.
-		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, nil
+		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, false, nil
 	}
 
 	var stdout bytes.Buffer
@@ -249,7 +255,7 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("starting govulncheck: %w", err)
+		return nil, nil, false, fmt.Errorf("starting govulncheck: %w", err)
 	}
 	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that
 	// case via jsonHandler.Flush), so exitErr != nil only signals a real scan failure.
@@ -273,12 +279,12 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	if stdout.Len() == 0 {
 		warnings = append(warnings, "govulncheck produced no output")
-		return nil, warnings, nil
+		return nil, warnings, false, nil
 	}
 
 	results, err := parseGovulncheckJSON(&stdout)
 	if err != nil {
-		return nil, append(warnings, err.Error()), nil
+		return nil, append(warnings, err.Error()), false, nil
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
@@ -296,7 +302,10 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
 
-	return results, warnings, nil
+	// A non-nil exitErr means govulncheck failed even though it emitted parseable
+	// output, so the results are partial. Report the axis as unmeasured rather
+	// than scoring an incomplete scan as a complete one.
+	return results, warnings, exitErr == nil, nil
 }
 
 // CVEAlias returns the CVE ID to use for threat-intel lookups on v: the ID

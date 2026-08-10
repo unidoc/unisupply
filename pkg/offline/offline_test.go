@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/netlog"
@@ -112,7 +115,11 @@ func TestEnv(t *testing.T) {
 		t.Cleanup(offline.Disable)
 
 		got := offline.Env(base)
-		want := []string{"PATH=/usr/bin", "HOME=/home/x", "GOPROXY=off", "GOFLAGS=-mod=mod"}
+		want := []string{
+			"PATH=/usr/bin", "HOME=/home/x",
+			"GOPROXY=off", "GOFLAGS=-mod=mod",
+			"GOPRIVATE=", "GONOPROXY=", "GONOSUMDB=", "GOSUMDB=off",
+		}
 		if len(got) != len(want) {
 			t.Fatalf("Env() = %v, want %v", got, want)
 		}
@@ -138,6 +145,54 @@ func TestEnv(t *testing.T) {
 			t.Errorf("Env() mutated its argument: len = %d, want 2", len(shared))
 		}
 	})
+}
+
+// TestEnvResolvesToNoEgress asks the real toolchain what it resolved, rather
+// than asserting on the strings Env produced. It is the only check that catches
+// the trap the settings exist for: GONOPROXY and GONOSUMDB fall back to
+// GOPRIVATE when set to the empty string, so an Env that clears them without
+// clearing GOPRIVATE reads as correct and still leaves a private module free to
+// fetch directly from VCS.
+//
+// The parent environment deliberately carries a GOPRIVATE pattern — that is the
+// configuration under which GOPROXY=off used to leak.
+func TestEnvResolvesToNoEgress(t *testing.T) {
+	t.Cleanup(restoreDefaultTransport(http.DefaultTransport))
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+
+	base := append(os.Environ(), "GOPRIVATE=example.com/private")
+
+	// `go env` only reads configuration; it makes no network requests, so this
+	// stays consistent with what the package promises.
+	vars := []string{"GONOPROXY", "GONOSUMDB", "GOSUMDB", "GOPROXY"}
+	cmd := exec.Command("go", append([]string{"env"}, vars...)...)
+	cmd.Env = offline.Env(base)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+
+	got := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(got) != len(vars) {
+		t.Fatalf("go env printed %d lines, want %d: %q", len(got), len(vars), out)
+	}
+
+	want := map[string]string{
+		// Empty: no module path can bypass GOPROXY=off for a direct VCS fetch,
+		// and none can bypass the sumdb setting.
+		"GONOPROXY": "",
+		"GONOSUMDB": "",
+		// off: useSumDB returns false, so the checksum database is never
+		// contacted — not even via the direct fallback GOPROXY=off triggers.
+		"GOSUMDB": "off",
+		"GOPROXY": "off",
+	}
+	for i, name := range vars {
+		if got[i] != want[name] {
+			t.Errorf("go env %s = %q, want %q (egress path left open)", name, got[i], want[name])
+		}
+	}
 }
 
 func restoreDefaultTransport(rt http.RoundTripper) func() {

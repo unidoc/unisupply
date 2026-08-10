@@ -112,9 +112,12 @@ func TestOffline_NoScannerDials(t *testing.T) {
 		// Skipped rather than attempted: govulncheck runs in-process against
 		// vuln.go.dev, so the only honest offline outcome is "not run", said
 		// out loud. An empty result with no warning would read as "clean".
-		vulns, warnings, err := scanner.ScanVulns(ctx, testdataPath("gomod"), "")
+		vulns, warnings, scanned, err := scanner.ScanVulns(ctx, testdataPath("gomod"), "")
 		if err != nil {
 			t.Fatalf("ScanVulns returned error %v, want nil (skip is not a failure)", err)
+		}
+		if scanned {
+			t.Error("scanned = true for a skipped scan; the scorer would count the vulnerability axis as measured and score it clean")
 		}
 		if len(vulns) != 0 {
 			t.Errorf("vulns = %d entries, want 0 when skipped", len(vulns))
