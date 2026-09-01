@@ -62,6 +62,49 @@ func TestWriteText_ContainsSummary(t *testing.T) {
 	}
 }
 
+// TestWriteText_UnscoredHeadline covers the UNKNOWN headline rendering. Both
+// switches it flows through (riskColor and overallExplanation) previously fell
+// to a `default` branch meaning LOW — green, with the text "no known
+// vulnerabilities were found". On a scan that never looked for vulnerabilities
+// that is the single most misleading sentence the report could print, so this
+// test asserts it is gone as much as it asserts UNKNOWN is present.
+func TestWriteText_UnscoredHeadline(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore:           26,
+		OverallLevel:           scorer.RiskUnknown,
+		HeadlineUnscoredReason: "vulnerability scan did not run — test reason",
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 26, RiskLevel: scorer.RiskMedium},
+		},
+		Warnings: []string{"vulnerability scan did not run"},
+	}
+
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	output := opts.Writer.(*bytes.Buffer).String()
+
+	for _, want := range []string{"UNKNOWN — not scored", "indicative: 26/100", "test reason", "No verdict"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q", want)
+		}
+	}
+
+	// The false-assurance sentence from the LOW branch must not appear.
+	if strings.Contains(output, "no known vulnerabilities were found") {
+		t.Error("unscored headline rendered the LOW explanation claiming no vulnerabilities were found")
+	}
+	// "26/100 (UNKNOWN)" would read as a scored 26; the band must lead.
+	if strings.Contains(output, "26/100 (UNKNOWN)") {
+		t.Error("headline presented the indicative number as a scored band")
+	}
+}
+
 // TestWriteText_NoColor tests that noColor=true removes ANSI codes.
 func TestWriteText_NoColor(t *testing.T) {
 	graph := testutil.MakeGraph(

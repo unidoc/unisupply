@@ -14,6 +14,7 @@ import (
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/netlog"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
@@ -57,6 +58,7 @@ func main() {
 		progressMode           string
 		debugScoring           bool
 		networkLog             bool
+		offlineMode            bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -79,6 +81,7 @@ func main() {
 	flag.BoolVar(&trustIndexAllowPrivate, "trust-index-allow-private", false, "Allow --trust-index-url to target RFC1918/link-local addresses (e.g. self-hosted on a private network)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
 	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
+	flag.BoolVar(&offlineMode, "offline", false, "Make no network requests; scanners that need the network degrade to UNKNOWN with a warning")
 	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
 	flag.Parse()
@@ -128,6 +131,7 @@ func main() {
 		progressMode:           progressMode,
 		debugScoring:           debugScoring,
 		networkLog:             networkLog,
+		offlineMode:            offlineMode,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -166,6 +170,7 @@ type runConfig struct {
 	progressMode           string
 	debugScoring           bool
 	networkLog             bool
+	offlineMode            bool
 }
 
 func run(cfg *runConfig) error {
@@ -182,6 +187,29 @@ func run(cfg *runConfig) error {
 			cfg.policyPreset, cfg.policyFile)
 	}
 
+	if cfg.offlineMode {
+		// --trust-index-url names a specific endpoint the user asked to reach,
+		// so combining it with --offline is a contradiction, not a redundancy.
+		if cfg.trustIndexURL != "" {
+			return fmt.Errorf("--offline cannot be combined with --trust-index-url %q: the Trust Index is a network service", cfg.trustIndexURL)
+		}
+		// UniPDF validates its license over the network before rendering.
+		// Without this guard the scan runs to completion and then dies at the
+		// last step, leaving a 0-byte file where the report should be. Fail up
+		// front and name the format that works.
+		if cfg.format == "pdf" {
+			return errors.New("--offline cannot be combined with --format pdf: PDF generation requires a UniDoc license check over the network; use --format text, json, or sbom-*")
+		}
+		// --require-github-token is only a precondition on the token being
+		// present, and it was already checked above. A token supplied
+		// alongside --offline is unused, not contradictory — CI configs
+		// routinely set the token and the mode flag from separate layers — so
+		// warn and continue rather than failing the run.
+		if cfg.requireGithubToken {
+			fmt.Fprintln(os.Stderr, "warning: --require-github-token is satisfied but --offline means GitHub will not be contacted")
+		}
+	}
+
 	// Compute scan-start time once and floor it to the start of the UTC day.
 	// All scanner age/activity classifications use this value so that two runs
 	// on the same calendar day yield identical band results for the same module.
@@ -190,6 +218,15 @@ func run(cfg *runConfig) error {
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
+	}
+
+	if cfg.offlineMode {
+		// Install the refusing transport before any request is issued, and
+		// before netlog below, so netlog wraps the refusal and every refused
+		// request still appears in the network log when both flags are set.
+		// Same interception point as netlog, for the same reason: it is the
+		// only one that also covers http.DefaultClient consumers.
+		offline.Enable()
 	}
 
 	if cfg.networkLog {
@@ -229,15 +266,18 @@ func run(cfg *runConfig) error {
 	// wired into the text/JSON/PDF output next to the CI/CD report.
 	rep.Stage("Auditing go.mod directives")
 	integrityScanner := scanner.NewIntegrityScanner()
+	// Offline skips `go mod verify`, reporting GoSumVerifiedOffline rather
+	// than a verification failure.
+	integrityScanner.Offline = cfg.offlineMode
 	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
 	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
 
 	rep.Stage("Resolving dependency graph")
-	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
+	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
 	if err != nil {
 		return fmt.Errorf("resolving dependencies: %w", err)
 	}
-	for _, w := range warnings {
+	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)
 	}
 	rep.Done("%d modules", len(graph.Dependencies))
@@ -262,7 +302,12 @@ func run(cfg *runConfig) error {
 	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
+	// The scanner reports availability directly. Deriving it here from err would
+	// miss the common case: govulncheck failures come back as a warning with a
+	// nil error, so `err != nil` reads a failed scan as a clean one and the
+	// scorer then counts the 40% vulnerability axis as measured.
+	vulnScanUnavailable := !vulnScanned
 	if err != nil {
 		rep.Warn("Vulnerability scan failed: %v", err)
 	}
@@ -275,12 +320,38 @@ func run(cfg *runConfig) error {
 	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
 	maintScanner.ScanStart = scanStart
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
+	var maintWarnings []string
 	if err != nil {
-		rep.Warn("Some maintenance checks failed: %v", err)
+		if cfg.offlineMode {
+			// Stderr only. The scorer already emits one authoritative report
+			// warning for this — cause, affected module count, and the scoring
+			// consequence — and its count is per-dependency rather than the
+			// scanner's lookup-failure tally. Appending the scanner's message
+			// too put two near-identical lines in the SCAN LIMITATIONS block.
+			rep.Warn("%v", err)
+		} else {
+			// Same reasoning as the offline branch — a degradation that shows up
+			// only on stderr leaves the final report looking complete, and an
+			// API outage is exactly the degraded case this needs to cover.
+			//
+			// The wrapped error is deliberately NOT carried into the report:
+			// unlike the offline message, which the scanner phrases itself, this
+			// err wraps a *url.Error embedding the full proxy URL — a module
+			// path. ps.Warnings reaches the JSON and text reports, and the
+			// network-transparency docs promise disclosing hosts, not paths. The
+			// scorer already reports the affected module count (it counts every
+			// dependency whose maintenance weight was excluded), so this
+			// contributes the cause and leaves the count to it.
+			maintWarnings = append(maintWarnings,
+				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
+			rep.Warn("Some maintenance checks failed: %v", err)
+		}
 	}
 	rep.Done("")
 
-	if cfg.githubToken == "" {
+	// Offline contacts GitHub either way, so the rate-limit advice below would
+	// point the user at a token that cannot change the outcome.
+	if cfg.githubToken == "" && !cfg.offlineMode {
 		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
 			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
@@ -307,7 +378,10 @@ func run(cfg *runConfig) error {
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
 	aiGenScanner.ScanStart = scanStart
-	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	for _, w := range aiGenWarnings {
+		rep.Warn("%s", w)
+	}
 	rep.Done("%d flagged", len(aiGenRisks))
 
 	var trustIndex map[string]*scanner.TrustIndexEntry
@@ -339,10 +413,22 @@ func run(cfg *runConfig) error {
 		Integrity:     integrityClasses,
 		PseudoVersion: pseudoVersionClasses,
 		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
-		DebugMode:     cfg.debugScoring,
-		Now:           scanStart,
+
+		VulnScanUnavailable: vulnScanUnavailable,
+
+		DebugMode: cfg.debugScoring,
+		Now:       scanStart,
 	})
+	// Resolver degradations belong in the report, not just on stderr. A cold
+	// offline cache makes `go mod graph` fail, and the fallback go.mod/go.sum
+	// parse yields a flatter graph — every transitive dep collapses to depth 1,
+	// which feeds the depth axis directly — while `go list` failing leaves
+	// IsTestOnly nil for every dep, disabling the test-only discount. Both change
+	// the numbers, so both have to be visible next to them.
+	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
+	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
+	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport
@@ -529,6 +615,8 @@ func printUsage() {
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
 	fmt.Println("  unisupply --network-log 2>net.log            # Log every outbound request to stderr")
+	fmt.Println("  unisupply --offline                          # Air-gapped scan; no network requests")
+	fmt.Println("  unisupply --offline --network-log 2>net.log  # Prove the scan made no requests")
 	fmt.Println()
 	fmt.Println("Exit codes:")
 	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")

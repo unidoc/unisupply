@@ -15,6 +15,7 @@ import (
 	"golang.org/x/mod/module"
 
 	"github.com/unidoc/unisupply/pkg/netlog"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -423,10 +424,16 @@ func (is *IntegrityScanner) VerifyGoSum(ctx context.Context, gomodPath string, r
 		return
 	}
 
-	netlog.Subprocess("go mod verify", "verifies the local module cache; a cold cache may fetch via GOPROXY and sum.golang.org")
+	netlog.Subprocess("go mod verify", offline.SubprocessNote("verifies the local module cache; a cold cache may fetch via GOPROXY and sum.golang.org"))
 
 	cmd := exec.CommandContext(ctx, "go", "mod", "verify")
 	cmd.Dir = dir
+	// Belt and braces. The is.Offline check above already returns before we get
+	// here, but that flag and offline.Enabled() are set independently, so a
+	// caller that wires one and not the other would spawn the toolchain with an
+	// unconstrained environment. Env is nil when offline is disabled, which
+	// exec reads as "inherit the parent's" — the online path is unchanged.
+	cmd.Env = offline.Env(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		report.GoSumVerified = GoSumVerifiedTrue

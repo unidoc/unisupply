@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -30,6 +31,13 @@ const (
 	RiskMedium   RiskLevel = "MEDIUM"
 	RiskHigh     RiskLevel = "HIGH"
 	RiskCritical RiskLevel = "CRITICAL"
+
+	// RiskUnknown is the project-level headline band when the scan could not
+	// measure enough to earn a verdict. It is NOT a band on the 0-100 scale and
+	// levelFromScore never returns it — only ScoreAll assigns it, and only to
+	// ProjectScore.OverallLevel. Per-dependency risk_level always carries a
+	// real band.
+	RiskUnknown RiskLevel = "UNKNOWN"
 )
 
 // HeadlineCandidate records one axis that competes to become the headline score.
@@ -99,6 +107,22 @@ type DependencyScore struct {
 	// renormalized to sum to 1.0. The displayed component scores no longer equal
 	// their nominal ×weight contributions.
 	MaintainerWeightExcluded bool `json:"-"`
+
+	// VulnWeightExcluded is true when the vulnerability scan did not run, so the
+	// 0.40 weight was dropped rather than scored as zero. See
+	// ScoreInput.VulnScanUnavailable — an unrun scan is not a clean result.
+	VulnWeightExcluded bool `json:"-"`
+
+	// MaintenanceWeightExcluded is true when this module's maintenance lookup
+	// failed, so the 0.25 weight was dropped rather than scored with the
+	// hard-coded unknown constant.
+	MaintenanceWeightExcluded bool `json:"-"`
+
+	// MeasuredWeight is the denominator the weighted base was divided by: the
+	// sum of the weights actually available for this dependency. 1.0 means every
+	// axis was measured. Below that, the score describes only the measured axes
+	// and is not comparable to a fully-measured one.
+	MeasuredWeight float64 `json:"-"`
 }
 
 // ProjectScore holds the overall project risk assessment.
@@ -110,8 +134,16 @@ type DependencyScore struct {
 // MeanDepRiskScore is retained as a non-normative portfolio-wide signal.
 // HeadlineDriver records which of the five candidates won.
 type ProjectScore struct {
-	OverallScore      int                `json:"overall_risk_score"`
-	OverallLevel      RiskLevel          `json:"overall_risk_level"`
+	OverallScore int       `json:"overall_risk_score"`
+	OverallLevel RiskLevel `json:"overall_risk_level"`
+
+	// HeadlineUnscoredReason is non-empty when OverallLevel is RiskUnknown: it
+	// names what the scan could not measure and why that disqualifies a verdict.
+	// OverallScore still carries the computed number so dashboards and policy
+	// gates keep working, but it must not be presented as a verdict — consumers
+	// that render a band MUST check this field.
+	HeadlineUnscoredReason string `json:"headline_unscored_reason,omitempty"`
+
 	Dependencies      []*DependencyScore `json:"dependencies"`
 	CriticalRiskCount int                `json:"critical_risk_count"`
 	HighRiskCount     int                `json:"high_risk_count"`
@@ -278,6 +310,16 @@ type ScoreInput struct {
 	// the dependency is not pinned to a pseudo-version.
 	PseudoVersion map[string]scanner.IntegrityRiskLevel
 
+	// VulnScanUnavailable is true when the vulnerability scan did not run at all
+	// — offline mode skips govulncheck, and an online run can fail outright. It
+	// is project-scoped because govulncheck is all-or-nothing: it either
+	// analyzed the module graph or it did not.
+	//
+	// This cannot be inferred from an empty Vulns map, which legitimately means
+	// "scanned, nothing found". Without the distinction a skipped scan scores
+	// identically to a verified-clean project, which is the one wrong answer.
+	VulnScanUnavailable bool
+
 	// GoSumMismatch is true when `go mod verify` reported a checksum mismatch
 	// (scanner.IntegrityReport.GoSumVerified == "false"). It floors the
 	// headline into the CRITICAL band via the integrity_floor candidate.
@@ -311,9 +353,12 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		now = time.Now()
 	}
 
-	// Count modules whose maintainer data was unavailable. Used to build a
-	// top-level warning so consumers understand the scoring gap.
+	// Count modules whose data was unavailable per axis. Used to build
+	// top-level warnings so consumers understand the scoring gap. A degraded
+	// scan that reports no gap is indistinguishable from a complete one.
 	maintainerUnavailable := 0
+	maintenanceUnavailable := 0
+	resilienceUnavailable := 0
 
 	// Sort dependency keys so that ScoreAll produces a deterministic
 	// ps.Dependencies slice regardless of Go's map iteration order. This is
@@ -339,6 +384,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 			input.TrustIndex[dep.Module.Path],
 			input.Integrity[dep.Module.Path],
 			input.PseudoVersion[dep.Module.Path],
+			input.VulnScanUnavailable,
 			now,
 		)
 		ps.Dependencies = append(ps.Dependencies, ds)
@@ -373,11 +419,68 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable {
 			maintainerUnavailable++
 		}
+
+		// A missing maintenance entry means the lookup failed — the scanner
+		// inserts only on success (see MaintenanceScanner.ScanAll).
+		if ds.MaintenanceWeightExcluded {
+			maintenanceUnavailable++
+		}
+
+		// Resilience carries no scoring weight of its own (it feeds a bonus,
+		// already gated on DataAvailable), so there is no weight to exclude.
+		// It still needs saying: an unavailable resilience axis silently
+		// disables both the low-resilience bonus and the AI-gen detector, which
+		// depends on ResilienceInfo.FirstReleaseDate.
+		if r := input.Resilience[dep.Module.Path]; r != nil && !r.DataAvailable {
+			resilienceUnavailable++
+		}
+	}
+
+	// Name the actual cause. Offline is not a rate-limit problem, and telling an
+	// air-gapped user their token is missing sends them after a fix that cannot
+	// work.
+	cause := "GitHub API unauthenticated"
+	// prefix applies to the proxy-sourced axes below. Only the maintainer axis
+	// reads the GitHub API, so `cause` must not be reused for the others —
+	// naming the wrong service sends the user after a fix that cannot work, the
+	// same reason offline is distinguished from a rate limit here at all.
+	prefix := ""
+	if offline.Enabled() {
+		cause = "offline"
+		prefix = "offline — "
 	}
 
 	if maintainerUnavailable > 0 {
 		ps.Warnings = append(ps.Warnings,
-			fmt.Sprintf("GitHub API unauthenticated — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", maintainerUnavailable),
+			fmt.Sprintf("%s — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", cause, maintainerUnavailable),
+		)
+	}
+
+	if maintenanceUnavailable > 0 {
+		// The maintenance scanner reads the module proxy, so the maintainer cause
+		// above would be wrong. Any non-offline cause is left to the
+		// scanner-sourced warning, which has the underlying error.
+		ps.Warnings = append(ps.Warnings,
+			fmt.Sprintf("%smaintenance data unavailable for %d module(s); maintenance weight excluded from those scores rather than scored as unknown", prefix, maintenanceUnavailable),
+		)
+	}
+
+	if resilienceUnavailable > 0 {
+		// Not `cause`: ResilienceInfo.DataAvailable is gated on the module-proxy
+		// version-list fetch, so "GitHub API unauthenticated" would name the wrong
+		// service. Offline is the only cause this layer can state accurately.
+		//
+		// The AI-gen consequence is deliberately not mentioned here — the AI-gen
+		// scanner emits its own warning naming the same modules, and stating it in
+		// both put two lines about one gap in the SCAN LIMITATIONS block.
+		ps.Warnings = append(ps.Warnings,
+			fmt.Sprintf("%sresilience data unavailable for %d module(s); release-cadence and governance signals not measured", prefix, resilienceUnavailable),
+		)
+	}
+
+	if input.VulnScanUnavailable {
+		ps.Warnings = append(ps.Warnings,
+			"vulnerability scan did not run; the 40% vulnerability weight is excluded from every dependency score — these scores describe only the axes that were measured and are NOT comparable to a scan that checked for CVEs",
 		)
 	}
 
@@ -427,6 +530,25 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
 
+	// A headline band requires a scan that could actually earn one.
+	//
+	// Three of the five candidates are CVE-derived (severity_adjusted, cve_floor,
+	// and the fix-age amplifier inside it). With no vulnerability data all three
+	// are structurally zero, so the headline collapses onto p95_dep_risk — a
+	// candidate designed to be one voice among five, not the sole decider. What
+	// it then measures is whatever axes survived, which offline means depth and
+	// maturity: graph position and a version string.
+	//
+	// Measured on UniDoc's own libraries, that promoted UniOffice from LOW to
+	// MEDIUM offline on four untagged pseudo-version transitives, with no CVE
+	// check performed. A band nobody can defend is worse than no band, so report
+	// UNKNOWN and say what is missing. OverallScore keeps the computed number for
+	// dashboards and policy gates.
+	if input.VulnScanUnavailable && len(ps.Dependencies) > 0 {
+		ps.OverallLevel = RiskUnknown
+		ps.HeadlineUnscoredReason = "vulnerability scan did not run — 3 of the 5 headline candidates are CVE-derived and scored 0, leaving the headline decided by dependency-graph position and version scheme alone; the numeric score is indicative only"
+	}
+
 	// Diagnostics retained for debugging only — NON-NORMATIVE. Suppressed when
 	// there are no deps (max/p95 over an empty set carries no information).
 	if len(ps.Dependencies) > 0 {
@@ -458,6 +580,7 @@ func scoreDependency(
 	trustIndex *scanner.TrustIndexEntry,
 	integrityClass scanner.IntegrityRiskLevel,
 	pseudoVersionClass scanner.IntegrityRiskLevel,
+	vulnScanUnavailable bool,
 	now time.Time,
 ) *DependencyScore {
 	// Backfill Maintenance.Archived from the maintainer scanner before building
@@ -562,8 +685,14 @@ func scoreDependency(
 	}
 
 	// Low resilience adds to score.
+	//
+	// DataAvailable gates this: when the proxy could not be reached the whole
+	// struct is zero-valued, so Score is 0 and an ungated check would flag
+	// every module as low-resilience on the strength of data it never had.
+	// ResilienceInfo.DataAvailable documents exactly this ("all numeric fields
+	// are zero-valued and MUST NOT be interpreted as real measurements").
 	resilienceBonus := 0.0
-	if resilience != nil && resilience.Score < 30 {
+	if resilience != nil && resilience.DataAvailable && resilience.Score < 30 {
 		resilienceBonus = float64(30-resilience.Score) * 0.2 // up to 6 extra points for very low resilience
 		ds.RiskFactors = append(ds.RiskFactors, "low_resilience")
 	}
@@ -611,31 +740,52 @@ func scoreDependency(
 	//
 	// Normal case: the five weights sum to 1.0 (0.40 + 0.25 + 0.15 + 0.10 + 0.10).
 	//
-	// Re-normalization: when maintainer data is unavailable (DataAvailable == false),
-	// the 0.10 maintainer weight is dropped and the four remaining weights are
-	// rescaled by dividing by their sum (0.90) so they still sum to 1.0.
-	// NOTE: after re-normalization the five declared WeightMaintainerRisk +
-	// remaining weights no longer equal 1.0 — this is intentional and
-	// expected; the denominator variable below carries the corrected total.
-	weightedBase := ds.VulnScore*WeightVulnerabilities +
-		ds.MaintenanceScore*WeightMaintenance +
-		ds.DepthScore*WeightDepthRisk +
-		ds.MaturityScore*WeightMaturity
+	// Re-normalization: an axis whose data could not be collected is dropped
+	// from BOTH the numerator and the denominator, so the surviving weights
+	// rescale to 1.0. The alternative — scoring an unmeasured axis as zero, or
+	// as a hard-coded "unknown" constant — reports a fabricated measurement as
+	// a finding, which is the failure mode this whole block exists to prevent.
+	//
+	// Depth and maturity are never excluded: both derive from the resolved
+	// graph and the version string, so they are available even offline. That
+	// guarantees the denominator never reaches zero (floor 0.25).
+	//
+	// NOTE: after re-normalization the declared weights no longer sum to the
+	// denominator — intentional; the denominator variable carries the corrected
+	// total, and ds.MeasuredWeight records it for the report.
+	weightedBase := ds.DepthScore*WeightDepthRisk + ds.MaturityScore*WeightMaturity
+	denominator := WeightDepthRisk + WeightMaturity
 
-	denominator := WeightVulnerabilities + WeightMaintenance + WeightDepthRisk + WeightMaturity
+	// Vulnerabilities. An empty vuln list means "clean" only when the scan
+	// actually ran; vulnScanUnavailable distinguishes the two.
+	if vulnScanUnavailable {
+		ds.VulnWeightExcluded = true
+	} else {
+		weightedBase += ds.VulnScore * WeightVulnerabilities
+		denominator += WeightVulnerabilities
+	}
 
-	if maintainerInfo == nil || maintainerInfo.DataAvailable {
-		// Maintainer data is present: include its contribution and restore
-		// the full denominator so the total weight equals 1.0.
+	// Maintenance. MaintenanceScanner.ScanAll inserts into its result map only
+	// on a successful lookup, so a nil entry here means that module's lookup
+	// failed — not that it has an unknown-but-measured status.
+	if maint == nil {
+		ds.MaintenanceWeightExcluded = true
+	} else {
+		weightedBase += ds.MaintenanceScore * WeightMaintenance
+		denominator += WeightMaintenance
+	}
+
+	// Maintainer. A nil entry means the scanner never ran for this module (not
+	// GitHub-hosted), which is not a collection failure — the axis scores 0 and
+	// keeps its weight. DataAvailable == false means it ran and failed.
+	if maintainerInfo != nil && !maintainerInfo.DataAvailable {
+		ds.MaintainerWeightExcluded = true
+	} else {
 		weightedBase += ds.MaintainerScore * WeightMaintainerRisk
 		denominator += WeightMaintainerRisk
 	}
-	// When maintainerInfo != nil && !maintainerInfo.DataAvailable the
-	// maintainer component is silently excluded; denominator stays at 0.90
-	// and the division below rescales the remaining four weights to 1.0.
-	if maintainerInfo != nil && !maintainerInfo.DataAvailable {
-		ds.MaintainerWeightExcluded = true
-	}
+
+	ds.MeasuredWeight = denominator
 
 	ds.TyposquatBonus = typosquatBonus
 	ds.AIGenBonus = aiGenBonus

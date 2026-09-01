@@ -481,6 +481,51 @@ none` stays silent.
 boundary; each scanner degrades gracefully with explicit warnings when a
 host is unreachable.
 
+For a scan that makes **no outbound requests at all**, use `--offline`:
+
+```bash
+unisupply ./ --offline
+```
+
+Enforcement is not advisory. Every in-process request is refused before a
+socket is opened, and the `go` toolchain is run with `GOPROXY=off` plus cleared
+`GOPRIVATE`/`GONOPROXY`/`GONOSUMDB` and `GOSUMDB=off`, so child processes read
+only your local module cache. Clearing the private-module patterns matters:
+the toolchain checks them *before* it honors `GOPROXY=off`, so a `GOPRIVATE`
+entry would otherwise let a matching module fetch directly from VCS, and the
+checksum database has its own direct fallback. You can confirm this the same way
+you confirm anything else here — combine the two flags and read the log:
+
+```bash
+unisupply ./ --offline --network-log 2> net.log
+grep -c 'error: offline mode' net.log   # every attempt, refused
+```
+
+What `--offline` costs you, and how each loss is reported:
+
+| Scanner | Offline behavior |
+|---------|------------------|
+| Vulnerability (govulncheck) | Skipped — warning states no local vuln DB mirror is configured; the 40% weight is excluded from every score, never scored as clean |
+| Maintenance | Not measured — warning names the module count; the 25% weight is excluded rather than scored with an unknown constant |
+| Maintainer, Resilience | UNKNOWN; the maintainer axis is excluded from scores rather than counted as zero |
+| **Headline verdict** | **`UNKNOWN — not scored`.** Three of the five headline candidates are CVE-derived, so with no vulnerability data the headline would rest on dependency-graph position and version scheme alone. The numeric score is still reported, labelled indicative |
+| Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
+| go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
+| AI-gen | Does not run — every indicator derives from the module's first-release date, which comes from the proxy. Reported as unexamined, with a warning naming the module count; **not** reported as "no AI-gen risk found" |
+| Typosquat, CI/CD, build files, `go.mod` integrity | Unaffected — these never used the network |
+
+Degraded axes are marked, never fabricated: an unavailable signal is reported
+as unavailable and dropped from the weighting, so an offline scan cannot read
+as a clean bill of health.
+
+`--offline` is rejected alongside `--trust-index-url` (a network service by
+definition) and `--format pdf` (UniPDF validates its license over the network
+before rendering). Use `--format text`, `json`, or `sbom-*` offline.
+
+Offline scans currently report no vulnerabilities, because govulncheck needs
+the Go vulnerability database. A documented local-mirror workflow is not yet
+available — track it before relying on `--offline` for vulnerability findings.
+
 ## Documentation
 
 - [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula

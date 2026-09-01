@@ -49,6 +49,12 @@ type JSONReport struct {
 	// schema is internal and may change between releases.
 	DebugScoring *scorer.DebugScoring `json:"debug_scoring,omitempty"`
 
+	// HeadlineUnscoredReason is non-empty when overall_risk_level is "UNKNOWN":
+	// the scan could not measure enough to earn a verdict. overall_risk_score
+	// still carries a number, but it is indicative only — a consumer that gates
+	// on the level MUST treat "UNKNOWN" as "no result", not as a pass.
+	HeadlineUnscoredReason string `json:"headline_unscored_reason,omitempty"`
+
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
 	Warnings          []string             `json:"warnings,omitempty"`
@@ -210,12 +216,26 @@ type JSONMaintainer struct {
 }
 
 // JSONScoreBreakdown shows how the risk score was computed.
+//
+// The three optional axes are pointers so an unmeasured axis serializes as null
+// rather than 0. A consumer cannot distinguish "no vulnerabilities found" from
+// "no vulnerability scan ran" if both render as 0 — the first is a finding, the
+// second is a gap, and reporting the gap as a finding is the bug this
+// representation prevents. Depth and maturity are never unavailable.
 type JSONScoreBreakdown struct {
-	VulnScore        float64 `json:"vuln_score"`
-	MaintenanceScore float64 `json:"maintenance_score"`
-	DepthScore       float64 `json:"depth_score"`
-	MaintainerScore  float64 `json:"maintainer_score"`
-	MaturityScore    float64 `json:"maturity_score"`
+	VulnScore        *float64 `json:"vuln_score"`
+	MaintenanceScore *float64 `json:"maintenance_score"`
+	DepthScore       float64  `json:"depth_score"`
+	MaintainerScore  *float64 `json:"maintainer_score"`
+	MaturityScore    float64  `json:"maturity_score"`
+
+	// MeasuredWeight is the fraction of the scoring model that was actually
+	// available: 1.0 when every axis was measured. Below 1.0 the score
+	// describes only the measured axes and is not comparable to a full scan.
+	MeasuredWeight float64 `json:"measured_weight"`
+
+	// ExcludedAxes names the axes dropped from both numerator and denominator.
+	ExcludedAxes []string `json:"excluded_axes,omitempty"`
 }
 
 // JSONTyposquat holds typosquatting analysis.
@@ -364,6 +384,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		},
 		OverallRisk:               ps.OverallScore,
 		OverallLevel:              string(ps.OverallLevel),
+		HeadlineUnscoredReason:    ps.HeadlineUnscoredReason,
 		Headline:                  jsonHeadline(ps),
 		MeanDepRiskScore:          ps.MeanDepRiskScore,
 		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
@@ -387,19 +408,13 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 	for _, ds := range ps.Dependencies {
 		jd := JSONDependency{
-			Module:    ds.Module,
-			Version:   ds.Version,
-			Direct:    ds.Direct,
-			TestOnly:  ds.IsTestOnly,
-			RiskScore: ds.RiskScore,
-			RiskLevel: string(ds.RiskLevel),
-			ScoreBreakdown: &JSONScoreBreakdown{
-				VulnScore:        ds.VulnScore,
-				MaintenanceScore: ds.MaintenanceScore,
-				DepthScore:       ds.DepthScore,
-				MaintainerScore:  ds.MaintainerScore,
-				MaturityScore:    ds.MaturityScore,
-			},
+			Module:         ds.Module,
+			Version:        ds.Version,
+			Direct:         ds.Direct,
+			TestOnly:       ds.IsTestOnly,
+			RiskScore:      ds.RiskScore,
+			RiskLevel:      string(ds.RiskLevel),
+			ScoreBreakdown: buildScoreBreakdown(ds),
 			DependencyPath: ds.DependencyPath,
 			RiskFactors:    ds.RiskFactors,
 			ReplaceClass:   string(ds.ReplaceClass),
@@ -623,6 +638,32 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	}
 
 	return nil
+}
+
+// buildScoreBreakdown renders the per-axis component scores, leaving an
+// unmeasured axis null rather than 0 so a gap is not read as a finding.
+func buildScoreBreakdown(ds *scorer.DependencyScore) *JSONScoreBreakdown {
+	sb := &JSONScoreBreakdown{
+		DepthScore:     ds.DepthScore,
+		MaturityScore:  ds.MaturityScore,
+		MeasuredWeight: ds.MeasuredWeight,
+	}
+	if ds.VulnWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "vulnerabilities")
+	} else {
+		sb.VulnScore = &ds.VulnScore
+	}
+	if ds.MaintenanceWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintenance")
+	} else {
+		sb.MaintenanceScore = &ds.MaintenanceScore
+	}
+	if ds.MaintainerWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintainer")
+	} else {
+		sb.MaintainerScore = &ds.MaintainerScore
+	}
+	return sb
 }
 
 // jsonDiagnostics maps the scorer's Diagnostics struct to its JSON form.

@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -111,6 +113,15 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 
 	wg.Wait()
 	if n := failCount.Load(); n > 0 {
+		if errors.Is(firstErr, offline.ErrOffline) {
+			// Report the shape of the degradation, not the wrapped error. The
+			// cause is already known and identical for every module, and the
+			// wrapped *url.Error would embed a full proxy URL — that is a
+			// private module path in a message that reaches ps.Warnings and
+			// the progress log, which the network-transparency docs promise
+			// will disclose hosts, not paths.
+			return results, fmt.Errorf("offline — maintenance data unavailable (%d of %d modules); maintenance axis not measured", n, total)
+		}
 		return results, fmt.Errorf("%d of %d module(s) failed maintenance lookup (first: %w)", n, total, firstErr)
 	}
 	return results, nil

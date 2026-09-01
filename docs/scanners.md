@@ -14,7 +14,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
-| AI-generated     | Fresh modules, few releases, generic names                 | Module metadata heuristics |
+| AI-generated     | Fresh modules, few releases, generic names                 | Resilience data (module proxy) — **not** offline-capable |
 | CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.{yml,yaml}` |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
@@ -44,6 +44,83 @@ Risk Score (0–100) =
 
 Weights are defined in `pkg/scorer/risk.go` (`Weight*` constants). The final
 value is rounded and clamped to `[0, 100]`.
+
+### Unavailable axes
+
+An axis whose data could not be collected is dropped from **both** the numerator
+and the denominator, and the surviving weights renormalize to sum to 1.0:
+
+```
+Risk Score = Σ(measured axis × weight) / Σ(measured weight)  + penalties
+```
+
+| Axis | Excludable | Signal that it was unavailable |
+|------|-----------|--------------------------------|
+| Vulnerabilities (0.40) | yes | `ScoreInput.VulnScanUnavailable` — offline, or govulncheck failed |
+| Maintenance (0.25) | yes | no entry in the maintenance map (`ScanAll` inserts only on success) |
+| Maintainer Risk (0.10) | yes | `MaintainerInfo.DataAvailable == false` |
+| Depth (0.15) | no | derived from the resolved graph |
+| Maturity (0.10) | no | derived from the version string |
+
+Because depth and maturity are always available the denominator floors at 0.25.
+Each dependency reports `measured_weight` and `excluded_axes` in the JSON
+breakdown, and unmeasured component scores serialize as `null` rather than `0` —
+a consumer must be able to tell "nothing found" from "nothing looked".
+
+The two alternatives were both rejected: scoring an unmeasured axis as 0 reports
+a clean bill of health nobody earned, and scoring it with a hard-coded "unknown"
+constant reports a fabricated measurement as a finding.
+
+### Unexamined vs cleared: AI-generated-code detection
+
+Every indicator the AI-gen detector uses derives from the module's first-release
+date, which comes from the resilience scanner (module proxy). Without that date
+the detector cannot run at all — and the module is **unexamined**, not cleared.
+
+This mattered because both outcomes look identical in the output: a module the
+detector skipped and a module it examined and cleared (first released before the
+2022-11-01 ChatGPT cutoff) each produce `risk_level: "none"` with score 0, and
+`ScanAll` retains only scoring entries. An empty AI-gen result therefore read as
+"checked, nothing found" when it often meant "never checked".
+
+`AIGenRisk.data_available` now distinguishes them, and `ScanAll` returns a warning
+naming how many modules went unexamined. Offline that is every module, which is
+why AI-gen is not among the scanners `--offline` leaves intact.
+
+### Unscored headline
+
+Three of the five headline candidates (`severity_adjusted`, `cve_floor`, and the
+fix-age amplifier) are CVE-derived. When the vulnerability scan did not run they
+are all structurally 0, so the headline collapses onto `p95_dep_risk` — one
+voice of five, deciding alone, on whatever axes survived. Offline that means
+dependency-graph position and version scheme.
+
+In that case `overall_risk_level` is `UNKNOWN` and `headline_unscored_reason`
+explains why. `overall_risk_score` still carries the computed number for
+dashboards and policy gates, labelled indicative in the text and PDF reports.
+Per-dependency `risk_level` is unaffected and always carries a real band.
+
+Measured on UniDoc's own libraries, the guard is not hypothetical: without it an
+offline scan promoted UniOffice from LOW to MEDIUM on four untagged
+pseudo-version transitives, with no CVE check performed.
+
+The headline is also `UNKNOWN` when an **online** scan's govulncheck fails, not
+only offline — a failed scan found nothing because it never looked.
+
+**Policy gates deliberately still evaluate the indicative number.** `max_risk_score`
+and `max_overall_score` read `OverallScore`/`RiskScore`, which remain populated
+when the level is `UNKNOWN`, so the exit-code contract keeps working for CI jobs
+that run degraded. This is a deliberate choice, not an oversight: failing a gate
+open would be worse than gating on a partial measurement. The preset ceilings
+(strict 70/50, moderate 85/70) sit well above the range a degraded scan reaches,
+so in practice a scan that measured little will pass the score gates and fail (or
+pass) only on the categorical rules. A policy that must not run degraded should
+gate on `overall_risk_level != "UNKNOWN"` in the JSON output.
+
+One consequence worth expecting: because per-dependency bands are unchanged, a
+degraded scan can report medium-risk dependencies in the summary counts under a
+headline that says `UNKNOWN`. The per-dep number describes the measured axes; the
+headline withholds a verdict. Both are intentional.
 
 ### Vulnerability reachability
 

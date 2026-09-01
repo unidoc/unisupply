@@ -101,7 +101,7 @@ func TestFullPipeline_Simple(t *testing.T) {
 		}
 	}
 
-	aiGenResults := scanner.NewAIGenScanner().ScanAll(
+	aiGenResults, _ := scanner.NewAIGenScanner().ScanAll(
 		context.Background(),
 		graph,
 		map[string]*scanner.MaintainerInfo{},
@@ -173,12 +173,13 @@ func TestFullPipeline_ScoreStability(t *testing.T) {
 		}
 		input := emptyScoreInput(graph)
 		input.Typosquats = scanner.NewTyposquatScanner().ScanAll(context.Background(), graph)
-		input.AIGenRisks = scanner.NewAIGenScanner().ScanAll(
+		aiGenRisks, _ := scanner.NewAIGenScanner().ScanAll(
 			context.Background(),
 			graph,
 			map[string]*scanner.MaintainerInfo{},
 			map[string]*scanner.ResilienceInfo{},
 		)
+		input.AIGenRisks = aiGenRisks
 		return scorer.ScoreAll(input)
 	}
 
@@ -331,6 +332,7 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Resolve failed: %v", err)
 		}
+		aiGenRisks, _ := aiGenScanner.ScanAll(context.Background(), graph, emptyMaintainers, emptyResilience)
 		input := scorer.ScoreInput{
 			Graph:       graph,
 			Vulns:       emptyVulns,
@@ -338,7 +340,7 @@ func BenchmarkPipeline_Simple(b *testing.B) {
 			Maintainers: emptyMaintainers,
 			Typosquats:  typosquatScanner.ScanAll(context.Background(), graph),
 			Resilience:  emptyResilience,
-			AIGenRisks:  aiGenScanner.ScanAll(context.Background(), graph, emptyMaintainers, emptyResilience),
+			AIGenRisks:  aiGenRisks,
 			TrustIndex:  emptyTrustIndex,
 		}
 		_ = scorer.ScoreAll(input)

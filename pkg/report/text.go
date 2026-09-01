@@ -64,8 +64,16 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	// Overall score (five-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
-	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
-		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	if ps.OverallLevel == scorer.RiskUnknown {
+		// Lead with UNKNOWN and label the number as indicative. "26/100
+		// (UNKNOWN)" reads as a scored 26; the band has to come first.
+		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
+			c(scoreColor, fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)))
+		fmt.Fprintf(w, "  Why: %s\n", ps.HeadlineUnscoredReason)
+	} else {
+		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
+			c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	}
 	if ps.HeadlineCandidate != nil {
 		hc := ps.HeadlineCandidate
 		switch {
@@ -239,6 +247,18 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
 	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
 	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
+	// Scan limitations. Without this block a degraded scan — offline, rate
+	// limited, vuln DB unreachable — renders identically to a complete one,
+	// and "Vulnerabilities found: 0" reads as a clean bill of health rather
+	// than as a scan that never looked. Warnings reached JSON only until now.
+	if len(ps.Warnings) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN LIMITATIONS — the results above are incomplete\n")
+		for _, warning := range ps.Warnings {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Full report: unisupply -f pdf\n")
@@ -444,9 +464,24 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		}
 	}
 
-	// Risk score breakdown.
-	breakdown := fmt.Sprintf("vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%",
-		ds.VulnScore, ds.MaintenanceScore, ds.DepthScore, ds.MaintainerScore, ds.MaturityScore)
+	// Risk score breakdown. The printed weights are the *effective* ones: when
+	// an axis is unavailable it is dropped from the denominator, so the nominal
+	// 40/25/15/10/10 no longer describes the arithmetic. Printing the nominal
+	// weights next to a renormalized score would contradict the score on the
+	// same line, which is the opposite of a defensible breakdown.
+	axis := func(label string, score, weight float64, excluded bool) string {
+		if excluded {
+			return fmt.Sprintf("%s=n/a", label)
+		}
+		return fmt.Sprintf("%s=%.0f×%.0f%%", label, score, weight/ds.MeasuredWeight*100)
+	}
+	breakdown := strings.Join([]string{
+		axis("vuln", ds.VulnScore, scorer.WeightVulnerabilities, ds.VulnWeightExcluded),
+		axis("maint", ds.MaintenanceScore, scorer.WeightMaintenance, ds.MaintenanceWeightExcluded),
+		axis("depth", ds.DepthScore, scorer.WeightDepthRisk, false),
+		axis("maintainer", ds.MaintainerScore, scorer.WeightMaintainerRisk, ds.MaintainerWeightExcluded),
+		axis("maturity", ds.MaturityScore, scorer.WeightMaturity, false),
+	}, " ")
 	if ds.ResilienceBonus > 0 {
 		breakdown += fmt.Sprintf(" +resilience=%.1f", ds.ResilienceBonus)
 	}
@@ -462,8 +497,19 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	if ds.FlooredTo > 0 {
 		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
 	}
-	if ds.MaintainerWeightExcluded {
-		breakdown += " [renorm: maintainer excl.]"
+	if ds.MeasuredWeight < 1.0 {
+		var excl []string
+		if ds.VulnWeightExcluded {
+			excl = append(excl, "vuln")
+		}
+		if ds.MaintenanceWeightExcluded {
+			excl = append(excl, "maint")
+		}
+		if ds.MaintainerWeightExcluded {
+			excl = append(excl, "maintainer")
+		}
+		breakdown += fmt.Sprintf(" [renorm: %s excl., %.0f%% of model measured]",
+			strings.Join(excl, "+"), ds.MeasuredWeight*100)
 	}
 	fmt.Fprintf(w, "  ├─ %s %s\n", c(colorDim, "Score breakdown:"), breakdown)
 
@@ -574,6 +620,10 @@ func riskColor(level scorer.RiskLevel) string {
 		return colorOrange
 	case scorer.RiskMedium:
 		return colorYellow
+	case scorer.RiskUnknown:
+		// Not green. An unscored headline must not read as a pass at a glance —
+		// the colour is the first thing seen and the default here was green.
+		return colorDim
 	default:
 		return colorGreen
 	}
@@ -685,6 +735,10 @@ func hasExploitEvidence(ps *scorer.ProjectScore) bool {
 
 func overallExplanation(level scorer.RiskLevel, exploitEvidence bool) string {
 	switch level {
+	case scorer.RiskUnknown:
+		// The default branch below claims "no known vulnerabilities were found",
+		// which is precisely the false assurance an unscored scan must not give.
+		return "No verdict. This scan could not measure enough to rate the supply\nchain — see SCAN LIMITATIONS below for what was skipped. The score\nshown is indicative only; re-run with network access for a verdict."
 	case scorer.RiskCritical:
 		if exploitEvidence {
 			return "Immediate action required. Your supply chain has critical vulnerabilities\nwith evidence of active exploitation in the wild (CISA KEV or high EPSS)."
@@ -735,7 +789,11 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		reasons = append(reasons, fmt.Sprintf("name suspiciously similar to %s — verify this is the intended package", ds.Typosquat.SimilarTo))
 	}
 
-	if ds.Resilience != nil && ds.Resilience.Score < 30 {
+	// DataAvailable gates this for the same reason it gates the scorer's
+	// low_resilience factor: an unreachable proxy leaves Score at 0, and this
+	// prose asserts specifics ("few releases, no governance files") that were
+	// never measured.
+	if ds.Resilience != nil && ds.Resilience.DataAvailable && ds.Resilience.Score < 30 {
 		reasons = append(reasons, "low resilience — few releases, no governance files, uncertain long-term viability")
 	}
 
