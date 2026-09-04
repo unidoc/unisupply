@@ -78,9 +78,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   risk factors only and never drive the project headline. New
   `forbid_pseudo_versions` policy rule (enabled in the strict preset) fails
   CI on any non-test-only pseudo-version pin.
-
-### New Features
-
 - **Threat-intel enrichment (EPSS + CISA KEV).** Every CVE now carries EPSS
   (exploitation probability from FIRST.org: `epss_score`, `epss_percentile`,
   `epss_date`) and CISA KEV status (confirmed exploited in the wild: `in_kev`,
@@ -95,6 +92,35 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   on-disk caches — threat-intel unavailability never fails a scan.
 
 ### Improvements
+
+#### Reports: one vulnerability identifier, and one warning per failure mode
+
+- **The Go advisory ID is now the single identifier in text and PDF output.**
+  Advisory lines rendered `GO-2026-5026 (CRITICAL) [required] — CVE-2026-39821`
+  while the stdlib section rendered `GO-2026-4970 Summary (CVE-2026-39822)` —
+  two conventions in one report, with no way to tell which was authoritative.
+  Both now carry the `GO-*` ID alone: it is the only identifier govulncheck
+  guarantees, since some advisories have no CVE. CVE and GHSA identifiers move
+  to one place — a `VULNERABILITY ID ALIASES` section in the text report and an
+  "Appendix: Vulnerability ID Aliases" table in the PDF. JSON is unchanged; its
+  `aliases` array is the machine contract, and EPSS/KEV lookups are still keyed
+  by CVE internally.
+- **An advisory is no longer listed as its own alias.** When govulncheck
+  reported no aliases the renderer substituted the ID, producing
+  `⚠ GO-2026-5932 (UNKNOWN) [required] — GO-2026-5932`. Alias-less advisories
+  are simply absent from the glossary.
+- **Repeated severity-lookup failures collapse to one line.** A scan of a
+  vulnerability-heavy module emitted 21 near-identical
+  `severity lookup failed (OSV/NVD/GitHub) for GO-…` warnings, burying every
+  warning that was not a repeat. They now render as a single line naming the
+  count and the first five IDs, listing each advisory once — the same advisory
+  can be reported under two modules, and the repeat must not inflate the count
+  or consume a displayed slot. Nothing is lost: each vulnerability keeps its
+  own `enrichment_errors` entry in JSON, and a lone failure still prints as
+  itself rather than as a summary of one. The collapse is applied in the
+  scanner, so the top-level `warnings` array in JSON output carries the
+  summary line too; per-vulnerability `enrichment_errors` is unchanged and
+  remains the machine contract for which advisories failed enrichment.
 
 #### The network contract is now integration-tested
 
