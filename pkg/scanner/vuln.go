@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -289,16 +290,17 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
 	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	var enrichWarnings []string
 	for modPath, modVulns := range results {
 		for i := range modVulns {
 			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
 				continue
 			}
-			enrichWarnings := enricher.Enrich(ctx, &modVulns[i])
-			warnings = append(warnings, enrichWarnings...)
+			enrichWarnings = append(enrichWarnings, enricher.Enrich(ctx, &modVulns[i])...)
 		}
 		results[modPath] = modVulns
 	}
+	warnings = append(warnings, collapseSeverityLookupWarnings(enrichWarnings)...)
 
 	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
 
@@ -519,4 +521,71 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 		}
 	}
 	return ""
+}
+
+// severityLookupFailedPrefix is the enricher's per-advisory failure message.
+// Kept in one place so the emitter (vulnenrich.go) and this aggregator cannot
+// drift apart silently.
+const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
+
+// maxListedFailedIDs caps how many advisory IDs the aggregate warning names
+// before eliding the rest.
+const maxListedFailedIDs = 5
+
+// collapseSeverityLookupWarnings replaces a run of per-advisory
+// "severity lookup failed" warnings with a single line naming the count and
+// the first few IDs. Every other warning passes through untouched, in order.
+//
+// A scan of a vulnerability-heavy module produced 21 near-identical lines,
+// which buried the warnings that were not repeats. The information is not
+// lost: each affected vulnerability keeps its own EnrichmentErrors entry,
+// which is what the JSON report exposes.
+func collapseSeverityLookupWarnings(warnings []string) []string {
+	var (
+		out       []string
+		failedIDs []string
+		firstMsg  string
+		insertAt  = -1
+	)
+
+	for _, w := range warnings {
+		if !strings.HasPrefix(w, severityLookupFailedPrefix) {
+			out = append(out, w)
+			continue
+		}
+		if insertAt < 0 {
+			// Hold the position of the first collapsed warning so the summary
+			// lands where the group started rather than at the end, and keep
+			// the message itself for the single-failure case below.
+			insertAt = len(out)
+			firstMsg = w
+		}
+		id := strings.TrimPrefix(w, severityLookupFailedPrefix)
+		if i := strings.Index(id, ";"); i >= 0 {
+			id = id[:i]
+		}
+		failedIDs = append(failedIDs, id)
+	}
+
+	switch len(failedIDs) {
+	case 0:
+		return out
+	case 1:
+		// A single failure reads better as itself than as a summary of one.
+		// Passed through verbatim rather than rebuilt, so this function owns
+		// no second copy of the message the enricher writes.
+		return slices.Insert(out, insertAt, firstMsg)
+	}
+
+	listed := failedIDs
+	ellipsis := ""
+	if len(listed) > maxListedFailedIDs {
+		listed = listed[:maxListedFailedIDs]
+		ellipsis = ", …"
+	}
+	summary := fmt.Sprintf(
+		"severity lookup failed (OSV/NVD/GitHub) for %d advisories; severities remain UNKNOWN (%s%s)",
+		len(failedIDs), strings.Join(listed, ", "), ellipsis,
+	)
+	return slices.Insert(out, insertAt, summary)
 }

@@ -96,6 +96,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
+#### Reports: one vulnerability identifier, and one warning per failure mode
+
+- **The Go advisory ID is now the single identifier in text and PDF output.**
+  Advisory lines rendered `GO-2026-5026 (CRITICAL) [required] — CVE-2026-39821`
+  while the stdlib section rendered `GO-2026-4970 Summary (CVE-2026-39822)` —
+  two conventions in one report, with no way to tell which was authoritative.
+  Both now carry the `GO-*` ID alone: it is the only identifier govulncheck
+  guarantees, since some advisories have no CVE. CVE and GHSA identifiers move
+  to one place — a `VULNERABILITY ID ALIASES` section in the text report and an
+  "Appendix: Vulnerability ID Aliases" table in the PDF. JSON is unchanged; its
+  `aliases` array is the machine contract, and EPSS/KEV lookups are still keyed
+  by CVE internally.
+- **An advisory is no longer listed as its own alias.** When govulncheck
+  reported no aliases the renderer substituted the ID, producing
+  `⚠ GO-2026-5932 (UNKNOWN) [required] — GO-2026-5932`. Alias-less advisories
+  are simply absent from the glossary.
+- **Repeated severity-lookup failures collapse to one line.** A scan of a
+  vulnerability-heavy module emitted 21 near-identical
+  `severity lookup failed (OSV/NVD/GitHub) for GO-…` warnings, burying every
+  warning that was not a repeat. They now render as a single line naming the
+  count and the first five IDs. Nothing is lost: each vulnerability keeps its
+  own `enrichment_errors` entry in JSON, and a lone failure still prints as
+  itself rather than as a summary of one.
+
 #### Scoring: unmeasured axes no longer counted as measured
 
 - **An unavailable axis is excluded from the weighting, not scored.** Its weight
