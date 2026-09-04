@@ -52,7 +52,7 @@ func enterOffline(t *testing.T) {
 	})
 }
 
-func offlineGraph(t *testing.T) *resolver.Graph {
+func fixtureGraph(t *testing.T) *resolver.Graph {
 	t.Helper()
 
 	graph, _, err := resolver.Resolve(context.Background(), testdataPath("gomod", "simple.mod"), directOnly)
@@ -70,7 +70,7 @@ func offlineGraph(t *testing.T) *resolver.Graph {
 // single dial. Each subtest would panic rather than fail if refusal leaked.
 func TestOffline_NoScannerDials(t *testing.T) {
 	enterOffline(t)
-	graph := offlineGraph(t)
+	graph := fixtureGraph(t)
 	ctx := context.Background()
 	const timeout = 5 * time.Second
 
