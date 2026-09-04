@@ -96,6 +96,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
+#### The network contract is now integration-tested
+
+- **Documentation drift in the network contract fails the build.** A new
+  hermetic integration suite (`test/integration/`) parses the host table out of
+  README.md § Privacy and network access, records every host the scanners
+  actually contact — through the same `http.DefaultTransport` choke point
+  `--network-log` uses — and asserts both directions: no host is contacted that
+  the table does not document, and no documented row goes unexercised. Coverage
+  is asserted per row rather than per host, so the three separate
+  `api.github.com` rows (maintainer, resilience, GHSA enrichment) each have to
+  be exercised on their own — one GitHub request cannot stand in for the other
+  two. Rows that cannot be driven in-process (`vuln.go.dev`, `cloud.unidoc.io`, the
+  user-supplied Trust Index URL) each carry a written reason in the test, so a
+  newly added row is a failure until someone drives it or explains why it
+  cannot be. The hosts the README promises are never contacted directly
+  (`sum.golang.org`, `pkg.go.dev`) are asserted uncontacted, a permanent
+  red test proves the allowlist check has teeth, the Trust Index client is
+  verified to contact only its configured host, and SECURITY.md's prose
+  summary is compared against the table in both directions, so a host dropped
+  from the README cannot be left behind in the summary. No request leaves the
+  machine: the recorder rewrites each request to a local stub server.
+- **SECURITY.md now lists the EPSS and KEV hosts** (`api.first.org`,
+  `www.cisa.gov`), which were added to the README table with the threat-intel
+  scanner but never to the prose summary — the first drift the new test caught.
+
 #### Scoring: unmeasured axes no longer counted as measured
 
 - **An unavailable axis is excluded from the weighting, not scored.** Its weight
