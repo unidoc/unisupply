@@ -78,11 +78,6 @@ jobs:
           /tmp/unisupply ./ --no-color --github-token "$GITHUB_TOKEN" \
             > /tmp/unisupply.txt
 
-      - name: Run unisupply CI/CD scan
-        run: |
-          set -euo pipefail
-          /tmp/unisupply ./ --scan-ci --no-color --policy .github/security-policy.json
-
       - name: List stale direct dependencies
         run: |
           set -euo pipefail
@@ -257,16 +252,41 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+      # Deliberately the last step in this job. It is a gate: a policy
+      # violation must fail the workflow. Run earlier, its non-zero exit
+      # skipped every step after it — the staleness listing, the artifact
+      # upload, and with them the `report` job, which is `needs: audit`. A
+      # failing policy gate is the strongest reason to file the weekly issue,
+      # and instead it was the one condition that suppressed it: no issue has
+      # been filed since 2026-W30. Collect and publish the evidence first,
+      # then gate.
+      - name: Run unisupply CI/CD scan (policy gate)
+        run: |
+          set -euo pipefail
+          /tmp/unisupply ./ --scan-ci --no-color --policy .github/security-policy.json
+
   report:
     needs: audit
-    if: github.repository_owner == 'unidoc'
+    # always(), so an audit failure still files the issue — that is when the
+    # weekly report matters most. Skipped and cancelled runs produce no
+    # evidence to report on, so they are excluded.
+    if: >-
+      always()
+      && github.repository_owner == 'unidoc'
+      && needs.audit.result != 'skipped'
+      && needs.audit.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
     steps:
+      # continue-on-error: an audit that failed before the upload step leaves
+      # no artifact. The issue is still worth filing — it reports the audit
+      # failure itself — and the rendering steps below fall back when the
+      # scan output is missing.
       - name: Download scan artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        continue-on-error: true
         with:
           name: scan-results
           path: .
@@ -278,6 +298,7 @@ jobs:
           STALE: ${{ needs.audit.outputs.stale }}
           GOVULNCHECK_RC: ${{ needs.audit.outputs.govulncheck_rc }}
           EVENT_NAME: ${{ github.event_name }}
+          AUDIT_RESULT: ${{ needs.audit.result }}
         run: |
           set -euo pipefail
 
@@ -301,6 +322,12 @@ jobs:
           fi
 
           FIRE=false
+          # A failed audit fires unconditionally: the policy gate tripped, or
+          # the job broke before it could measure anything. Either way the
+          # week needs a report, and the scan values below may be empty.
+          if [ "${AUDIT_RESULT:-}" != "success" ]; then
+            FIRE=true
+          fi
           if [ "$GOVULNCHECK_RC" = "3" ]; then
             FIRE=true
           fi
@@ -312,12 +339,17 @@ jobs:
           fi
 
           if [ "$FIRE" != "true" ]; then
-            echo "No gate condition met (govulncheck_rc=$GOVULNCHECK_RC risk_level=$RISK_LEVEL stale=$STALE); not filing issue."
+            echo "No gate condition met (audit=$AUDIT_RESULT govulncheck_rc=$GOVULNCHECK_RC risk_level=$RISK_LEVEL stale=$STALE); not filing issue."
             exit 0
           fi
 
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           RUN_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          AUDIT_NOTE=""
+          if [ "${AUDIT_RESULT:-}" != "success" ]; then
+            AUDIT_NOTE=" — the audit job did not succeed (policy gate tripped, or a step failed before it); values below may be incomplete"
+          fi
 
           cat > ./issue-body.md <<BODYEOF
           # Weekly Supply Chain Security Scan
@@ -325,13 +357,14 @@ jobs:
           - **Run date:** ${RUN_DATE}
           - **Trigger:** ${EVENT_NAME}
           - **Workflow run:** ${RUN_URL}
+          - **Audit job:** ${AUDIT_RESULT}${AUDIT_NOTE}
 
           ## Risk Summary
 
           - **Risk level:** ${RISK_LEVEL}
           - **Risk score:** ${RISK_SCORE}
           - **govulncheck exit code:** ${GOVULNCHECK_RC} (3 = call-graph-reachable vulnerability)
-          - **Stale dependencies (>90 days):** ${STALE}
+          - **Stale dependencies (>90 days):** ${STALE:-unknown}
 
           ## Top Findings
 
