@@ -59,6 +59,46 @@ func TestCollapseSeverityLookupWarnings(t *testing.T) {
 			},
 		},
 		{
+			// The same advisory can be reported under two modules; the second
+			// enrichment hits the cached failure and repeats the warning. One
+			// advisory is not a group, so it stays verbatim.
+			name: "repeats of one advisory stay verbatim",
+			in: []string{
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0001"),
+			},
+			want: []string{failedWarning("GO-2026-0001")},
+		},
+		{
+			name: "repeats are counted and listed once",
+			in: []string{
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0002"),
+			},
+			want: []string{
+				"severity lookup failed (OSV/NVD/GitHub) for 2 advisories; severities remain UNKNOWN (GO-2026-0001, GO-2026-0002)",
+			},
+		},
+		{
+			// Repeats must not consume the five displayed slots: without dedup
+			// the list would stop at GO-2026-0003 and elide the rest.
+			name: "repeats do not consume the displayed slots",
+			in: []string{
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0002"),
+				failedWarning("GO-2026-0002"),
+				failedWarning("GO-2026-0003"),
+				failedWarning("GO-2026-0004"),
+				failedWarning("GO-2026-0005"),
+				failedWarning("GO-2026-0006"),
+			},
+			want: []string{
+				"severity lookup failed (OSV/NVD/GitHub) for 6 advisories; severities remain UNKNOWN (GO-2026-0001, GO-2026-0002, GO-2026-0003, GO-2026-0004, GO-2026-0005, …)",
+			},
+		},
+		{
 			// The summary replaces the group where the group began, so a
 			// reader still sees warnings in the order they were produced.
 			name: "summary lands at the position of the first collapsed warning",

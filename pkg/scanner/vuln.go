@@ -544,6 +544,7 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 	var (
 		out       []string
 		failedIDs []string
+		seen      = make(map[string]struct{})
 		firstMsg  string
 		insertAt  = -1
 	)
@@ -564,6 +565,15 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 		if i := strings.Index(id, ";"); i >= 0 {
 			id = id[:i]
 		}
+		// The same advisory can be reported under more than one module —
+		// parsing deduplicates by module@osvID, not globally — and the second
+		// enrichment hits the cached failure and re-emits the same warning.
+		// Count and list each advisory once, in first-seen order, so repeats
+		// neither inflate the count nor consume the displayed slots.
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		failedIDs = append(failedIDs, id)
 	}
 

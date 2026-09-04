@@ -113,9 +113,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   vulnerability-heavy module emitted 21 near-identical
   `severity lookup failed (OSV/NVD/GitHub) for GO-…` warnings, burying every
   warning that was not a repeat. They now render as a single line naming the
-  count and the first five IDs. Nothing is lost: each vulnerability keeps its
+  count and the first five IDs, listing each advisory once — the same advisory
+  can be reported under two modules, and the repeat must not inflate the count
+  or consume a displayed slot. Nothing is lost: each vulnerability keeps its
   own `enrichment_errors` entry in JSON, and a lone failure still prints as
-  itself rather than as a summary of one.
+  itself rather than as a summary of one. The collapse is applied in the
+  scanner, so the top-level `warnings` array in JSON output carries the
+  summary line too; per-vulnerability `enrichment_errors` is unchanged and
+  remains the machine contract for which advisories failed enrichment.
 
 #### The network contract is now integration-tested
 
