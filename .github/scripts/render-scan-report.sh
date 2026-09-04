@@ -3,11 +3,9 @@
 # Render a unisupply JSON report as markdown, for both the workflow job
 # summary and the weekly security issue body.
 #
-# One renderer for both consumers, on purpose: they drifted apart once
-# already. The job summary was upgraded to show headline attribution, time
-# bombs and per-dependency risk factors while the issue body kept four scalar
-# values and a link to the run, so the issue said "HIGH / 51" with nothing
-# explaining why.
+# One renderer for both consumers, on purpose: a headline number is not a
+# report, so both carry the same attribution, time bombs and per-dependency
+# risk factors, and neither can drift away from the other.
 #
 # Usage:
 #   render-scan-report.sh <unisupply.json> [stale-deps.txt] [stale-90.txt]
@@ -107,6 +105,11 @@ echo "| Overall risk score | **${SCORE}** / 100 |"
 echo "| govulncheck exit code | ${GOVULN_BADGE} |"
 echo "| Stale dependencies (>90d) | ${STALE:-unknown} |"
 
+GENERATED=$(jq_field '.generated_at // ""')
+if [ -n "$GENERATED" ]; then
+  echo "| Scan generated at | ${GENERATED} |"
+fi
+
 GOSUM=$(jq_field '.module_directives.gosum_verified // ""')
 if [ -n "$GOSUM" ]; then
   case "$GOSUM" in
@@ -126,9 +129,9 @@ if [ -n "$WORST_CVE" ]; then
 fi
 echo
 
-# "Why this risk level" — the gap that motivated this renderer. A headline can
-# be HIGH while every dependency scores MEDIUM, because a floor rule fired;
-# without the driver the number looks arbitrary or wrong.
+# "Why this risk level". A headline can be HIGH while every dependency scores
+# MEDIUM, because a floor rule fired; without the driver the number looks
+# arbitrary or wrong.
 UNSCORED=$(jq_field '.headline_unscored_reason // ""')
 DRIVER=$(jq_field '.headline.driver // ""')
 if [ -n "$UNSCORED" ]; then
@@ -195,15 +198,15 @@ if [ "$VULN_COUNT" -gt 0 ]; then
           id: .id,
           severity: (.severity // "UNKNOWN"),
           module: $m,
-          reachability: (.reachability // "—"),
-          kev: (.in_kev // false),
-          epss: (.epss_score // 0),
+          reachability: (.reachability // "called"),
+          kev: .in_kev,
+          epss: .epss_score,
           fix: (.fixed_version // "")
         }
     ]
-    | sort_by([(if .kev then 0 else 1 end), -.epss])
+    | sort_by([(if .kev == true then 0 else 1 end), -(.epss // 0)])
     | .[0:$max][]
-    | "| `\(.id)` | \(.severity) | `\(.module)` | \(.reachability) | \(if .kev then "🔴 yes" else "—" end) | \(if .epss > 0 then (.epss * 10000 | round / 100 | tostring) + "%" else "—" end) | \(if .fix != "" then "`" + .fix + "`" else "—" end) |"
+    | "| `\(.id)` | \(.severity) | `\(.module)` | \(.reachability) | \(if .kev == true then "🔴 yes" elif .kev == false then "no" else "not checked" end) | \(if .epss == null then "not checked" else ((.epss * 10000 | round / 100 | tostring) + "%") end) | \(if .fix != "" then "`" + .fix + "`" else "—" end) |"
   ' "$JSON"
   if [ "$VULN_COUNT" -gt "$MAX_VULNS" ]; then
     echo
@@ -260,8 +263,13 @@ echo
 
 # --- Module integrity --------------------------------------------------------
 
-INTEGRITY_FINDINGS=$(jq_field '(.module_directives.findings // []) | length')
-if [ "$INTEGRITY_FINDINGS" -gt 0 ]; then
+# `module_directives` is emitted whenever the integrity scanner ran, including
+# for a zero-finding scan, so its presence — not its finding count — decides
+# whether this section renders. A clean scan and a scan that never ran are
+# different results and must not render the same.
+INTEGRITY_RAN=$(jq_field 'if .module_directives then "true" else "false" end')
+if [ "$INTEGRITY_RAN" = "true" ]; then
+  INTEGRITY_FINDINGS=$(jq_field '(.module_directives.findings // []) | length')
   # Redirects and checksum mismatches are the ones that change what code
   # ships; surface those and collapse the rest.
   SERIOUS=$(jq_field '

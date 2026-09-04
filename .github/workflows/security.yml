@@ -162,13 +162,11 @@ jobs:
           if-no-files-found: warn
 
       # Deliberately the last step in this job. It is a gate: a policy
-      # violation must fail the workflow. Run earlier, its non-zero exit
-      # skipped every step after it — the staleness listing, the artifact
-      # upload, and with them the `report` job, which is `needs: audit`. A
-      # failing policy gate is the strongest reason to file the weekly issue,
-      # and instead it was the one condition that suppressed it: no issue has
-      # been filed since 2026-W30. Collect and publish the evidence first,
-      # then gate.
+      # violation must fail the workflow, and a non-zero exit here skips every
+      # step after it — the staleness listing, the artifact upload, and with
+      # them the `report` job, which is `needs: audit`. A failing policy gate
+      # is the strongest reason to file the weekly issue, so collect and
+      # publish the evidence first, then gate.
       - name: Run unisupply CI/CD scan (policy gate)
         run: |
           set -euo pipefail
@@ -189,8 +187,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      # The renderer lives in the repo, so this job needs a checkout — it had
-      # none before, having only ever downloaded artifacts.
+      # The renderer lives in the repo, so this job needs a checkout.
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
@@ -199,6 +196,7 @@ jobs:
       # failure itself — and the rendering steps below fall back when the
       # scan output is missing.
       - name: Download scan artifacts
+        id: download
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         continue-on-error: true
         with:
@@ -213,6 +211,7 @@ jobs:
           GOVULNCHECK_RC: ${{ needs.audit.outputs.govulncheck_rc }}
           EVENT_NAME: ${{ github.event_name }}
           AUDIT_RESULT: ${{ needs.audit.result }}
+          ARTIFACT_RESULT: ${{ steps.download.outcome }}
         run: |
           set -euo pipefail
 
@@ -230,9 +229,16 @@ jobs:
 
           # Only the level is read here — it is a FIRE condition. Everything
           # else the body reports is rendered by the shared script below.
+          #
+          # `-s` alone passes a non-empty malformed file; under `set -e` the
+          # `jq` read would then fail the step before the renderer's
+          # unreadable-output fallback ran, filing no issue at all. Validate
+          # first; UNKNOWN lets the other FIRE conditions still decide.
           RISK_LEVEL="UNKNOWN"
-          if [ -s ./unisupply.json ]; then
+          if [ -s ./unisupply.json ] && jq -e . ./unisupply.json >/dev/null 2>&1; then
             RISK_LEVEL=$(jq -r '.overall_risk_level // "UNKNOWN"' ./unisupply.json)
+          else
+            echo "::warning::unisupply.json is missing, empty or not valid JSON; risk level treated as UNKNOWN."
           fi
 
           FIRE=false
@@ -278,9 +284,21 @@ jobs:
             echo
             echo "---"
             echo
-            echo "gosec findings are attached to the run as SARIF and visible under"
-            echo "**Security → Code scanning**; the full JSON and plain-text reports are"
-            echo "in the \`scan-results\` artifact."
+            # The artifact download is allowed to fail, so this footer must
+            # not promise reports that are not there. Key it on the same fact
+            # the renderer's fallback uses — the scan output actually being
+            # present — not on the download outcome alone, so the body and the
+            # footer cannot contradict each other.
+            if [ "${ARTIFACT_RESULT:-}" = "success" ] && [ -s ./unisupply.json ]; then
+              echo "gosec findings are attached to the run as SARIF and visible under"
+              echo "**Security → Code scanning**; the full JSON and plain-text reports are"
+              echo "in the \`scan-results\` artifact."
+            else
+              echo "⚠️ The \`scan-results\` artifact is not available for this run (usually"
+              echo "because the audit job failed before its upload step), so there are no"
+              echo "full JSON, plain-text or SARIF reports to consult. The run log is the"
+              echo "only evidence: ${RUN_URL}"
+            fi
             echo
             echo "## Closure guidance"
             echo
