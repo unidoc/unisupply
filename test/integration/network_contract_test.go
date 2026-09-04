@@ -49,11 +49,72 @@ var undrivenRows = map[string]string{
 		"contacts that host and no other.",
 }
 
+// rowMatcher identifies one contract row by the request it produces. A host
+// with several README rows has several matchers, each of which must fire.
+type rowMatcher struct {
+	// name is the README row this matcher stands for, short enough to read in
+	// a failure message.
+	name string
+
+	// match reports whether a recorded request path belongs to this row.
+	match func(path string) bool
+}
+
+// rowMatchers declares, per documented host, one matcher per README table row.
+// Matching on the host alone would let two of the three api.github.com rows
+// stop running while a single GitHub request from the third kept the coverage
+// assertion green — the paths are what tell the rows apart.
+//
+// The declared count must equal the number of rows the README carries for that
+// host, so adding a row to the table fails here until a matcher is written for
+// it. Hosts listed in undrivenRows are exempt and must not appear here.
+var rowMatchers = map[string][]rowMatcher{
+	"proxy.golang.org": {
+		{name: "maintenance and resilience version lookups", match: anyPath},
+	},
+	"api.github.com": {
+		{name: "maintainer scanner (contributor list)", match: hasSuffix("/contributors")},
+		{name: "resilience scanner (governance file checks)", match: contains("/contents/")},
+		{name: "GHSA severity enrichment", match: hasPrefix("/advisories")},
+	},
+	"api.osv.dev": {
+		{name: "OSV severity enrichment", match: anyPath},
+	},
+	"services.nvd.nist.gov": {
+		{name: "NVD severity enrichment", match: anyPath},
+	},
+	"api.first.org": {
+		{name: "EPSS lookup", match: anyPath},
+	},
+	"www.cisa.gov": {
+		{name: "CISA KEV catalog download", match: anyPath},
+	},
+}
+
+func anyPath(string) bool { return true }
+
+func hasPrefix(p string) func(string) bool {
+	return func(path string) bool { return strings.HasPrefix(path, p) }
+}
+
+func hasSuffix(p string) func(string) bool {
+	return func(path string) bool { return strings.HasSuffix(path, p) }
+}
+
+func contains(p string) func(string) bool {
+	return func(path string) bool { return strings.Contains(path, p) }
+}
+
 // hostRecorder records the host of every outbound request and then serves it
 // from a local stub, so the scan is both observable and hermetic.
 type hostRecorder struct {
 	mu    sync.Mutex
 	hosts map[string]int
+
+	// paths holds every request path seen per host. The host alone cannot
+	// distinguish the three api.github.com contract rows from one another;
+	// the path can, and TestNetworkContract_NoDeadRows matches on it.
+	pathsByHost map[string][]string
 
 	stub     *url.URL
 	upstream http.RoundTripper
@@ -64,6 +125,10 @@ func (r *hostRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	r.mu.Lock()
 	r.hosts[host]++
+	if r.pathsByHost == nil {
+		r.pathsByHost = map[string][]string{}
+	}
+	r.pathsByHost[host] = append(r.pathsByHost[host], req.URL.Path)
 	r.mu.Unlock()
 
 	// Rewrite to the stub. The host-pin check in pkg/scanner/httpclient.go has
@@ -89,6 +154,14 @@ func (r *hostRecorder) recorded() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// paths returns the request paths recorded for host, in the order seen.
+func (r *hostRecorder) paths(host string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]string(nil), r.pathsByHost[host]...)
 }
 
 // stubServer serves canned responses keyed by the intended upstream host. The
@@ -276,35 +349,75 @@ func TestNetworkContract_NoUndocumentedHosts(t *testing.T) {
 	}
 }
 
-// TestNetworkContract_NoDeadRows is the coverage direction: a documented host
-// must either be reached by a scanner or carry a written reason it cannot be
-// driven here. It also fails on stale exemptions, so a row removed from the
-// README does not leave an orphan entry in undrivenRows.
+// TestNetworkContract_NoDeadRows is the coverage direction: every documented
+// row must either be exercised by a scanner or carry a written reason it
+// cannot be driven here. Coverage is asserted per row, not per host: a host
+// with three README rows needs three matchers and all three must fire, so two
+// of the three api.github.com request chains cannot quietly stop running
+// behind the third. It also fails on stale exemptions and stale matchers, so a
+// row removed from the README leaves no orphan entry behind.
 func TestNetworkContract_NoDeadRows(t *testing.T) {
 	contract := parseNetworkContract(t, readmePath)
 	rec := driveNetworkScanners(t)
 
-	contacted := map[string]bool{}
-	for _, h := range rec.recorded() {
-		contacted[h] = true
-	}
-
 	for _, host := range contract.Hosts {
-		if contacted[host] {
-			continue
-		}
 		if reason, ok := undrivenRows[host]; ok {
+			// undrivenRows is host-keyed, which is sound only while every
+			// exempt host has exactly one row. A host that gains a second row
+			// while staying undriven needs per-row exemptions instead.
+			if n := contract.RowCount[host]; n != 1 {
+				t.Errorf("undrivenRows exempts %q by host, but the README carries %d rows for it; "+
+					"the exemption must become per-row before the extra rows can be trusted", host, n)
+			}
 			t.Logf("%s: documented but not driven in-process — %s", host, reason)
 			continue
 		}
-		t.Errorf("README documents %q but no scanner in this harness contacts it.\n"+
-			"Either drive it in driveNetworkScanners, remove the row, or add it to "+
-			"undrivenRows with the reason it cannot be driven.", host)
+
+		matchers, ok := rowMatchers[host]
+		if !ok {
+			t.Errorf("README documents %q but no scanner in this harness contacts it.\n"+
+				"Either drive it in driveNetworkScanners and declare its rows in rowMatchers, "+
+				"remove the row, or add it to undrivenRows with the reason it cannot be driven.", host)
+			continue
+		}
+
+		if len(matchers) != contract.RowCount[host] {
+			t.Errorf("README carries %d rows for %q but rowMatchers declares %d.\n"+
+				"Each row is a distinct operation and needs its own matcher, or the "+
+				"coverage assertion passes without exercising it.",
+				contract.RowCount[host], host, len(matchers))
+			continue
+		}
+
+		paths := rec.paths(host)
+		for _, m := range matchers {
+			hit := false
+			for _, path := range paths {
+				if m.match(path) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				t.Errorf("README row %q (%s) was never exercised; paths recorded for that host: %v.\n"+
+					"The request chain for this row is not running — a sibling row on the same "+
+					"host firing is not coverage for it.", m.name, host, paths)
+			}
+		}
 	}
 
 	for host := range undrivenRows {
 		if !contract.has(host) {
 			t.Errorf("undrivenRows exempts %q, which the README no longer documents; remove the exemption", host)
+		}
+	}
+
+	for host := range rowMatchers {
+		if !contract.has(host) {
+			t.Errorf("rowMatchers declares rows for %q, which the README no longer documents; remove them", host)
+		}
+		if _, exempt := undrivenRows[host]; exempt {
+			t.Errorf("%q is in both rowMatchers and undrivenRows; a host is either driven or exempt, not both", host)
 		}
 	}
 }
