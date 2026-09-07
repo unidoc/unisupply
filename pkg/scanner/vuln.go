@@ -523,9 +523,10 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 	return ""
 }
 
-// severityLookupFailedPrefix is the enricher's per-advisory failure message.
-// Kept in one place so the emitter (vulnenrich.go) and this aggregator cannot
-// drift apart silently.
+// severityLookupFailedPrefix opens the enricher's per-advisory failure
+// message. Kept in one place so the emitter (vulnenrich.go), the matcher and
+// the collapsed summary cannot drift apart silently: rewording the constant
+// rewords all three at once.
 const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
 
 // maxListedFailedIDs caps how many advisory IDs the aggregate warning names
@@ -568,8 +569,10 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 		// The same advisory can be reported under more than one module —
 		// parsing deduplicates by module@osvID, not globally — and the second
 		// enrichment hits the cached failure and re-emits the same warning.
-		// Count and list each advisory once, in first-seen order, so repeats
-		// neither inflate the count nor consume the displayed slots.
+		// Count and list each advisory once so repeats neither inflate the
+		// count nor consume the displayed slots. The order here is the
+		// caller's map-iteration order, so the list is sorted below before
+		// anything is truncated or displayed.
 		if _, dup := seen[id]; dup {
 			continue
 		}
@@ -587,15 +590,24 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 		return slices.Insert(out, insertAt, firstMsg)
 	}
 
+	// The caller enriches by ranging over a map, so failedIDs arrives in a
+	// different order on every run. Sort before truncating so the summary —
+	// which consumers diff between runs — names the same IDs in the same
+	// order for the same scan. GO/CVE IDs sort by year, then number.
+	sort.Strings(failedIDs)
+
 	listed := failedIDs
 	ellipsis := ""
 	if len(listed) > maxListedFailedIDs {
 		listed = listed[:maxListedFailedIDs]
 		ellipsis = ", …"
 	}
+	// Built from the shared prefix rather than a second copy of it, so a
+	// reword of the constant cannot leave the summary reading the old text
+	// while the matcher above still passes.
 	summary := fmt.Sprintf(
-		"severity lookup failed (OSV/NVD/GitHub) for %d advisories; severities remain UNKNOWN (%s%s)",
-		len(failedIDs), strings.Join(listed, ", "), ellipsis,
+		"%s%d advisories; severities remain UNKNOWN (%s%s)",
+		severityLookupFailedPrefix, len(failedIDs), strings.Join(listed, ", "), ellipsis,
 	)
 	return slices.Insert(out, insertAt, summary)
 }

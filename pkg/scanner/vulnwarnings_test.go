@@ -59,6 +59,25 @@ func TestCollapseSeverityLookupWarnings(t *testing.T) {
 			},
 		},
 		{
+			// The caller enriches by ranging over a map, so the warnings reach
+			// this function in a different order on every run. The listed IDs
+			// and their order must not depend on that, or the summary churns
+			// between runs of the same scan.
+			name: "listed IDs are sorted, not first-seen",
+			in: []string{
+				failedWarning("GO-2026-0007"),
+				failedWarning("GO-2026-0003"),
+				failedWarning("GO-2026-0001"),
+				failedWarning("GO-2026-0006"),
+				failedWarning("GO-2026-0002"),
+				failedWarning("GO-2026-0005"),
+				failedWarning("GO-2026-0004"),
+			},
+			want: []string{
+				"severity lookup failed (OSV/NVD/GitHub) for 7 advisories; severities remain UNKNOWN (GO-2026-0001, GO-2026-0002, GO-2026-0003, GO-2026-0004, GO-2026-0005, …)",
+			},
+		},
+		{
 			// The same advisory can be reported under two modules; the second
 			// enrichment hits the cached failure and repeats the warning. One
 			// advisory is not a group, so it stays verbatim.
@@ -172,5 +191,21 @@ func TestEnricherWarningUsesSharedPrefix(t *testing.T) {
 	if !found {
 		t.Errorf("no warning carried %q; the collapse in ScanVulns would never match:\n%v",
 			severityLookupFailedPrefix, warnings)
+	}
+}
+
+// TestCollapsedSummaryUsesSharedPrefix ties the summary to the same constant
+// the emitter and the matcher use. Without it, rewording the constant leaves
+// the summary carrying the old text while every other test still passes.
+func TestCollapsedSummaryUsesSharedPrefix(t *testing.T) {
+	got := collapseSeverityLookupWarnings([]string{
+		failedWarning("GO-2026-0001"),
+		failedWarning("GO-2026-0002"),
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d warnings, want 1: %v", len(got), got)
+	}
+	if !strings.HasPrefix(got[0], severityLookupFailedPrefix) {
+		t.Errorf("summary %q does not start with %q", got[0], severityLookupFailedPrefix)
 	}
 }
