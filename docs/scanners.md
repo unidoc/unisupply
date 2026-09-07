@@ -199,6 +199,36 @@ See the upstream documentation for further precision-limit details:
 [Go Vulnerability Management](https://go.dev/security/vuln/) ·
 [govulncheck reference](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
 
+### Vulnerability identifiers in report output
+
+Human-facing output — text and PDF — identifies every advisory by its **Go
+advisory ID** (`GO-YYYY-NNNN`). That is the only identifier guaranteed to
+exist: govulncheck is the scan source, and not every advisory has a CVE (some
+carry only a GHSA alias, and fresh Go advisories may carry none at all). A
+CVE-first scheme would leave those findings without a name.
+
+CVE and GHSA identifiers are not dropped — they are collected into one place:
+
+- **Text report:** a `VULNERABILITY ID ALIASES` section between the stdlib
+  vulnerabilities and the summary.
+- **PDF report:** an "Appendix: Vulnerability ID Aliases" table.
+
+Advisories with no aliases are omitted from both, and the section disappears
+entirely when nothing in the report has an alias.
+
+CVE stays load-bearing internally: EPSS and KEV lookups are keyed by CVE ID
+(see below), and JSON output is unchanged by this convention — its
+per-vulnerability `aliases` array carries the full list, because it is the
+machine contract.
+
+**Repeated enrichment failures are collapsed.** When several advisories fail
+severity enrichment, the per-advisory `severity lookup failed …` warnings
+render as one line naming the count and the first five IDs (each advisory once,
+even when reported under more than one module). The collapse happens in the
+scanner, so the summary is what the top-level `warnings` array in JSON output
+contains as well; the per-vulnerability `enrichment_errors` array is not
+collapsed and remains the machine contract for which advisories failed.
+
 ### Threat-intel enrichment (EPSS + CISA KEV)
 
 Every CVE is enriched with two real-world exploitation signals:

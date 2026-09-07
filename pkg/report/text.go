@@ -225,14 +225,17 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "%s\n", c(colorDim, "These affect the Go standard library used to build dependencies."))
 		for i := range opts.StdlibVulns {
 			v := &opts.StdlibVulns[i]
-			aliases := strings.Join(v.Aliases, ", ")
-			fmt.Fprintf(w, "  %s %s (%s)\n", c(colorRed, v.ID), v.Summary, aliases)
+			fmt.Fprintf(w, "  %s %s\n", c(colorRed, v.ID), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
 		}
 		fmt.Fprintln(w)
 	}
+
+	// Alias glossary — the one place CVE and GHSA identifiers appear, now
+	// that report lines carry the Go advisory ID alone.
+	writeVulnAliasGlossary(w, ps, opts.StdlibVulns, c)
 
 	// Summary.
 	fmt.Fprintf(w, "──────────────────────────\n")
@@ -317,10 +320,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		}
 		for i := range ds.Vulns {
 			v := &ds.Vulns[i]
-			aliases := strings.Join(v.Aliases, ", ")
-			if aliases == "" {
-				aliases = v.ID
-			}
 			tag := reachabilityTag(v.Reachability)
 			displaySev := v.Severity
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
@@ -333,7 +332,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			if v.InKEV {
 				ti += " " + c(colorRed, "[KEV]")
 			}
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s — %s\n", v.ID, displaySev, tag, ti, aliases)
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySev, tag, ti)
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
 			}
@@ -918,4 +917,75 @@ func vulnReachabilityCountHeader(called, imported, required int) string {
 		parts = append(parts, fmt.Sprintf("%d required", required))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// vulnAliasEntry pairs a Go advisory ID with the external identifiers it is
+// also known by.
+type vulnAliasEntry struct {
+	ID      string
+	Aliases []string
+}
+
+// collectVulnAliases gathers the ID → aliases mapping for every advisory in
+// the report, deduplicated and sorted by ID.
+//
+// Aliases equal to the ID are dropped: govulncheck sometimes reports an
+// advisory whose only alias is itself, which used to render as the tautology
+// "GO-2026-5932 — GO-2026-5932". An advisory left with no aliases is omitted
+// entirely — there is nothing to translate.
+func collectVulnAliases(ps *scorer.ProjectScore, stdlib []scanner.Vulnerability) []vulnAliasEntry {
+	seen := make(map[string]map[string]bool)
+
+	collect := func(v *scanner.Vulnerability) {
+		for _, alias := range v.Aliases {
+			if alias == "" || alias == v.ID {
+				continue
+			}
+			if seen[v.ID] == nil {
+				seen[v.ID] = make(map[string]bool)
+			}
+			seen[v.ID][alias] = true
+		}
+	}
+
+	for _, ds := range ps.Dependencies {
+		for i := range ds.Vulns {
+			collect(&ds.Vulns[i])
+		}
+	}
+	for i := range stdlib {
+		collect(&stdlib[i])
+	}
+
+	entries := make([]vulnAliasEntry, 0, len(seen))
+	for id, aliasSet := range seen {
+		aliases := make([]string, 0, len(aliasSet))
+		for alias := range aliasSet {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		entries = append(entries, vulnAliasEntry{ID: id, Aliases: aliases})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	return entries
+}
+
+// writeVulnAliasGlossary renders the alias mapping. Report lines identify
+// advisories by their Go advisory ID, which is the only identifier
+// govulncheck guarantees; this section is where a reader translates one into
+// the CVE or GHSA their other tooling keys on. Omitted when no advisory in
+// the report has an alias.
+func writeVulnAliasGlossary(w io.Writer, ps *scorer.ProjectScore, stdlib []scanner.Vulnerability, c func(string, string) string) {
+	entries := collectVulnAliases(ps, stdlib)
+	if len(entries) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "\n%s\n", c(colorBold, "VULNERABILITY ID ALIASES"))
+	fmt.Fprintf(w, "%s\n", c(colorDim, strings.Repeat("─", 40)))
+	fmt.Fprintf(w, "%s\n", c(colorDim, "Report lines use the Go advisory ID; these are the same advisories elsewhere."))
+	for _, e := range entries {
+		fmt.Fprintf(w, "  %s = %s\n", e.ID, strings.Join(e.Aliases, ", "))
+	}
+	fmt.Fprintln(w)
 }

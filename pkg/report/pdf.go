@@ -89,6 +89,9 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
+	rep.Step("vulnerability ID appendix")
+	writeVulnAliasAppendix(c, ps, helvetica, helveticaBold)
+
 	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
 
@@ -587,6 +590,44 @@ func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInf
 	_ = c.Draw(table)
 }
 
+// writeVulnAliasAppendix renders the Go-advisory-ID → CVE/GHSA mapping. The
+// report identifies advisories by their Go advisory ID, the only identifier
+// govulncheck guarantees; this appendix is where a reader translates one into
+// the identifier their own tooling uses. Skipped when no advisory in the
+// report carries an alias.
+func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	// nil stdlib: PDFOptions carries no StdlibVulns, because the PDF has no
+	// stdlib-vulnerability section to alias in the first place (a text/PDF
+	// parity gap, tracked separately).
+	entries := collectVulnAliases(ps, nil)
+	if len(entries) == 0 {
+		return
+	}
+
+	c.NewPage()
+	heading(c, "Appendix: Vulnerability ID Aliases", bold)
+
+	intro := c.NewStyledParagraph()
+	intro.SetMargins(0, 0, 0, 10)
+	introChunk := intro.Append("Findings in this report identify each advisory by its Go advisory ID. " +
+		"The table below maps those to the CVE and GHSA identifiers for the same advisory.")
+	introChunk.Style.Font = regular
+	introChunk.Style.FontSize = 9
+	if err := c.Draw(intro); err != nil {
+		return
+	}
+
+	table := c.NewTable(2)
+	if err := table.SetColumnWidths(0.35, 0.65); err != nil {
+		return
+	}
+	addTableHeader(c, table, []string{"Go Advisory", "Also known as"}, bold)
+	for _, e := range entries {
+		addTableRow(c, table, e.ID, strings.Join(e.Aliases, ", "), regular, bold)
+	}
+	_ = c.Draw(table)
+}
+
 func writeMethodologyPage(c *creator.Creator, regular, bold *model.PdfFont) {
 	c.NewPage()
 	heading(c, "Methodology", bold)
@@ -758,7 +799,6 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	})
 	for i := range vulns {
 		v := &vulns[i]
-		aliases := strings.Join(v.Aliases, ", ")
 		// Append an inline reachability tag when the tier is not "called" (the
 		// most-severe tier).  Empty Reachability is treated as called for
 		// backward compatibility with non-govulncheck CVE sources.
@@ -771,7 +811,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		if v.InKEV {
 			ti += " [KEV — exploited in the wild]"
 		}
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s%s — %s", v.ID, v.Severity, reachTag, ti, aliases), regular)
+		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), regular)
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}

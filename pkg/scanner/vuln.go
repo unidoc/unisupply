@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -289,16 +290,17 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
 	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	var enrichWarnings []string
 	for modPath, modVulns := range results {
 		for i := range modVulns {
 			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
 				continue
 			}
-			enrichWarnings := enricher.Enrich(ctx, &modVulns[i])
-			warnings = append(warnings, enrichWarnings...)
+			enrichWarnings = append(enrichWarnings, enricher.Enrich(ctx, &modVulns[i])...)
 		}
 		results[modPath] = modVulns
 	}
+	warnings = append(warnings, collapseSeverityLookupWarnings(enrichWarnings)...)
 
 	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
 
@@ -519,4 +521,93 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 		}
 	}
 	return ""
+}
+
+// severityLookupFailedPrefix opens the enricher's per-advisory failure
+// message. Kept in one place so the emitter (vulnenrich.go), the matcher and
+// the collapsed summary cannot drift apart silently: rewording the constant
+// rewords all three at once.
+const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
+
+// maxListedFailedIDs caps how many advisory IDs the aggregate warning names
+// before eliding the rest.
+const maxListedFailedIDs = 5
+
+// collapseSeverityLookupWarnings replaces a run of per-advisory
+// "severity lookup failed" warnings with a single line naming the count and
+// the first few IDs. Every other warning passes through untouched, in order.
+//
+// A scan of a vulnerability-heavy module produced 21 near-identical lines,
+// which buried the warnings that were not repeats. The information is not
+// lost: each affected vulnerability keeps its own EnrichmentErrors entry,
+// which is what the JSON report exposes.
+func collapseSeverityLookupWarnings(warnings []string) []string {
+	var (
+		out       []string
+		failedIDs []string
+		seen      = make(map[string]struct{})
+		firstMsg  string
+		insertAt  = -1
+	)
+
+	for _, w := range warnings {
+		if !strings.HasPrefix(w, severityLookupFailedPrefix) {
+			out = append(out, w)
+			continue
+		}
+		if insertAt < 0 {
+			// Hold the position of the first collapsed warning so the summary
+			// lands where the group started rather than at the end, and keep
+			// the message itself for the single-failure case below.
+			insertAt = len(out)
+			firstMsg = w
+		}
+		id := strings.TrimPrefix(w, severityLookupFailedPrefix)
+		if i := strings.Index(id, ";"); i >= 0 {
+			id = id[:i]
+		}
+		// The same advisory can be reported under more than one module —
+		// parsing deduplicates by module@osvID, not globally — and the second
+		// enrichment hits the cached failure and re-emits the same warning.
+		// Count and list each advisory once so repeats neither inflate the
+		// count nor consume the displayed slots. The order here is the
+		// caller's map-iteration order, so the list is sorted below before
+		// anything is truncated or displayed.
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		failedIDs = append(failedIDs, id)
+	}
+
+	switch len(failedIDs) {
+	case 0:
+		return out
+	case 1:
+		// A single failure reads better as itself than as a summary of one.
+		// Passed through verbatim rather than rebuilt, so this function owns
+		// no second copy of the message the enricher writes.
+		return slices.Insert(out, insertAt, firstMsg)
+	}
+
+	// The caller enriches by ranging over a map, so failedIDs arrives in a
+	// different order on every run. Sort before truncating so the summary —
+	// which consumers diff between runs — names the same IDs in the same
+	// order for the same scan. GO/CVE IDs sort by year, then number.
+	sort.Strings(failedIDs)
+
+	listed := failedIDs
+	ellipsis := ""
+	if len(listed) > maxListedFailedIDs {
+		listed = listed[:maxListedFailedIDs]
+		ellipsis = ", …"
+	}
+	// Built from the shared prefix rather than a second copy of it, so a
+	// reword of the constant cannot leave the summary reading the old text
+	// while the matcher above still passes.
+	summary := fmt.Sprintf(
+		"%s%d advisories; severities remain UNKNOWN (%s%s)",
+		severityLookupFailedPrefix, len(failedIDs), strings.Join(listed, ", "), ellipsis,
+	)
+	return slices.Insert(out, insertAt, summary)
 }
