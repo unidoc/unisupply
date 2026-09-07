@@ -13,7 +13,7 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 9 security scanners        pkg/scanner/
+  ├── Run 10 security scanners       pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
@@ -21,8 +21,9 @@ CLI (pflag)
   │   ├── Resilience scoring
   │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
-  │   ├── Trust Index lookup (unitrust)
-  │   └── Build file scanning
+  │   ├── Build file scanning
+  │   ├── Integrity (go.mod replace/exclude audit)
+  │   └── Trust Index lookup (unitrust)
   ├── Compute risk scores             pkg/scorer/
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/
@@ -44,11 +45,27 @@ Risk Score (0-100) =
   + Typosquat Penalty      (0-20)
   + AI-Gen Penalty         (0-15)
   + Low-Resilience Penalty (0-6) // adds when resilience score < 30
+  + Replace Penalty        (0-20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
 ```
 
 Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
 
-## The 9 Scanners
+**Unavailable axes are excluded, not fabricated.** When a signal could not be
+collected (offline, rate-limited, scan failed) its weight is dropped from both
+the numerator and the denominator, and the surviving weights renormalize to 1.0.
+Vulnerabilities, Maintenance and Maintainer Risk are all excludable; Depth and
+Maturity never are, so the denominator floors at 0.25. Scoring an unmeasured
+axis as 0 would report a clean bill of health nobody earned; scoring it with an
+"unknown" constant reports a fabricated measurement as a finding.
+
+**A headline band requires enough measurement to earn one.** If the
+vulnerability scan did not run, three of the five headline candidates are
+CVE-derived and score 0, leaving the headline to rest on graph position and
+version scheme alone. In that case `overall_risk_level` is `UNKNOWN` with
+`headline_unscored_reason` set; `overall_risk_score` is still reported but is
+indicative only. Per-dependency `risk_level` always carries a real band.
+
+## The 10 Scanners
 
 | Scanner | What it checks | Data source |
 |---------|---------------|-------------|
@@ -60,6 +77,7 @@ Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
 | **AI-Generated** | Fresh modules, few releases, generic names | Heuristics |
 | **CI/CD** | Action pinning, permissions, secret exposure | .github/workflows/*.yml |
 | **Build Files** | Unpinned Docker images, curl\|bash patterns | Dockerfile, Makefile, *.sh |
+| **Integrity** | `go.mod` replace/exclude directive audit | `go.mod` (offline) |
 | **Trust Index** | Package trust scores from curated database | unitrust API |
 
 ## Integration with unitrust
@@ -98,6 +116,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 | `pkg/scanner/ci.go` | CI/CD pipeline audit |
 | `pkg/scanner/buildfiles.go` | Dockerfile/Makefile scanning |
 | `pkg/scanner/trustindex.go` | unitrust API integration |
+| `pkg/scanner/integrity.go` | `go.mod` replace/exclude directive audit |
 | `pkg/scorer/risk.go` | Risk score computation |
 | `pkg/policy/engine.go` | Organizational policy evaluation |
 | `pkg/report/text.go` | Terminal output |
@@ -130,13 +149,16 @@ unisupply ./ --policy-preset strict
 unisupply ./ --policy ./my-policy.json
 
 # Filter output
-unisupply ./ --min-risk medium --show-only vulnerabilities,maintenance
+unisupply ./ --min-risk 26 --show-only vulnerabilities,maintenance
 
 # Progress output (default: auto — TTY spinner if stderr is a terminal,
 # timestamped lines otherwise). Always writes to stderr; never contaminates
 # stdout, so it is safe with `--format json` piped to a consumer.
 unisupply ./ --progress plain 2> progress.log         # capture log
 unisupply ./ --progress none --format json > out.json # fully silent
+
+# Observe outbound network traffic (stderr only; verifies the README contract)
+unisupply ./ --network-log 2> net.log
 ```
 
 ### Environment variables
@@ -160,6 +182,8 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
   "no_archived": true,
   "no_typosquatting": true,
   "max_ci_score": 50,
+  "forbid_replace_redirect": true,
+  "require_gosum_verified": true,
   "blocked_modules": ["github.com/suspicious/pkg"],
   "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
@@ -231,7 +255,7 @@ just clean                     # remove artifacts
 
 ## Status
 
-**v0.4.0 — Feature complete.** All 9 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
+**v0.4.0 — Feature complete.** All 10 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
 
 ## Relationship to UniDoc ecosystem
 

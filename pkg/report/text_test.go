@@ -62,6 +62,49 @@ func TestWriteText_ContainsSummary(t *testing.T) {
 	}
 }
 
+// TestWriteText_UnscoredHeadline covers the UNKNOWN headline rendering. Both
+// switches it flows through (riskColor and overallExplanation) previously fell
+// to a `default` branch meaning LOW — green, with the text "no known
+// vulnerabilities were found". On a scan that never looked for vulnerabilities
+// that is the single most misleading sentence the report could print, so this
+// test asserts it is gone as much as it asserts UNKNOWN is present.
+func TestWriteText_UnscoredHeadline(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	ps := &scorer.ProjectScore{
+		OverallScore:           26,
+		OverallLevel:           scorer.RiskUnknown,
+		HeadlineUnscoredReason: "vulnerability scan did not run — test reason",
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 26, RiskLevel: scorer.RiskMedium},
+		},
+		Warnings: []string{"vulnerability scan did not run"},
+	}
+
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	output := opts.Writer.(*bytes.Buffer).String()
+
+	for _, want := range []string{"UNKNOWN — not scored", "indicative: 26/100", "test reason", "No verdict"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q", want)
+		}
+	}
+
+	// The false-assurance sentence from the LOW branch must not appear.
+	if strings.Contains(output, "no known vulnerabilities were found") {
+		t.Error("unscored headline rendered the LOW explanation claiming no vulnerabilities were found")
+	}
+	// "26/100 (UNKNOWN)" would read as a scored 26; the band must lead.
+	if strings.Contains(output, "26/100 (UNKNOWN)") {
+		t.Error("headline presented the indicative number as a scored band")
+	}
+}
+
 // TestWriteText_NoColor tests that noColor=true removes ANSI codes.
 func TestWriteText_NoColor(t *testing.T) {
 	graph := testutil.MakeGraph(
@@ -350,6 +393,105 @@ func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 
 	if !strings.Contains(output, "transitive") {
 		t.Error("Output should contain 'transitive' label")
+	}
+}
+
+// TestWriteText_LowRiskVulnDetail tests that low-risk dependencies carrying
+// vulnerabilities render full detail in both verbose and non-verbose modes,
+// and that verbose mode also expands vuln-free low-risk dependencies.
+func TestWriteText_LowRiskVulnDetail(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{
+			Path:    "vulnerable-low-pkg",
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   1,
+		},
+		testutil.DepSpec{
+			Path:    "clean-low-pkg",
+			Version: "v1.0.0",
+			Direct:  false,
+			Depth:   1,
+		},
+	)
+
+	makeScore := func() *scorer.ProjectScore {
+		return &scorer.ProjectScore{
+			OverallScore: 10,
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{
+				{
+					Module:    "vulnerable-low-pkg",
+					Version:   "v1.0.0",
+					Direct:    false,
+					RiskScore: 12,
+					RiskLevel: scorer.RiskLow,
+					Vulns: []scanner.Vulnerability{
+						{
+							ID:           "GO-2026-5005",
+							Summary:      "Critical flaw in low-risk dep",
+							Severity:     "CRITICAL",
+							FixedVersion: "v1.1.0",
+						},
+					},
+				},
+				{
+					Module:    "clean-low-pkg",
+					Version:   "v1.0.0",
+					Direct:    false,
+					RiskScore: 5,
+					RiskLevel: scorer.RiskLow,
+				},
+			},
+			LowRiskCount: 2,
+			TotalVulns:   1,
+		}
+	}
+
+	for _, verbose := range []bool{true, false} {
+		opts := TextOptions{
+			NoColor: true,
+			Writer:  &bytes.Buffer{},
+			Verbose: verbose,
+		}
+
+		err := WriteText(graph, makeScore(), &opts)
+		if err != nil {
+			t.Fatalf("WriteText(verbose=%v) failed: %v", verbose, err)
+		}
+
+		output := opts.Writer.(*bytes.Buffer).String()
+
+		if !strings.Contains(output, "GO-2026-5005") {
+			t.Errorf("verbose=%v: output should contain vulnerability ID 'GO-2026-5005' for low-risk dep", verbose)
+		}
+
+		if !strings.Contains(output, "Fix available: v1.1.0") {
+			t.Errorf("verbose=%v: output should contain fix version for low-risk dep vulnerability", verbose)
+		}
+
+		if verbose {
+			// Vuln-free low-risk deps now expand fully under verbose: the
+			// bullet line renders and a detail line (├─ or └─) follows it.
+			lines := strings.Split(output, "\n")
+			found := false
+			for i, line := range lines {
+				if !strings.Contains(line, "clean-low-pkg") {
+					continue
+				}
+				found = true
+				if i+1 >= len(lines) || (!strings.Contains(lines[i+1], "├─") && !strings.Contains(lines[i+1], "└─")) {
+					t.Errorf("verbose=true: vuln-free low-risk dep should render detail lines after %q", line)
+				}
+			}
+			if !found {
+				t.Error("verbose=true: output should list vuln-free low-risk dep")
+			}
+		} else {
+			if !strings.Contains(output, "[1 more without vulnerabilities — use --verbose]") {
+				t.Error("verbose=false: output should note remaining vuln-free low-risk deps")
+			}
+		}
 	}
 }
 

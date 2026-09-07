@@ -655,6 +655,49 @@ replace github.com/original/pkg => ./local/replacement
 	}
 }
 
+// TestResolve_VersionScopedReplace tests that a replace directive scoped to a
+// version other than the selected one does not mark the dependency as replaced,
+// while a matching version-scoped replace does.
+func TestResolve_VersionScopedReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	gomodPath := tmpDir + "/go.mod"
+
+	content := `module github.com/test/pkg
+
+go 1.21
+
+require (
+	github.com/matched/pkg v1.0.0
+	github.com/unmatched/pkg v2.0.0
+)
+
+replace github.com/matched/pkg v1.0.0 => github.com/fork/matched v1.0.1
+
+replace github.com/unmatched/pkg v1.0.0 => github.com/fork/unmatched v1.0.1
+`
+
+	if err := writeFile(gomodPath, content); err != nil {
+		t.Fatalf("Failed to write go.mod: %v", err)
+	}
+
+	graph, _, err := Resolve(context.Background(), gomodPath, true)
+	if err != nil {
+		t.Fatalf("Resolve() failed: %v", err)
+	}
+
+	if dep, ok := graph.Dependencies["github.com/matched/pkg"]; !ok {
+		t.Error("Expected to find github.com/matched/pkg in dependencies")
+	} else if !dep.Replaced {
+		t.Error("Expected github.com/matched/pkg to be marked as replaced (replace matches selected version)")
+	}
+
+	if dep, ok := graph.Dependencies["github.com/unmatched/pkg"]; !ok {
+		t.Error("Expected to find github.com/unmatched/pkg in dependencies")
+	} else if dep.Replaced {
+		t.Error("Expected github.com/unmatched/pkg to NOT be marked as replaced (replace is scoped to an unselected version)")
+	}
+}
+
 // TestResolve_MultipleIndirectDependencies tests handling multiple indirect dependencies
 func TestResolve_MultipleIndirectDependencies(t *testing.T) {
 	tmpDir := t.TempDir()

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +29,19 @@ type AIGenRisk struct {
 	// risk_factors list. Single-indicator hits still populate Indicators for
 	// transparency but do not trigger the promotion.
 	MeetsPromotionGate bool `json:"meets_promotion_gate"`
+
+	// DataAvailable is false when the detector could not run at all because the
+	// module's first-release date was unknown — every indicator here is derived
+	// from it. It distinguishes "analyzed, not AI-generated" from "never
+	// analyzed": both produce RiskLevel "none" with Score 0, and ScanAll keeps
+	// only scoring entries, so without this flag an unanalyzed module is
+	// indistinguishable from a cleared one.
+	//
+	// Note the serialized field is always true in practice: ScanAll drops every
+	// Score == 0 entry, and an unexamined module always scores 0. The flag earns
+	// its keep as ScanAll's internal counter, which produces the unexamined-count
+	// warning. Consumers should read that warning, not this field.
+	DataAvailable bool `json:"data_available"`
 }
 
 // AIGenScanner detects patterns common in AI-generated supply chain attacks.
@@ -52,22 +66,36 @@ func (s *AIGenScanner) ScanAll(
 	graph *resolver.Graph,
 	maintainers map[string]*MaintainerInfo,
 	resilience map[string]*ResilienceInfo,
-) map[string]*AIGenRisk {
+) (risks map[string]*AIGenRisk, warnings []string) {
 	rep := progress.From(ctx)
 	total := len(graph.Dependencies)
 	results := make(map[string]*AIGenRisk)
 
+	unavailable := 0
 	i := 0
 	for _, dep := range graph.Dependencies {
 		i++
 		risk := s.analyzeModule(dep, maintainers[dep.Module.Path], resilience[dep.Module.Path])
+		if !risk.DataAvailable {
+			unavailable++
+		}
 		if risk.Score > 0 {
 			results[dep.Module.Path] = risk
 		}
 		rep.Progress(i, total)
 	}
 
-	return results
+	// Every indicator this detector uses derives from the first-release date, so
+	// without it the module is not cleared — it is unexamined. Both outcomes
+	// leave the result map empty, so silence here reads as "checked, nothing
+	// found". Say so instead.
+	if unavailable > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"AI-generated-code detection did not run for %d of %d module(s) — first-release date unknown, so these modules are unexamined rather than cleared",
+			unavailable, total))
+	}
+
+	return results, warnings
 }
 
 func (s *AIGenScanner) analyzeModule(
@@ -83,10 +111,18 @@ func (s *AIGenScanner) analyzeModule(
 	// the module was first published. Rather than false-flag from missing data,
 	// skip the detector entirely. This covers ri == nil, non-GitHub hosts, and
 	// cases where the GitHub API was unauthenticated.
+	//
+	// DataAvailable stays false here, and only here: the caller counts it to warn
+	// that the detector did not run. Offline this is every module, which is why
+	// the README must not list AI-gen among the scanners offline leaves intact.
 	if ri == nil || ri.FirstReleaseDate.IsZero() {
 		risk.RiskLevel = "none"
 		return risk
 	}
+
+	// Past this point the first-release date is known, so the detector ran and
+	// its verdict — including "none" — is a real result.
+	risk.DataAvailable = true
 
 	// Hard exclusion: modules first released before ChatGPT's public launch
 	// (2022-11-01) cannot be AI-hallucination-registered attack packages.

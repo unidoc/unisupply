@@ -6,10 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"golang.org/x/vuln/scan"
+
+	"github.com/unidoc/unisupply/pkg/offline"
 )
 
 // Vulnerability represents a known vulnerability for a module.
@@ -74,6 +78,41 @@ type Vulnerability struct {
 	// failed (EnrichmentFailed==true). At most one entry: the consolidated
 	// "severity lookup failed (OSV/NVD/GitHub)" warning message.
 	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
+
+	// Threat-intel enrichment — populated from EPSS and CISA KEV lookups.
+	// Both influence scoring (EPSS amplifier, KEV override); see
+	// docs/scanners.md "Threat-intel enrichment" for the full tables.
+	// Lookups are keyed by CVE ID: for GO-*/GHSA-* vulns the first CVE-*
+	// alias is used; vulns without a CVE alias have no threat-intel data
+	// (expected, not an error).
+
+	// EPSSScore is FIRST.org's estimated probability (0.0–1.0) that the CVE
+	// will be exploited within the next 30 days. Pointer-typed so absence
+	// (lookup failed or no CVE alias) is distinguishable from a real 0.0.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+
+	// EPSSPercentile is the score's percentile rank against all scored CVEs.
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+
+	// EPSSDate is the date the EPSS score was computed (YYYY-MM-DD).
+	EPSSDate string `json:"epss_date,omitempty"`
+
+	// InKEV is true when the CVE appears in CISA's Known Exploited
+	// Vulnerabilities catalog. Serialized only when the KEV catalog was
+	// actually consulted (see KEVChecked): absent means "not checked",
+	// false means "checked and not listed".
+	InKEV bool `json:"in_kev,omitempty"`
+
+	// KEVChecked is true when the KEV catalog was loaded and this vuln had a
+	// CVE alias to look up — i.e. InKEV is a real answer, not a default.
+	KEVChecked bool `json:"kev_checked,omitempty"`
+
+	// KEVDateAdded is the date CISA added the CVE to the catalog.
+	KEVDateAdded string `json:"kev_date_added,omitempty"`
+
+	// KEVRansomware is CISA's knownRansomwareCampaignUse field:
+	// "Known", "Unknown", or "" when not in KEV.
+	KEVRansomware string `json:"kev_known_ransomware,omitempty"`
 
 	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
 	PublishedAt *time.Time `json:"published_at,omitempty"`
@@ -192,7 +231,22 @@ func classifyReachability(trace []traceEntry) string {
 // The default govulncheck invocation (-json ./...) already emits all three
 // reachability levels (called, imported, required) in the JSON stream — no
 // additional CLI flag is needed to enable reachability data.
-func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, err error) {
+// The `scanned` return reports whether govulncheck actually analyzed the module
+// graph. It exists because an empty vulns map is ambiguous — "scanned, nothing
+// found" and "never ran" look identical — and because most failures here surface
+// as a warning with a nil error, so a caller checking only err would read a
+// failed scan as a clean one. The scorer excludes the 40% vulnerability weight
+// when this is false; see scorer.ScoreInput.VulnScanUnavailable.
+func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
+	if offline.Enabled() {
+		// govulncheck runs in-process and reaches vuln.go.dev through
+		// http.DefaultClient, so offline mode would refuse its requests and
+		// leave a transport error dressed up as a scan failure. Skip it
+		// outright and say why: an empty vulnerability set with no explanation
+		// reads as "no vulnerabilities found", which is the one wrong answer.
+		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, false, nil
+	}
+
 	var stdout bytes.Buffer
 
 	var stderrBuf bytes.Buffer
@@ -202,7 +256,7 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("starting govulncheck: %w", err)
+		return nil, nil, false, fmt.Errorf("starting govulncheck: %w", err)
 	}
 	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that
 	// case via jsonHandler.Flush), so exitErr != nil only signals a real scan failure.
@@ -226,28 +280,114 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	if stdout.Len() == 0 {
 		warnings = append(warnings, "govulncheck produced no output")
-		return nil, warnings, nil
+		return nil, warnings, false, nil
 	}
 
 	results, err := parseGovulncheckJSON(&stdout)
 	if err != nil {
-		return nil, append(warnings, err.Error()), nil
+		return nil, append(warnings, err.Error()), false, nil
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
 	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	var enrichWarnings []string
 	for modPath, modVulns := range results {
 		for i := range modVulns {
 			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
 				continue
 			}
-			enrichWarnings := enricher.Enrich(ctx, &modVulns[i])
-			warnings = append(warnings, enrichWarnings...)
+			enrichWarnings = append(enrichWarnings, enricher.Enrich(ctx, &modVulns[i])...)
+		}
+		results[modPath] = modVulns
+	}
+	warnings = append(warnings, collapseSeverityLookupWarnings(enrichWarnings)...)
+
+	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
+
+	// A non-nil exitErr means govulncheck failed even though it emitted parseable
+	// output, so the results are partial. Report the axis as unmeasured rather
+	// than scoring an incomplete scan as a complete one.
+	return results, warnings, exitErr == nil, nil
+}
+
+// CVEAlias returns the CVE ID to use for threat-intel lookups on v: the ID
+// itself when it is a CVE, otherwise the first valid CVE-* alias. Empty when
+// the vuln has no CVE identifier — EPSS and KEV only index CVE IDs, so such
+// vulns (common for fresh GO-* advisories) have no threat-intel data.
+func CVEAlias(v *Vulnerability) string {
+	if strings.HasPrefix(v.ID, "CVE-") && validateVulnID(v.ID) {
+		return v.ID
+	}
+	for _, alias := range v.Aliases {
+		if strings.HasPrefix(alias, "CVE-") && validateVulnID(alias) {
+			return alias
+		}
+	}
+	return ""
+}
+
+// enrichThreatIntel populates EPSS and KEV fields on every vulnerability that
+// has a CVE alias. Both lookups are best-effort: failures produce warnings,
+// never errors — the scan completes with the threat-intel fields absent.
+func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string) {
+	// Collect the distinct CVE IDs across all vulns.
+	cveSet := make(map[string]bool)
+	for _, modVulns := range results {
+		for i := range modVulns {
+			if cve := CVEAlias(&modVulns[i]); cve != "" {
+				cveSet[cve] = true
+			}
+		}
+	}
+	if len(cveSet) == 0 {
+		return nil
+	}
+	cveIDs := make([]string, 0, len(cveSet))
+	for cve := range cveSet {
+		cveIDs = append(cveIDs, cve)
+	}
+	sort.Strings(cveIDs)
+
+	epss, epssErr := ti.LookupEPSS(ctx, cveIDs)
+	if epssErr != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"EPSS lookup incomplete; exploitation probability may be missing for some CVEs: %v", epssErr))
+	}
+
+	kev, kevErr := ti.LoadKEV(ctx)
+	if kevErr != nil {
+		warnings = append(warnings, fmt.Sprintf(
+			"CISA KEV catalog unavailable; known-exploited status unchecked: %v", kevErr))
+	}
+
+	for modPath, modVulns := range results {
+		for i := range modVulns {
+			v := &modVulns[i]
+			cve := CVEAlias(v)
+			if cve == "" {
+				continue
+			}
+			if entry, ok := epss[cve]; ok {
+				score, percentile := entry.Score, entry.Percentile
+				v.EPSSScore = &score
+				v.EPSSPercentile = &percentile
+				v.EPSSDate = entry.Date
+			}
+			// A nil kev map means the catalog could not be loaded — leave
+			// KEVChecked false so consumers see "not checked", not "not listed".
+			if kev != nil {
+				v.KEVChecked = true
+				if entry, ok := kev[cve]; ok {
+					v.InKEV = true
+					v.KEVDateAdded = entry.DateAdded
+					v.KEVRansomware = entry.KnownRansomwareCampaignUse
+				}
+			}
 		}
 		results[modPath] = modVulns
 	}
 
-	return results, warnings, nil
+	return warnings
 }
 
 func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error) {
@@ -381,4 +521,93 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 		}
 	}
 	return ""
+}
+
+// severityLookupFailedPrefix opens the enricher's per-advisory failure
+// message. Kept in one place so the emitter (vulnenrich.go), the matcher and
+// the collapsed summary cannot drift apart silently: rewording the constant
+// rewords all three at once.
+const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
+
+// maxListedFailedIDs caps how many advisory IDs the aggregate warning names
+// before eliding the rest.
+const maxListedFailedIDs = 5
+
+// collapseSeverityLookupWarnings replaces a run of per-advisory
+// "severity lookup failed" warnings with a single line naming the count and
+// the first few IDs. Every other warning passes through untouched, in order.
+//
+// A scan of a vulnerability-heavy module produced 21 near-identical lines,
+// which buried the warnings that were not repeats. The information is not
+// lost: each affected vulnerability keeps its own EnrichmentErrors entry,
+// which is what the JSON report exposes.
+func collapseSeverityLookupWarnings(warnings []string) []string {
+	var (
+		out       []string
+		failedIDs []string
+		seen      = make(map[string]struct{})
+		firstMsg  string
+		insertAt  = -1
+	)
+
+	for _, w := range warnings {
+		if !strings.HasPrefix(w, severityLookupFailedPrefix) {
+			out = append(out, w)
+			continue
+		}
+		if insertAt < 0 {
+			// Hold the position of the first collapsed warning so the summary
+			// lands where the group started rather than at the end, and keep
+			// the message itself for the single-failure case below.
+			insertAt = len(out)
+			firstMsg = w
+		}
+		id := strings.TrimPrefix(w, severityLookupFailedPrefix)
+		if i := strings.Index(id, ";"); i >= 0 {
+			id = id[:i]
+		}
+		// The same advisory can be reported under more than one module —
+		// parsing deduplicates by module@osvID, not globally — and the second
+		// enrichment hits the cached failure and re-emits the same warning.
+		// Count and list each advisory once so repeats neither inflate the
+		// count nor consume the displayed slots. The order here is the
+		// caller's map-iteration order, so the list is sorted below before
+		// anything is truncated or displayed.
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		failedIDs = append(failedIDs, id)
+	}
+
+	switch len(failedIDs) {
+	case 0:
+		return out
+	case 1:
+		// A single failure reads better as itself than as a summary of one.
+		// Passed through verbatim rather than rebuilt, so this function owns
+		// no second copy of the message the enricher writes.
+		return slices.Insert(out, insertAt, firstMsg)
+	}
+
+	// The caller enriches by ranging over a map, so failedIDs arrives in a
+	// different order on every run. Sort before truncating so the summary —
+	// which consumers diff between runs — names the same IDs in the same
+	// order for the same scan. GO/CVE IDs sort by year, then number.
+	sort.Strings(failedIDs)
+
+	listed := failedIDs
+	ellipsis := ""
+	if len(listed) > maxListedFailedIDs {
+		listed = listed[:maxListedFailedIDs]
+		ellipsis = ", …"
+	}
+	// Built from the shared prefix rather than a second copy of it, so a
+	// reword of the constant cannot leave the summary reading the old text
+	// while the matcher above still passes.
+	summary := fmt.Sprintf(
+		"%s%d advisories; severities remain UNKNOWN (%s%s)",
+		severityLookupFailedPrefix, len(failedIDs), strings.Join(listed, ", "), ellipsis,
+	)
+	return slices.Insert(out, insertAt, summary)
 }

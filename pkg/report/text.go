@@ -28,13 +28,14 @@ const (
 
 // TextOptions configures text output.
 type TextOptions struct {
-	NoColor     bool
-	Verbose     bool
-	MinRisk     int
-	Writer      io.Writer
-	CIReport    *scanner.CIReport
-	Takeovers   []*scanner.MaintainerInfo
-	StdlibVulns []scanner.Vulnerability
+	NoColor         bool
+	Verbose         bool
+	MinRisk         int
+	Writer          io.Writer
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
+	StdlibVulns     []scanner.Vulnerability
 }
 
 // WriteText generates the human-readable terminal output.
@@ -60,11 +61,19 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score (four-candidate headline).
+	// Overall score (five-candidate headline).
 	scoreColor := riskColor(ps.OverallLevel)
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
-	fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
-		c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	if ps.OverallLevel == scorer.RiskUnknown {
+		// Lead with UNKNOWN and label the number as indicative. "26/100
+		// (UNKNOWN)" reads as a scored 26; the band has to come first.
+		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
+			c(scoreColor, fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)))
+		fmt.Fprintf(w, "  Why: %s\n", ps.HeadlineUnscoredReason)
+	} else {
+		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
+			c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
+	}
 	if ps.HeadlineCandidate != nil {
 		hc := ps.HeadlineCandidate
 		switch {
@@ -84,7 +93,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
 		}
 	}
-	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallScore, ps.OverallLevel))
+	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallLevel, hasExploitEvidence(ps)))
 	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
 
 	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
@@ -168,7 +177,8 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "%s\n", c(colorGreen, strings.Repeat("─", 40)))
 		if opts.Verbose {
 			for _, ds := range low {
-				writeDependencyDetail(w, ds, c, false)
+				// Verbose shows full detail for every dep, regardless of vulns.
+				writeDependencyDetail(w, ds, c, true)
 			}
 		} else {
 			// Always show deps with vulns even in low risk.
@@ -197,6 +207,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		writeCIReportText(w, opts.CIReport, c)
 	}
 
+	// Module directives section — always rendered when the scanner ran, so
+	// reviewers can confirm the audit happened even when there are no findings.
+	if opts.IntegrityReport != nil {
+		writeIntegrityReportText(w, opts.IntegrityReport, c)
+	}
+
 	// Takeover Candidates section.
 	if len(opts.Takeovers) > 0 {
 		writeTakeoverText(w, opts.Takeovers, c)
@@ -207,15 +223,19 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "\n%s\n", c(colorRed, fmt.Sprintf("STDLIB VULNERABILITIES (%d found)", len(opts.StdlibVulns))))
 		fmt.Fprintf(w, "%s\n", c(colorRed, strings.Repeat("─", 40)))
 		fmt.Fprintf(w, "%s\n", c(colorDim, "These affect the Go standard library used to build dependencies."))
-		for _, v := range opts.StdlibVulns {
-			aliases := strings.Join(v.Aliases, ", ")
-			fmt.Fprintf(w, "  %s %s (%s)\n", c(colorRed, v.ID), v.Summary, aliases)
+		for i := range opts.StdlibVulns {
+			v := &opts.StdlibVulns[i]
+			fmt.Fprintf(w, "  %s %s\n", c(colorRed, v.ID), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
 		}
 		fmt.Fprintln(w)
 	}
+
+	// Alias glossary — the one place CVE and GHSA identifiers appear, now
+	// that report lines carry the Go advisory ID alone.
+	writeVulnAliasGlossary(w, ps, opts.StdlibVulns, c)
 
 	// Summary.
 	fmt.Fprintf(w, "──────────────────────────\n")
@@ -230,6 +250,18 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
 	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
 	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
+	// Scan limitations. Without this block a degraded scan — offline, rate
+	// limited, vuln DB unreachable — renders identically to a complete one,
+	// and "Vulnerabilities found: 0" reads as a clean bill of health rather
+	// than as a scan that never looked. Warnings reached JSON only until now.
+	if len(ps.Warnings) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN LIMITATIONS — the results above are incomplete\n")
+		for _, warning := range ps.Warnings {
+			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	}
+
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintf(w, "Full report: unisupply -f pdf\n")
@@ -268,8 +300,8 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		// Compute per-tier counts. Empty Reachability is treated as "called"
 		// for backward compatibility with non-govulncheck CVE sources.
 		var nCalled, nImported, nRequired int
-		for _, v := range ds.Vulns {
-			switch v.Reachability {
+		for i := range ds.Vulns {
+			switch ds.Vulns[i].Reachability {
 			case "imported":
 				nImported++
 			case "required":
@@ -286,17 +318,21 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 				c(colorDim, "Vulnerabilities:"),
 				vulnReachabilityCountHeader(nCalled, nImported, nRequired))
 		}
-		for _, v := range ds.Vulns {
-			aliases := strings.Join(v.Aliases, ", ")
-			if aliases == "" {
-				aliases = v.ID
-			}
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
 			tag := reachabilityTag(v.Reachability)
 			displaySev := v.Severity
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				displaySev = "UNKNOWN"
 			}
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s — %s\n", v.ID, displaySev, tag, aliases)
+			// Threat-intel badges: EPSS exploitation probability and KEV
+			// status. KEV is colored like CRITICAL — confirmed exploitation
+			// in the wild.
+			ti := epssBadge(v)
+			if v.InKEV {
+				ti += " " + c(colorRed, "[KEV]")
+			}
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySev, tag, ti)
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
 			}
@@ -427,9 +463,24 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		}
 	}
 
-	// Risk score breakdown.
-	breakdown := fmt.Sprintf("vuln=%.0f×40%% maint=%.0f×25%% depth=%.0f×15%% maintainer=%.0f×10%% maturity=%.0f×10%%",
-		ds.VulnScore, ds.MaintenanceScore, ds.DepthScore, ds.MaintainerScore, ds.MaturityScore)
+	// Risk score breakdown. The printed weights are the *effective* ones: when
+	// an axis is unavailable it is dropped from the denominator, so the nominal
+	// 40/25/15/10/10 no longer describes the arithmetic. Printing the nominal
+	// weights next to a renormalized score would contradict the score on the
+	// same line, which is the opposite of a defensible breakdown.
+	axis := func(label string, score, weight float64, excluded bool) string {
+		if excluded {
+			return fmt.Sprintf("%s=n/a", label)
+		}
+		return fmt.Sprintf("%s=%.0f×%.0f%%", label, score, weight/ds.MeasuredWeight*100)
+	}
+	breakdown := strings.Join([]string{
+		axis("vuln", ds.VulnScore, scorer.WeightVulnerabilities, ds.VulnWeightExcluded),
+		axis("maint", ds.MaintenanceScore, scorer.WeightMaintenance, ds.MaintenanceWeightExcluded),
+		axis("depth", ds.DepthScore, scorer.WeightDepthRisk, false),
+		axis("maintainer", ds.MaintainerScore, scorer.WeightMaintainerRisk, ds.MaintainerWeightExcluded),
+		axis("maturity", ds.MaturityScore, scorer.WeightMaturity, false),
+	}, " ")
 	if ds.ResilienceBonus > 0 {
 		breakdown += fmt.Sprintf(" +resilience=%.1f", ds.ResilienceBonus)
 	}
@@ -439,11 +490,25 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	if ds.TyposquatBonus > 0 {
 		breakdown += fmt.Sprintf(" +typosquat=%.1f", ds.TyposquatBonus)
 	}
+	if ds.IntegrityBonus > 0 {
+		breakdown += fmt.Sprintf(" +integrity(replace)=%.1f", ds.IntegrityBonus)
+	}
 	if ds.FlooredTo > 0 {
 		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
 	}
-	if ds.MaintainerWeightExcluded {
-		breakdown += " [renorm: maintainer excl.]"
+	if ds.MeasuredWeight < 1.0 {
+		var excl []string
+		if ds.VulnWeightExcluded {
+			excl = append(excl, "vuln")
+		}
+		if ds.MaintenanceWeightExcluded {
+			excl = append(excl, "maint")
+		}
+		if ds.MaintainerWeightExcluded {
+			excl = append(excl, "maintainer")
+		}
+		breakdown += fmt.Sprintf(" [renorm: %s excl., %.0f%% of model measured]",
+			strings.Join(excl, "+"), ds.MeasuredWeight*100)
 	}
 	fmt.Fprintf(w, "  ├─ %s %s\n", c(colorDim, "Score breakdown:"), breakdown)
 
@@ -505,6 +570,30 @@ func writeCIReportText(w io.Writer, ciReport *scanner.CIReport, c func(string, s
 	fmt.Fprintln(w)
 }
 
+func writeIntegrityReportText(w io.Writer, ir *scanner.IntegrityReport, c func(string, string) string) {
+	fmt.Fprintf(w, "\n%s\n", c(colorBold, "MODULE DIRECTIVES"))
+	fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
+	fmt.Fprintf(w, "  Replace directives: %d (%d redirect to a different module)\n", ir.ReplaceCount, ir.RedirectCount)
+	fmt.Fprintf(w, "  Exclude directives: %d\n", ir.ExcludeCount)
+	fmt.Fprintf(w, "  Pseudo-version pins: %d\n", ir.PseudoVersionCount)
+	if ir.GoSumVerified != "" {
+		fmt.Fprintf(w, "  go.sum verification (go mod verify): %s\n", c(gosumColor(ir.GoSumVerified), gosumLabel(ir.GoSumVerified)))
+	}
+	fmt.Fprintln(w)
+
+	if len(ir.Findings) == 0 {
+		fmt.Fprintf(w, "  No findings\n")
+		return
+	}
+
+	for _, f := range ir.Findings {
+		sColor := integrityRiskColor(f.Severity)
+		fmt.Fprintf(w, "  %s %s\n", c(sColor, "["+string(f.Severity)+"]"), f.Detail)
+		fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fix:"), f.Remediation)
+	}
+	fmt.Fprintln(w)
+}
+
 func writeTakeoverText(w io.Writer, takeovers []*scanner.MaintainerInfo, c func(string, string) string) {
 	fmt.Fprintf(w, "\n%s\n", c(colorCyan, "PACKAGES ELIGIBLE FOR MAINTENANCE TAKEOVER"))
 	fmt.Fprintf(w, "%s\n", c(colorCyan, strings.Repeat("─", 40)))
@@ -530,6 +619,10 @@ func riskColor(level scorer.RiskLevel) string {
 		return colorOrange
 	case scorer.RiskMedium:
 		return colorYellow
+	case scorer.RiskUnknown:
+		// Not green. An unscored headline must not read as a pass at a glance —
+		// the colour is the first thing seen and the default here was green.
+		return colorDim
 	default:
 		return colorGreen
 	}
@@ -545,6 +638,50 @@ func ciRiskColor(level scanner.CIRiskLevel) string {
 		return colorYellow
 	default:
 		return colorGreen
+	}
+}
+
+// gosumLabel renders IntegrityReport.GoSumVerified in honest-UNKNOWN style:
+// only a confirmed pass says "verified", only a confirmed mismatch says
+// "FAILED"; everything else is explicitly not-a-result.
+func gosumLabel(state string) string {
+	switch state {
+	case scanner.GoSumVerifiedTrue:
+		return "verified"
+	case scanner.GoSumVerifiedFalse:
+		return "FAILED — checksum mismatch"
+	case scanner.GoSumVerifiedOffline:
+		return "UNKNOWN (offline — verification skipped)"
+	case scanner.GoSumVerifiedSkipped:
+		return "UNKNOWN (skipped — verification could not run to completion)"
+	default:
+		return state
+	}
+}
+
+func gosumColor(state string) string {
+	switch state {
+	case scanner.GoSumVerifiedTrue:
+		return colorGreen
+	case scanner.GoSumVerifiedFalse:
+		return colorRed
+	default:
+		return colorDim
+	}
+}
+
+func integrityRiskColor(level scanner.IntegrityRiskLevel) string {
+	switch level {
+	case scanner.IntegrityCritical:
+		return colorRed
+	case scanner.IntegrityHigh:
+		return colorOrange
+	case scanner.IntegrityMedium:
+		return colorYellow
+	case scanner.IntegrityLow:
+		return colorGreen
+	default:
+		return colorDim
 	}
 }
 
@@ -575,10 +712,37 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 	return count
 }
 
-func overallExplanation(score int, level scorer.RiskLevel) string {
+// hasExploitEvidence reports whether any CVE in the project carries real
+// exploitation evidence: KEV-listed (confirmed exploited) or EPSS >= 0.5
+// (FIRST.org estimates >50% exploitation probability within 30 days).
+// Gates the "actively exploited" wording in overallExplanation so the
+// CRITICAL boilerplate is evidence-based, not reflexive.
+func hasExploitEvidence(ps *scorer.ProjectScore) bool {
+	for _, ds := range ps.Dependencies {
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
+			if v.InKEV {
+				return true
+			}
+			if v.EPSSScore != nil && *v.EPSSScore >= 0.5 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func overallExplanation(level scorer.RiskLevel, exploitEvidence bool) string {
 	switch level {
+	case scorer.RiskUnknown:
+		// The default branch below claims "no known vulnerabilities were found",
+		// which is precisely the false assurance an unscored scan must not give.
+		return "No verdict. This scan could not measure enough to rate the supply\nchain — see SCAN LIMITATIONS below for what was skipped. The score\nshown is indicative only; re-run with network access for a verdict."
 	case scorer.RiskCritical:
-		return "Immediate action required. Your supply chain has critical vulnerabilities\nor severely compromised dependencies that could be actively exploited."
+		if exploitEvidence {
+			return "Immediate action required. Your supply chain has critical vulnerabilities\nwith evidence of active exploitation in the wild (CISA KEV or high EPSS)."
+		}
+		return "Immediate action required. Your supply chain has critical vulnerabilities\nor severely compromised dependencies."
 	case scorer.RiskHigh:
 		return "Action recommended. Known vulnerabilities with available fixes, or\ndependencies with serious maintenance/trust concerns."
 	case scorer.RiskMedium:
@@ -624,7 +788,11 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		reasons = append(reasons, fmt.Sprintf("name suspiciously similar to %s — verify this is the intended package", ds.Typosquat.SimilarTo))
 	}
 
-	if ds.Resilience != nil && ds.Resilience.Score < 30 {
+	// DataAvailable gates this for the same reason it gates the scorer's
+	// low_resilience factor: an unreachable proxy leaves Score at 0, and this
+	// prose asserts specifics ("few releases, no governance files") that were
+	// never measured.
+	if ds.Resilience != nil && ds.Resilience.DataAvailable && ds.Resilience.Score < 30 {
 		reasons = append(reasons, "low resilience — few releases, no governance files, uncertain long-term viability")
 	}
 
@@ -749,4 +917,75 @@ func vulnReachabilityCountHeader(called, imported, required int) string {
 		parts = append(parts, fmt.Sprintf("%d required", required))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// vulnAliasEntry pairs a Go advisory ID with the external identifiers it is
+// also known by.
+type vulnAliasEntry struct {
+	ID      string
+	Aliases []string
+}
+
+// collectVulnAliases gathers the ID → aliases mapping for every advisory in
+// the report, deduplicated and sorted by ID.
+//
+// Aliases equal to the ID are dropped: govulncheck sometimes reports an
+// advisory whose only alias is itself, which used to render as the tautology
+// "GO-2026-5932 — GO-2026-5932". An advisory left with no aliases is omitted
+// entirely — there is nothing to translate.
+func collectVulnAliases(ps *scorer.ProjectScore, stdlib []scanner.Vulnerability) []vulnAliasEntry {
+	seen := make(map[string]map[string]bool)
+
+	collect := func(v *scanner.Vulnerability) {
+		for _, alias := range v.Aliases {
+			if alias == "" || alias == v.ID {
+				continue
+			}
+			if seen[v.ID] == nil {
+				seen[v.ID] = make(map[string]bool)
+			}
+			seen[v.ID][alias] = true
+		}
+	}
+
+	for _, ds := range ps.Dependencies {
+		for i := range ds.Vulns {
+			collect(&ds.Vulns[i])
+		}
+	}
+	for i := range stdlib {
+		collect(&stdlib[i])
+	}
+
+	entries := make([]vulnAliasEntry, 0, len(seen))
+	for id, aliasSet := range seen {
+		aliases := make([]string, 0, len(aliasSet))
+		for alias := range aliasSet {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		entries = append(entries, vulnAliasEntry{ID: id, Aliases: aliases})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	return entries
+}
+
+// writeVulnAliasGlossary renders the alias mapping. Report lines identify
+// advisories by their Go advisory ID, which is the only identifier
+// govulncheck guarantees; this section is where a reader translates one into
+// the CVE or GHSA their other tooling keys on. Omitted when no advisory in
+// the report has an alias.
+func writeVulnAliasGlossary(w io.Writer, ps *scorer.ProjectScore, stdlib []scanner.Vulnerability, c func(string, string) string) {
+	entries := collectVulnAliases(ps, stdlib)
+	if len(entries) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "\n%s\n", c(colorBold, "VULNERABILITY ID ALIASES"))
+	fmt.Fprintf(w, "%s\n", c(colorDim, strings.Repeat("─", 40)))
+	fmt.Fprintf(w, "%s\n", c(colorDim, "Report lines use the Go advisory ID; these are the same advisories elsewhere."))
+	for _, e := range entries {
+		fmt.Fprintf(w, "  %s = %s\n", e.ID, strings.Join(e.Aliases, ", "))
+	}
+	fmt.Fprintln(w)
 }

@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/unidoc/unisupply/pkg/netlog"
 )
 
 func TestHTTPClient_BodyCappedAtMaxBytes(t *testing.T) {
@@ -195,4 +197,66 @@ func mustHost(t *testing.T, raw string) string {
 		t.Fatalf("url.Parse(%q): %v", raw, err)
 	}
 	return u.Host
+}
+
+// TestHTTPClient_PurposeReachesNetlog verifies the --network-log wiring:
+// GetOptions.Purpose must travel through the request context so the netlog
+// transport can label the line. Without a purpose the line falls back to
+// the host-derived label.
+func TestHTTPClient_PurposeReachesNetlog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host := mustHost(t, srv.URL)
+
+	tests := []struct {
+		name    string
+		purpose string
+		want    string
+	}{
+		{"labeled", "maintenance:latest", "maintenance:latest"},
+		{"unlabeled", "", "unlabeled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c := NewClient(ClientOptions{})
+			c.Transport = netlog.NewTransport(http.DefaultTransport, &buf)
+
+			if _, _, err := c.Get(context.Background(), srv.URL, GetOptions{
+				Host:    host,
+				Purpose: tc.purpose,
+			}); err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("log line %q missing purpose %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestHTTPClient_NoLogWhenNetlogDisabled asserts the flag-off path is silent:
+// a plain client installs no logging transport at all.
+func TestHTTPClient_NoLogWhenNetlogDisabled(t *testing.T) {
+	if netlog.Enabled() {
+		t.Fatal("netlog must not be enabled unless --network-log is passed")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(ClientOptions{})
+	if _, _, err := c.Get(context.Background(), srv.URL, GetOptions{
+		Host:    mustHost(t, srv.URL),
+		Purpose: "maintenance:latest",
+	}); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, ok := http.DefaultTransport.(*http.Transport); !ok {
+		t.Errorf("http.DefaultTransport was replaced without --network-log: %T", http.DefaultTransport)
+	}
 }

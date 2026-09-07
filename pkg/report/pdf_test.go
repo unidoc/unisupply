@@ -1,6 +1,7 @@
 package report
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/unidoc/unipdf/v3/creator"
@@ -115,4 +116,116 @@ func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
 
 	// Must not panic.
 	writeDependencyBlock(c, ds, regular, bold, true)
+}
+
+// TestWriteLowRiskSection_VulnDetailSmoke verifies that a low-risk dependency
+// carrying a vulnerability gets its CVE detail rendered, and that the
+// section as a whole does not panic when mixed with a clean dependency.
+func TestWriteLowRiskSection_VulnDetailSmoke(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	ps := &scorer.ProjectScore{
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "golang.org/x/crypto",
+				Version:   "v0.48.0",
+				RiskScore: 12,
+				RiskLevel: scorer.RiskLow,
+				Vulns: []scanner.Vulnerability{
+					{ID: "GO-2026-5005", Severity: "CRITICAL", FixedVersion: "v0.49.0"},
+				},
+			},
+			{
+				Module:    "github.com/example/clean-pkg",
+				Version:   "v1.0.0",
+				RiskScore: 5,
+				RiskLevel: scorer.RiskLow,
+			},
+		},
+	}
+
+	// Must not panic.
+	writeLowRiskSection(c, ps, regular, bold)
+}
+
+// TestWriteVulnDetailBlocks_SkipsCleanDeps documents the contract that the
+// shared helper is a no-op (draws nothing) when the bucket has no
+// vulnerability-bearing deps.
+func TestWriteVulnDetailBlocks_SkipsCleanDeps(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	bucket := []*scorer.DependencyScore{
+		{Module: "github.com/example/clean-a", Version: "v1.0.0", RiskScore: 5, RiskLevel: scorer.RiskLow},
+		{Module: "github.com/example/clean-b", Version: "v2.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow},
+	}
+
+	// Must not panic and must draw nothing extra.
+	writeVulnDetailBlocks(c, bucket, regular, bold)
+}
+
+// TestEPSSBadge verifies the badge renders the EPSS score (exploitation
+// probability, the signal the scorer acts on) — not the percentile — and that
+// tiny non-zero scores are shown as "<1%" instead of a misleading "0%".
+func TestEPSSBadge(t *testing.T) {
+	score := 0.42
+	percentile := 0.97
+	tiny := 0.004
+	zero := 0.0
+	cases := []struct {
+		name string
+		vuln scanner.Vulnerability
+		want string
+	}{
+		{"no score", scanner.Vulnerability{}, ""},
+		{"uses score not percentile", scanner.Vulnerability{EPSSScore: &score, EPSSPercentile: &percentile}, " [EPSS 42%]"},
+		{"tiny score", scanner.Vulnerability{EPSSScore: &tiny}, " [EPSS <1%]"},
+		{"zero score", scanner.Vulnerability{EPSSScore: &zero}, " [EPSS 0%]"},
+	}
+	for _, tc := range cases {
+		if got := epssBadge(&tc.vuln); got != tc.want {
+			t.Errorf("%s: epssBadge = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPDFHeadlineText_Unscored covers the PDF rendering of an UNKNOWN headline.
+// This path is only reachable when an ONLINE scan's govulncheck fails, since
+// --offline rejects --format pdf — so it gets no coverage from an offline run,
+// and a PDF is the artifact most likely to be forwarded to someone who never
+// saw the scan output.
+func TestPDFHeadlineText_Unscored(t *testing.T) {
+	unscored := &scorer.ProjectScore{OverallScore: 26, OverallLevel: scorer.RiskUnknown}
+	got := pdfHeadlineText(unscored)
+	if !strings.Contains(got, "UNKNOWN") || !strings.Contains(got, "indicative: 26/100") {
+		t.Errorf("pdfHeadlineText() = %q, want UNKNOWN with an indicative score", got)
+	}
+	if strings.Contains(got, "26/100 (UNKNOWN)") {
+		t.Errorf("pdfHeadlineText() = %q; the band must lead, not the number", got)
+	}
+
+	scored := &scorer.ProjectScore{OverallScore: 45, OverallLevel: scorer.RiskMedium}
+	if want := "45/100 (MEDIUM)"; pdfHeadlineText(scored) != want {
+		t.Errorf("pdfHeadlineText() = %q, want %q", pdfHeadlineText(scored), want)
+	}
+
+	// Grey, not the default green: an unscored headline must not read as a pass.
+	if pdfRiskColor(scorer.RiskUnknown) == pdfRiskColor(scorer.RiskLow) {
+		t.Error("UNKNOWN renders in the same colour as LOW")
+	}
 }
