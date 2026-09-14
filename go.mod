@@ -1,13 +1,13 @@
 module github.com/unidoc/unisupply
 
-go 1.25.10
+go 1.26.0
 
 require (
 	github.com/spf13/pflag v1.0.10
 	github.com/unidoc/unipdf/v3 v3.69.0
-	golang.org/x/mod v0.37.0
-	golang.org/x/term v0.44.0
-	golang.org/x/vuln v1.5.0
+	golang.org/x/mod v0.41.0
+	golang.org/x/term v0.46.0
+	golang.org/x/vuln v1.8.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -23,13 +23,13 @@ require (
 	github.com/unidoc/timestamp v0.0.0-20200412005513-91597fd3793a // indirect
 	github.com/unidoc/unichart v0.4.0 // indirect
 	github.com/unidoc/unitype v0.5.1 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/image v0.43.0 // indirect
-	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260625142307-59b4966ccb57 // indirect
-	golang.org/x/text v0.38.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518 // indirect
+	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
