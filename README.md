@@ -29,7 +29,7 @@ release-time decisions about third-party Go code.
 ## Install
 
 ```bash
-# Latest release (Go 1.25+ required)
+# Latest release (Go 1.26+ required)
 go install github.com/unidoc/unisupply/cmd/unisupply@latest
 
 # Pinned version (recommended for reproducible environments)
