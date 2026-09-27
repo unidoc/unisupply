@@ -56,6 +56,11 @@ jobs:
             echo "::error::govulncheck tool error (exit $GOVULNCHECK_RC)"
             exit "$GOVULNCHECK_RC"
           fi
+          # JSON mode exits 0 even when it finds a reachable vulnerability, so
+          # the exit code above cannot report one. Recover text mode's code
+          # (3 = reachable) from the findings; the badge and the weekly-issue
+          # trigger both read it.
+          GOVULNCHECK_RC=$(.github/scripts/govulncheck-exit-code.sh /tmp/govulncheck.json)
           echo "govulncheck_rc=$GOVULNCHECK_RC" >> "$GITHUB_OUTPUT"
 
       - name: Install gosec

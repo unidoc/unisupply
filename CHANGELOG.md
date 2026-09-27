@@ -214,6 +214,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
+- **SBOMs no longer report the Go version as the project's own version.** The
+  CycloneDX root component's `version` and the SPDX root package's
+  `versionInfo` were set to the scanned module's `go` directive — a project
+  declaring `go 1.25.10` was described as version `1.25.10` — and the SPDX
+  `downloadLocation` pointed at a module-proxy URL built from it that does not
+  exist. go.mod carries no version for the main module, so both fields are now
+  omitted and the SPDX root `downloadLocation` is `NOASSERTION`. The `go`
+  directive is kept as a `unisupply:go_version` property on the CycloneDX root
+  component. Dependency entries are unchanged, and the output of both formats
+  was validated against the CycloneDX 1.5 and SPDX 2.3 JSON schemas.
+- **The weekly security workflow now reports reachable vulnerabilities.** It
+  ran `govulncheck -format json`, which exits 0 whatever it finds, so the job
+  summary's govulncheck badge always read "0 — no vulnerabilities" and a
+  reachable vulnerability could never file the weekly issue on its own. On Go
+  1.25.10, text mode reported 7 reachable standard-library vulnerabilities
+  while the badge showed 0. The exit code is now recovered from the JSON
+  findings by `.github/scripts/govulncheck-exit-code.sh`, which has bats tests
+  in CI.
 - Policy files with unknown or misspelled rule keys are now rejected at load
   time instead of silently ignoring the rule.
 - **`low_resilience` no longer fires on missing resilience data.** The risk
