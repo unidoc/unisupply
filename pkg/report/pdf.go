@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/unidoc/unipdf/v3/common/license"
-	"github.com/unidoc/unipdf/v3/creator"
-	"github.com/unidoc/unipdf/v3/model"
+	"github.com/unidoc/unipdf/v5/common/license"
+	"github.com/unidoc/unipdf/v5/creator"
+	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/progress"

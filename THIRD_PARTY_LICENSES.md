@@ -6,7 +6,7 @@ This file lists the direct dependencies of UniSupply and their licenses.
 
 | Module | License | Notes |
 |--------|---------|-------|
-| github.com/unidoc/unipdf/v3 | [UniDoc EULA](https://unidoc.io/eula/) (Commercial) | Used by `pkg/report/pdf` for PDF report generation. Requires a license key — set `UNIDOC_LICENSE_API_KEY` (see [unidoc.io](https://unidoc.io) for licensing options). Library use of `pkg/report/pdf` in your own application is governed by the UniDoc EULA. |
+| github.com/unidoc/unipdf/v5 | [UniDoc EULA](https://unidoc.io/eula/) (Commercial) | Used by `pkg/report/pdf` for PDF report generation. Requires a license key — set `UNIDOC_LICENSE_API_KEY` (see [unidoc.io](https://unidoc.io) for licensing options). Library use of `pkg/report/pdf` in your own application is governed by the UniDoc EULA. |
 
 ### Transitively commercial (pulled in via UniPDF, same EULA applies)
 
@@ -25,8 +25,10 @@ This file lists the direct dependencies of UniSupply and their licenses.
 
 All other indirect dependencies are permissively licensed, including
 github.com/unidoc/unichart (MIT), github.com/unidoc/pkcs7 (MIT),
-github.com/unidoc/timestamp (BSD-2-Clause), and github.com/unidoc/freetype
-(FreeType License).
+github.com/unidoc/timestamp (BSD-2-Clause), github.com/unidoc/freetype
+(FreeType License), and github.com/unidoc/typesetting (dual-licensed
+Unlicense OR BSD-3-Clause, used under BSD-3-Clause; its `harfbuzz/`
+subpackage is MIT).
 
 For a machine-readable full list, run:
 
