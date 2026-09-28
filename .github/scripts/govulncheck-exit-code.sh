@@ -6,8 +6,7 @@
 # text mode exits 3 for a reachable vulnerability. The weekly workflow keeps
 # the JSON (it is an uploaded artifact) but also needs that exit code: it
 # drives the job-summary badge and is one of the conditions for filing the
-# weekly issue. Reading the JSON exit code directly reported every run as
-# clean.
+# weekly issue.
 #
 # A vulnerability is reachable when a finding's first trace frame names a
 # function — a symbol-level finding, which is what text mode counts under

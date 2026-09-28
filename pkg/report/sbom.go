@@ -16,9 +16,7 @@ import (
 // SBOMOptions configures SBOM generation.
 type SBOMOptions struct {
 	// GoVersion is the scanned module's go directive. CycloneDX records it as
-	// the root component's unisupply:go_version property; SPDX omits it. It
-	// is never the module's own version: go.mod carries no version for the
-	// main module, so the root component has none.
+	// the root component's unisupply:go_version property; SPDX omits it.
 	GoVersion string
 }
 

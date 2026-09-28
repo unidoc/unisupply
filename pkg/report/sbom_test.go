@@ -594,8 +594,9 @@ func TestWriteCycloneDX_RootComponentVersion(t *testing.T) {
 	}
 }
 
-// TestWriteSPDX_RootPackageVersion checks that the root package carries no
-// version and no fabricated proxy download URL, while dependencies keep both.
+// TestWriteSPDX_RootPackageVersion checks that the root package omits
+// versionInfo and has a NOASSERTION downloadLocation, while dependencies
+// keep both.
 func TestWriteSPDX_RootPackageVersion(t *testing.T) {
 	graph := testutil.MakeGraph(
 		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true},
