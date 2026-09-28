@@ -82,6 +82,10 @@ jobs:
           bats --version
       - name: Run check-licenses.sh bats tests
         run: bats .github/scripts/tests/check-licenses.bats
+      # Runs here rather than in its own job: the job name is a required
+      # status check in the branch rulesets.
+      - name: Run govulncheck-exit-code.sh bats tests
+        run: bats .github/scripts/tests/govulncheck-exit-code.bats
 
   test:
     name: Test (Go ${{ matrix.go }})

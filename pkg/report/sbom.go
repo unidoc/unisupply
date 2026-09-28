@@ -15,6 +15,8 @@ import (
 
 // SBOMOptions configures SBOM generation.
 type SBOMOptions struct {
+	// GoVersion is the scanned module's go directive. CycloneDX records it as
+	// the root component's unisupply:go_version property; SPDX omits it.
 	GoVersion string
 }
 
@@ -48,7 +50,7 @@ type cdxComponent struct {
 	Type       string        `json:"type"`
 	BOMRef     string        `json:"bom-ref"`
 	Name       string        `json:"name"`
-	Version    string        `json:"version"`
+	Version    string        `json:"version,omitempty"`
 	Purl       string        `json:"purl"`
 	Scope      string        `json:"scope,omitempty"`
 	Hashes     []cdxHash     `json:"hashes,omitempty"`
@@ -74,6 +76,19 @@ type cdxDependency struct {
 func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions, w io.Writer) error {
 	now := time.Now().UTC()
 
+	root := &cdxComponent{
+		Type:   "application",
+		BOMRef: graph.Root,
+		Name:   graph.Root,
+		Purl:   fmt.Sprintf("pkg:golang/%s", graph.Root),
+	}
+	if opts.GoVersion != "" {
+		root.Properties = append(root.Properties, cdxProperty{
+			Name:  "unisupply:go_version",
+			Value: opts.GoVersion,
+		})
+	}
+
 	bom := cdxBOM{
 		BOMFormat:    "CycloneDX",
 		SpecVersion:  "1.5",
@@ -84,13 +99,7 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 			Tools: []cdxTool{
 				{Vendor: "UniDoc", Name: "unisupply", Version: version.Version},
 			},
-			Component: &cdxComponent{
-				Type:    "application",
-				BOMRef:  graph.Root,
-				Name:    graph.Root,
-				Version: opts.GoVersion,
-				Purl:    fmt.Sprintf("pkg:golang/%s", graph.Root),
-			},
+			Component: root,
 		},
 	}
 
@@ -190,7 +199,7 @@ type spdxCreationInfo struct {
 type spdxPackage struct {
 	SPDXID           string            `json:"SPDXID"`
 	Name             string            `json:"name"`
-	VersionInfo      string            `json:"versionInfo"`
+	VersionInfo      string            `json:"versionInfo,omitempty"`
 	DownloadLocation string            `json:"downloadLocation"`
 	FilesAnalyzed    bool              `json:"filesAnalyzed"`
 	Supplier         string            `json:"supplier,omitempty"`
@@ -233,12 +242,12 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		},
 	}
 
-	// Root package.
+	// Root package. The main module has no version and no proxy download, so
+	// versionInfo is omitted and downloadLocation is NOASSERTION.
 	rootPkg := spdxPackage{
 		SPDXID:           "SPDXRef-RootPackage",
 		Name:             graph.Root,
-		VersionInfo:      opts.GoVersion,
-		DownloadLocation: fmt.Sprintf("https://proxy.golang.org/%s/@v/%s.zip", graph.Root, opts.GoVersion),
+		DownloadLocation: "NOASSERTION",
 		FilesAnalyzed:    false,
 		ExternalRefs: []spdxExternalRef{
 			{
