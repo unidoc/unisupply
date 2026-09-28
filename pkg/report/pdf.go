@@ -453,9 +453,9 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 	addBullet(stats, fmt.Sprintf("Total findings: %d", ciReport.TotalFindings), regular)
 	_ = c.Draw(stats)
 
-	// ## CI/CD — per-workflow findings. Always present so reviewers can confirm the
+	// CI/CD — per-workflow findings. Always present so reviewers can confirm the
 	// scanner ran even when there are no workflow findings.
-	subheading(c, "## CI/CD", bold)
+	subheading(c, "CI/CD", bold)
 
 	ciCount := 0
 	for _, wr := range ciReport.Workflows {
@@ -489,9 +489,9 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 		_ = c.Draw(p)
 	}
 
-	// ## Build files — build pipeline findings. Always present so reviewers can
+	// Build files — build pipeline findings. Always present so reviewers can
 	// confirm the scanner ran even when there are no build-file findings.
-	subheading(c, "## Build files", bold)
+	subheading(c, "Build files", bold)
 
 	if len(ciReport.BuildFindings) > 0 {
 		table := c.NewTable(4)

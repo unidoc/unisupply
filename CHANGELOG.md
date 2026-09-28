@@ -272,6 +272,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and charged up to 6 points for it. Both the factor and the bonus now require
   `DataAvailable`, as does the matching explanation line in text reports.
   Affects any scan where the module proxy is unreachable or rate-limits.
+- **PDF reports no longer print a literal `##` in CI/CD subheadings.** The
+  "CI/CD" and "Build files" subheadings of the CI/CD Risk Assessment section
+  rendered as `## CI/CD` and `## Build files` — a Markdown marker the PDF
+  printed as text.
 
 ### Security Patches
 
