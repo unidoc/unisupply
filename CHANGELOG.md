@@ -93,6 +93,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
+#### Minimum Go version is now 1.26
+
+- **Building from source requires Go 1.26.** The `go` directive moves from
+  1.25.10 to 1.26.8, and release binaries are built with Go 1.26.8. Go 1.25 no
+  longer receives upstream security fixes, and the `golang.org/x/crypto` fixes
+  listed under Security Patches require Go 1.26. With the default
+  `GOTOOLCHAIN=auto`, `go install` on an older Go downloads the required
+  toolchain automatically; with `GOTOOLCHAIN=local` it stops with a
+  `requires go >= 1.26.8` error. Prebuilt release binaries are unaffected.
+- CI now tests against Go 1.26.8 and 1.27.1.
+
 #### Reports: one vulnerability identifier, and one warning per failure mode
 
 - **The Go advisory ID is now the single identifier in text and PDF output.**
@@ -242,6 +253,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and charged up to 6 points for it. Both the factor and the bonus now require
   `DataAvailable`, as does the matching explanation line in text reports.
   Affects any scan where the module proxy is unreachable or rate-limits.
+
+### Security Patches
+
+- **Built with Go 1.26.8 instead of 1.25.10**, clearing 12 standard-library
+  advisories that affect v0.5.0 binaries. govulncheck reports 7 of them as
+  reachable from unisupply's code — GO-2026-5026, GO-2026-5037, GO-2026-5039,
+  GO-2026-5856, GO-2026-5972, GO-2026-6090, GO-2026-6218 — and the other 5 as
+  imported or module-level only: GO-2026-4970, GO-2026-5038, GO-2026-6088,
+  GO-2026-6089, GO-2026-6091.
+- Upgraded `golang.org/x/crypto` `v0.53.0` → `v0.57.0` (GO-2026-6303,
+  GO-2026-6354, GO-2026-6355, all in `x/crypto/ssh`, which unisupply does not
+  import).
+- Upgraded `golang.org/x/mod` `v0.37.0` → `v0.41.0` (direct dependency;
+  GO-2026-6179, GO-2026-6180 in `x/mod/sumdb`, which unisupply does not import).
+- Upgraded `golang.org/x/text` `v0.38.0` → `v0.42.0` (GO-2026-5970) and
+  `golang.org/x/image` `v0.43.0` → `v0.46.0` (GO-2026-6222).
+- Upgraded `golang.org/x/vuln` `v1.5.0` → `v1.8.0` (direct dependency), and
+  `x/net`, `x/tools`, `x/sync`, `x/sys`, `x/term`, `x/telemetry` to current
+  releases.
+- Self-scan policy gate (`.github/security-policy.json`): 6 violations in the
+  2026-09-21 weekly security scan → 0.
+  One advisory remains with no upstream fix: GO-2026-5932 (`x/crypto`), which
+  govulncheck reports as not reachable from unisupply.
 
 ## [0.5.0] - 2026-06-29
 

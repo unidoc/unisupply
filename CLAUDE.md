@@ -92,7 +92,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 
 ## Tech stack
 
-- Go 1.25.3, no CGo
+- Go 1.26.8, no CGo
 - `github.com/spf13/pflag` — CLI flags
 - `github.com/unidoc/unipdf/v3` — PDF report generation (dogfooding)
 - `github.com/unidoc/unichart` — Charts in PDF reports
@@ -199,7 +199,7 @@ Exit code 2 on policy violation — designed for CI/CD fail-fast.
 Single binary, no CGo, cross-compiles to all platforms.
 
 ```bash
-# Prerequisites: Go 1.25+
+# Prerequisites: Go 1.26+
 
 # Build for current platform
 just build                     # → bin/unisupply
