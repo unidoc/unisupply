@@ -38,10 +38,12 @@ if [[ ! -s "$json" ]]; then
 fi
 
 # govulncheck writes a stream of top-level objects; -s collects them into one
-# array. Every stream opens with a `config` message, so its absence means the
-# file did not come from govulncheck.
+# array. Every stream opens with a `config` message naming the scanner
+# (govulncheck sets scanner_name from its build info), so a stream without one
+# that says govulncheck did not come from govulncheck.
 if ! reachable=$(jq -r -s '
-    if any(.[]; type == "object" and has("config")) | not then
+    if any(.[]; type == "object" and (.config | type == "object")
+                and .config.scanner_name == "govulncheck") | not then
       error("no govulncheck config message")
     else . end
     | [.[] | select(type == "object" and has("finding")) | .finding

@@ -92,6 +92,20 @@ MODULE_FINDING='{"finding":{"osv":"GO-2026-5932","trace":[{"module":"golang.org/
   [ -z "$output" ]
 }
 
+@test "a config message that does not name govulncheck exits 2" {
+  printf '{"config":{}}\n{"progress":{}}\n' > "$JSON"
+  run --separate-stderr "$SCRIPT" "$JSON"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+}
+
+@test "a config message from another scanner exits 2" {
+  echo '{"config":{"protocol_version":"v1.0.0","scanner_name":"other-scanner"}}' > "$JSON"
+  run --separate-stderr "$SCRIPT" "$JSON"
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+}
+
 @test "no argument exits 2 with usage" {
   run --separate-stderr "$SCRIPT"
   [ "$status" -eq 2 ]
