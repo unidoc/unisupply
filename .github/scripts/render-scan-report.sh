@@ -158,6 +158,12 @@ fi
 TIMEBOMB_COUNT=$(jq_field '(.time_bombs // []) | length')
 echo "## Time bombs (${TIMEBOMB_COUNT})"
 echo
+echo "_Any non-test dependency, direct or transitive, that is archived"
+echo "upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix"
+echo "an archived module, because upstream has stopped: it has to be replaced"
+echo "or removed. It shows under Stale dependencies only when it is a direct"
+echo "dependency that still has a newer release to take._"
+echo
 if [ "$TIMEBOMB_COUNT" -gt 0 ]; then
   echo "| Kind | Module | Detail | Reachability |"
   echo "|---|---|---|---|"
@@ -360,6 +366,13 @@ fi
 # --- Stale dependencies ------------------------------------------------------
 
 echo "## Stale dependencies"
+echo
+echo "_Direct dependencies only (go.mod requirements without \`// indirect\`)"
+echo "that have a newer version available; the second list narrows that to"
+echo "pinned versions released more than 90 days ago, which is what the"
+echo "\"Stale dependencies (>90d)\" row reports. Transitive dependencies and"
+echo "modules with no newer release are never listed here, however old: see"
+echo "Time bombs and the Summary's unmaintained counts._"
 echo
 echo "<details><summary><strong>Direct dependencies with available updates</strong></summary>"
 echo

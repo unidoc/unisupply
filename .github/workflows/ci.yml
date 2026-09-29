@@ -86,6 +86,8 @@ jobs:
       # status check in the branch rulesets.
       - name: Run govulncheck-exit-code.sh bats tests
         run: bats .github/scripts/tests/govulncheck-exit-code.bats
+      - name: Run render-scan-report.sh bats tests
+        run: bats .github/scripts/tests/render-scan-report.bats
 
   test:
     name: Test (Go ${{ matrix.go }})

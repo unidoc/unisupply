@@ -7,6 +7,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### Improvements
+
+#### Weekly security report: stale dependencies and time bombs explained
+
+- **Each section now says what it counts.** A report could read "Stale
+  dependencies (>90d): false" next to an archived time bomb — for example
+  `github.com/google/go-cmdtest` in 2026-W40 — which looks like a
+  contradiction but is not: the stale check covers direct dependencies that
+  have a newer version available, pinned more than 90 days ago, while time
+  bombs cover any non-test dependency, direct or transitive, that is archived
+  or has a CISA KEV-listed or CRITICAL CVE. `go-cmdtest` is transitive and has
+  no newer release, so the stale check never considers it. Both sections now
+  carry a note stating their scope, in the issue body and the job summary
+  alike, and the renderer has bats tests in CI.
+
 ## [0.6.0] - 2026-09-29
 
 ### New Features
