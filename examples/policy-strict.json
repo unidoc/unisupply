@@ -6,5 +6,8 @@
   "no_unmaintained_months": 24,
   "no_archived": true,
   "no_typosquatting": true,
-  "max_ci_score": 50
+  "max_ci_score": 50,
+  "forbid_replace_redirect": true,
+  "require_gosum_verified": true,
+  "forbid_pseudo_versions": true
 }

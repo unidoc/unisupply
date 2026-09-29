@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -920,7 +921,7 @@ func TestAIGenScanner_ScanAll(t *testing.T) {
 		},
 	}
 
-	results := scanner.ScanAll(context.Background(), graph, maintainers, resilience)
+	results, _ := scanner.ScanAll(context.Background(), graph, maintainers, resilience)
 
 	// Clean module should not be in results (score 0) since it's old with governance
 	if _, ok := results["github.com/clean/lib"]; ok {
@@ -1320,5 +1321,80 @@ func TestAIGenScanner_SingleIndicatorPopulatesIndicatorsNotRiskFactors(t *testin
 	if risk.MeetsPromotionGate {
 		t.Errorf("Single generic_name indicator must NOT meet promotion gate (score=%d indicators=%v)",
 			risk.Score, risk.Indicators)
+	}
+}
+
+// TestAIGenScanner_UnexaminedIsNotCleared pins the distinction the DataAvailable
+// flag exists to make. Two very different outcomes both produce RiskLevel "none"
+// with Score 0, and ScanAll keeps only scoring entries — so both leave the result
+// map empty:
+//
+//   - first-release date unknown → the detector never ran (unexamined)
+//   - date known but pre-ChatGPT → the detector ran and cleared the module
+//
+// Offline the first case is every module, which is what made the README's
+// "AI-gen: Unaffected" row wrong: an empty result read as a negative finding.
+func TestAIGenScanner_UnexaminedIsNotCleared(t *testing.T) {
+	s := newAIGenScannerForTest(aigenTestNow())
+
+	dep := &resolver.Dependency{
+		Module: parser.Module{Path: "github.com/someuser/utils", Version: "v0.1.0"},
+		Direct: true,
+	}
+
+	// Unexamined: no first-release date, so no indicator can be evaluated.
+	unexamined := s.analyzeModule(dep, nil, &ResilienceInfo{DataAvailable: false})
+	if unexamined.DataAvailable {
+		t.Error("DataAvailable = true with no first-release date; an unexamined module would read as cleared")
+	}
+
+	// Cleared: the date is known and predates the cutoff — a real negative result.
+	cleared := s.analyzeModule(dep, nil, &ResilienceInfo{
+		DataAvailable:    true,
+		FirstReleaseDate: chatGPTReleaseDate.AddDate(-2, 0, 0),
+	})
+	if !cleared.DataAvailable {
+		t.Error("DataAvailable = false for a module the detector actually examined")
+	}
+
+	// Both look identical on every other field — that is the whole point.
+	if unexamined.RiskLevel != cleared.RiskLevel || unexamined.Score != cleared.Score {
+		t.Fatalf("fixture no longer exercises the ambiguity: unexamined=%s/%d cleared=%s/%d",
+			unexamined.RiskLevel, unexamined.Score, cleared.RiskLevel, cleared.Score)
+	}
+}
+
+// TestAIGenScanner_ScanAllWarnsWhenUnexamined verifies the count reaches the
+// caller. Without a warning an all-unexamined scan renders as "0 flagged",
+// which is indistinguishable from a completed scan that found nothing.
+func TestAIGenScanner_ScanAllWarnsWhenUnexamined(t *testing.T) {
+	s := newAIGenScannerForTest(aigenTestNow())
+
+	graph := &resolver.Graph{
+		Dependencies: map[string]*resolver.Dependency{
+			"github.com/a/b": {Module: parser.Module{Path: "github.com/a/b", Version: "v0.1.0"}},
+			"github.com/c/d": {Module: parser.Module{Path: "github.com/c/d", Version: "v0.1.0"}},
+		},
+	}
+
+	// No resilience data for either module — the offline shape.
+	results, warnings := s.ScanAll(context.Background(), graph, nil, nil)
+	if len(results) != 0 {
+		t.Errorf("results = %d entries, want 0 when nothing could be examined", len(results))
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one naming the unexamined count", warnings)
+	}
+	if !strings.Contains(warnings[0], "2 of 2") {
+		t.Errorf("warning %q does not name the affected module count", warnings[0])
+	}
+
+	// Negative control: an examined module produces no warning.
+	examined := map[string]*ResilienceInfo{
+		"github.com/a/b": {DataAvailable: true, FirstReleaseDate: chatGPTReleaseDate.AddDate(-2, 0, 0)},
+		"github.com/c/d": {DataAvailable: true, FirstReleaseDate: chatGPTReleaseDate.AddDate(-2, 0, 0)},
+	}
+	if _, warnings := s.ScanAll(context.Background(), graph, nil, examined); len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none when every module was examined", warnings)
 	}
 }

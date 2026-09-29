@@ -23,9 +23,9 @@ type JSONReport struct {
 
 	// MeanDepRiskScore is the legacy weighted-mean axis (non-normative; retained
 	// for dashboards and trend lines). SeverityAdjustedVulnScore is the
-	// CVE-driven step-function axis. HeadlineDriver records which of the four
+	// CVE-driven step-function axis. HeadlineDriver records which of the five
 	// candidates produced overall_risk_score: "severity_adjusted", "p95_dep_risk",
-	// "archived_floor", or "cve_floor".
+	// "archived_floor", "cve_floor", or "integrity_floor".
 	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
 	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
 	HeadlineDriver            string `json:"headline_driver,omitempty"`
@@ -49,15 +49,22 @@ type JSONReport struct {
 	// schema is internal and may change between releases.
 	DebugScoring *scorer.DebugScoring `json:"debug_scoring,omitempty"`
 
+	// HeadlineUnscoredReason is non-empty when overall_risk_level is "UNKNOWN":
+	// the scan could not measure enough to earn a verdict. overall_risk_score
+	// still carries a number, but it is indicative only — a consumer that gates
+	// on the level MUST treat "UNKNOWN" as "no result", not as a pass.
+	HeadlineUnscoredReason string `json:"headline_unscored_reason,omitempty"`
+
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
-	Warnings          []string          `json:"warnings,omitempty"`
-	Summary           JSONSummary       `json:"summary"`
-	Deps              []JSONDependency  `json:"dependencies"`
-	CI                *JSONCIReport     `json:"ci_cd_assessment,omitempty"`
-	CIFindings        []JSONFlatFinding `json:"ci_findings"`
-	BuildFileFindings []JSONFlatFinding `json:"build_file_findings"`
-	Takeovers         []JSONTakeover    `json:"takeover_candidates,omitempty"`
+	Warnings          []string             `json:"warnings,omitempty"`
+	Summary           JSONSummary          `json:"summary"`
+	Deps              []JSONDependency     `json:"dependencies"`
+	CI                *JSONCIReport        `json:"ci_cd_assessment,omitempty"`
+	CIFindings        []JSONFlatFinding    `json:"ci_findings"`
+	BuildFileFindings []JSONFlatFinding    `json:"build_file_findings"`
+	Integrity         *JSONIntegrityReport `json:"module_directives,omitempty"`
+	Takeovers         []JSONTakeover       `json:"takeover_candidates,omitempty"`
 
 	// TimeBombs lists every archived dependency and every CRITICAL CVE across
 	// all non-test dependencies, regardless of whether the headline score
@@ -127,6 +134,13 @@ type JSONDependency struct {
 	Maintainer     *JSONMaintainer     `json:"maintainer,omitempty"`
 	Typosquat      *JSONTyposquat      `json:"typosquat,omitempty"`
 	RiskFactors    []string            `json:"risk_factors,omitempty"`
+	// ReplaceClass mirrors scorer.DependencyScore.ReplaceClass: the severity of
+	// this dependency's go.mod replace directive ("LOW"/"MEDIUM"/"HIGH"), or
+	// omitted when the dependency is not replaced.
+	ReplaceClass string `json:"replace_class,omitempty"`
+	// PseudoVersion mirrors scorer.DependencyScore.PseudoVersion: true when
+	// this dependency's pinned go.mod version is a pseudo-version.
+	PseudoVersion bool `json:"pseudo_version,omitempty"`
 }
 
 // JSONVuln is a vulnerability entry.
@@ -152,6 +166,20 @@ type JSONVuln struct {
 	SeverityScored string `json:"severity_scored,omitempty"`
 	// EnrichmentErrors holds the failure summary when all enrichment tiers failed.
 	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
+	// EPSSScore is FIRST.org's exploitation probability (0.0–1.0). Absent when
+	// the lookup failed or the vuln has no CVE alias; a present 0.0 is a real score.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+	// EPSSPercentile is the score's percentile rank against all scored CVEs.
+	EPSSPercentile *float64 `json:"epss_percentile,omitempty"`
+	// EPSSDate is the date the EPSS score was computed (YYYY-MM-DD).
+	EPSSDate string `json:"epss_date,omitempty"`
+	// InKEV reports CISA KEV catalog membership. Absent means "not checked"
+	// (KEV fetch failed or no CVE alias); false means "checked, not listed".
+	InKEV *bool `json:"in_kev,omitempty"`
+	// KEVDateAdded is the date CISA added the CVE to the KEV catalog.
+	KEVDateAdded string `json:"kev_date_added,omitempty"`
+	// KEVRansomware is CISA's knownRansomwareCampaignUse: "Known" | "Unknown".
+	KEVRansomware string `json:"kev_known_ransomware,omitempty"`
 }
 
 // JSONMaintenance is maintenance health info.
@@ -188,12 +216,26 @@ type JSONMaintainer struct {
 }
 
 // JSONScoreBreakdown shows how the risk score was computed.
+//
+// The three optional axes are pointers so an unmeasured axis serializes as null
+// rather than 0. A consumer cannot distinguish "no vulnerabilities found" from
+// "no vulnerability scan ran" if both render as 0 — the first is a finding, the
+// second is a gap, and reporting the gap as a finding is the bug this
+// representation prevents. Depth and maturity are never unavailable.
 type JSONScoreBreakdown struct {
-	VulnScore        float64 `json:"vuln_score"`
-	MaintenanceScore float64 `json:"maintenance_score"`
-	DepthScore       float64 `json:"depth_score"`
-	MaintainerScore  float64 `json:"maintainer_score"`
-	MaturityScore    float64 `json:"maturity_score"`
+	VulnScore        *float64 `json:"vuln_score"`
+	MaintenanceScore *float64 `json:"maintenance_score"`
+	DepthScore       float64  `json:"depth_score"`
+	MaintainerScore  *float64 `json:"maintainer_score"`
+	MaturityScore    float64  `json:"maturity_score"`
+
+	// MeasuredWeight is the fraction of the scoring model that was actually
+	// available: 1.0 when every axis was measured. Below 1.0 the score
+	// describes only the measured axes and is not comparable to a full scan.
+	MeasuredWeight float64 `json:"measured_weight"`
+
+	// ExcludedAxes names the axes dropped from both numerator and denominator.
+	ExcludedAxes []string `json:"excluded_axes,omitempty"`
 }
 
 // JSONTyposquat holds typosquatting analysis.
@@ -241,6 +283,30 @@ type JSONCIFinding struct {
 	Remediation string `json:"remediation"`
 }
 
+// JSONIntegrityReport holds the go.mod replace/exclude directive audit and
+// the go.sum verification outcome.
+type JSONIntegrityReport struct {
+	ReplaceCount       int `json:"replace_count"`
+	ExcludeCount       int `json:"exclude_count"`
+	RedirectCount      int `json:"redirect_count"`
+	PseudoVersionCount int `json:"pseudo_version_count"`
+	// GoSumVerified is the `go mod verify` outcome: "true", "false",
+	// "offline", or "skipped" — string-valued so honest-UNKNOWN states are
+	// distinguishable from a verified pass/fail. Omitted when verification
+	// was never attempted.
+	GoSumVerified string                 `json:"gosum_verified,omitempty"`
+	Findings      []JSONIntegrityFinding `json:"findings,omitempty"`
+}
+
+// JSONIntegrityFinding holds a single go.mod directive finding.
+type JSONIntegrityFinding struct {
+	Category    string `json:"category"`
+	Severity    string `json:"severity"`
+	Module      string `json:"module"`
+	Detail      string `json:"detail"`
+	Remediation string `json:"remediation"`
+}
+
 // JSONHeadline holds the project-level headline risk summary, including which
 // scoring candidate drove the overall score and its key driving dependency.
 type JSONHeadline struct {
@@ -249,7 +315,7 @@ type JSONHeadline struct {
 	Driver      string  `json:"driver"`
 	DrivingItem string  `json:"driving_item,omitempty"`
 	Reason      string  `json:"reason,omitempty"`
-	// Candidates contains the winning candidate only. All four candidate scores
+	// Candidates contains the winning candidate only. All five candidate scores
 	// will be included here once ProjectScore stores them all; for now use
 	// Driver/DrivingItem/Reason for the headline and per-dep data for the rest.
 	Candidates []JSONCandidate `json:"candidates"`
@@ -294,9 +360,10 @@ type JSONTakeover struct {
 
 // JSONOptions configures JSON output.
 type JSONOptions struct {
-	GoVersion string
-	CIReport  *scanner.CIReport
-	Takeovers []*scanner.MaintainerInfo
+	GoVersion       string
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
 }
 
 // WriteJSON generates JSON output.
@@ -317,6 +384,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		},
 		OverallRisk:               ps.OverallScore,
 		OverallLevel:              string(ps.OverallLevel),
+		HeadlineUnscoredReason:    ps.HeadlineUnscoredReason,
 		Headline:                  jsonHeadline(ps),
 		MeanDepRiskScore:          ps.MeanDepRiskScore,
 		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
@@ -340,25 +408,22 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 	for _, ds := range ps.Dependencies {
 		jd := JSONDependency{
-			Module:    ds.Module,
-			Version:   ds.Version,
-			Direct:    ds.Direct,
-			TestOnly:  ds.IsTestOnly,
-			RiskScore: ds.RiskScore,
-			RiskLevel: string(ds.RiskLevel),
-			ScoreBreakdown: &JSONScoreBreakdown{
-				VulnScore:        ds.VulnScore,
-				MaintenanceScore: ds.MaintenanceScore,
-				DepthScore:       ds.DepthScore,
-				MaintainerScore:  ds.MaintainerScore,
-				MaturityScore:    ds.MaturityScore,
-			},
+			Module:         ds.Module,
+			Version:        ds.Version,
+			Direct:         ds.Direct,
+			TestOnly:       ds.IsTestOnly,
+			RiskScore:      ds.RiskScore,
+			RiskLevel:      string(ds.RiskLevel),
+			ScoreBreakdown: buildScoreBreakdown(ds),
 			DependencyPath: ds.DependencyPath,
 			RiskFactors:    ds.RiskFactors,
+			ReplaceClass:   string(ds.ReplaceClass),
+			PseudoVersion:  ds.PseudoVersion,
 		}
 
-		for _, v := range ds.Vulns {
-			jd.Vulns = append(jd.Vulns, JSONVuln{
+		for i := range ds.Vulns {
+			v := &ds.Vulns[i]
+			jv := JSONVuln{
 				ID:                  v.ID,
 				Aliases:             v.Aliases,
 				Summary:             v.Summary,
@@ -373,7 +438,19 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				SeveritySource:      v.SeveritySource,
 				SeverityScored:      scorer.ScoredSeverity(v),
 				EnrichmentErrors:    v.EnrichmentErrors,
-			})
+				EPSSScore:           v.EPSSScore,
+				EPSSPercentile:      v.EPSSPercentile,
+				EPSSDate:            v.EPSSDate,
+				KEVDateAdded:        v.KEVDateAdded,
+				KEVRansomware:       v.KEVRansomware,
+			}
+			// in_kev is serialized only when the KEV catalog was actually
+			// consulted: absent = "not checked", false = "checked, not listed".
+			if v.KEVChecked {
+				inKEV := v.InKEV
+				jv.InKEV = &inKEV
+			}
+			jd.Vulns = append(jd.Vulns, jv)
 		}
 
 		if ds.Maintenance != nil {
@@ -519,6 +596,29 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		report.CI = ciJSON
 	}
 
+	// Module directives assessment. Always emitted when the scanner ran
+	// (opts.IntegrityReport != nil), including zero-finding scans, so
+	// consumers can distinguish "no directives" from "scanner not invoked".
+	if opts.IntegrityReport != nil {
+		integrityJSON := &JSONIntegrityReport{
+			ReplaceCount:       opts.IntegrityReport.ReplaceCount,
+			ExcludeCount:       opts.IntegrityReport.ExcludeCount,
+			RedirectCount:      opts.IntegrityReport.RedirectCount,
+			GoSumVerified:      opts.IntegrityReport.GoSumVerified,
+			PseudoVersionCount: opts.IntegrityReport.PseudoVersionCount,
+		}
+		for _, f := range opts.IntegrityReport.Findings {
+			integrityJSON.Findings = append(integrityJSON.Findings, JSONIntegrityFinding{
+				Category:    f.Category,
+				Severity:    string(f.Severity),
+				Module:      f.Module,
+				Detail:      f.Detail,
+				Remediation: f.Remediation,
+			})
+		}
+		report.Integrity = integrityJSON
+	}
+
 	// Takeover candidates.
 	for _, t := range opts.Takeovers {
 		report.Takeovers = append(report.Takeovers, JSONTakeover{
@@ -538,6 +638,32 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	}
 
 	return nil
+}
+
+// buildScoreBreakdown renders the per-axis component scores, leaving an
+// unmeasured axis null rather than 0 so a gap is not read as a finding.
+func buildScoreBreakdown(ds *scorer.DependencyScore) *JSONScoreBreakdown {
+	sb := &JSONScoreBreakdown{
+		DepthScore:     ds.DepthScore,
+		MaturityScore:  ds.MaturityScore,
+		MeasuredWeight: ds.MeasuredWeight,
+	}
+	if ds.VulnWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "vulnerabilities")
+	} else {
+		sb.VulnScore = &ds.VulnScore
+	}
+	if ds.MaintenanceWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintenance")
+	} else {
+		sb.MaintenanceScore = &ds.MaintenanceScore
+	}
+	if ds.MaintainerWeightExcluded {
+		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintainer")
+	} else {
+		sb.MaintainerScore = &ds.MaintainerScore
+	}
+	return sb
 }
 
 // jsonDiagnostics maps the scorer's Diagnostics struct to its JSON form.

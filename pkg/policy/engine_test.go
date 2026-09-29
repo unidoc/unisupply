@@ -33,19 +33,21 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	policyPath := filepath.Join(tempDir, "policy.json")
 
 	policyData := map[string]interface{}{
-		"max_risk_score":         75,
-		"max_overall_score":      60,
-		"no_known_vulns":         true,
-		"no_critical_vulns":      true,
-		"no_single_maintainer":   true,
-		"no_unmaintained_months": 24,
-		"no_archived":            true,
-		"no_deprecated":          true,
-		"no_typosquatting":       true,
-		"max_depth":              5,
-		"max_ci_score":           50,
-		"allowed_modules":        []string{"github.com/allowed/*"},
-		"blocked_modules":        []string{"github.com/blocked/*"},
+		"max_risk_score":          75,
+		"max_overall_score":       60,
+		"no_known_vulns":          true,
+		"no_critical_vulns":       true,
+		"no_single_maintainer":    true,
+		"no_unmaintained_months":  24,
+		"no_archived":             true,
+		"no_deprecated":           true,
+		"no_typosquatting":        true,
+		"max_depth":               5,
+		"max_ci_score":            50,
+		"allowed_modules":         []string{"github.com/allowed/*"},
+		"blocked_modules":         []string{"github.com/blocked/*"},
+		"forbid_replace_redirect": true,
+		"require_gosum_verified":  true,
 	}
 
 	data, err := json.Marshal(policyData)
@@ -104,6 +106,38 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	if len(p.BlockedModules) != 1 || p.BlockedModules[0] != "github.com/blocked/*" {
 		t.Errorf("BlockedModules: expected [github.com/blocked/*], got %v", p.BlockedModules)
 	}
+	if !p.ForbidReplaceRedirect {
+		t.Errorf("ForbidReplaceRedirect: expected true, got %v", p.ForbidReplaceRedirect)
+	}
+	if !p.RequireGoSumVerified {
+		t.Errorf("RequireGoSumVerified: expected true, got %v", p.RequireGoSumVerified)
+	}
+}
+
+func TestLoadPolicy_UnknownFieldRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	policyPath := filepath.Join(tempDir, "typo_policy.json")
+
+	if err := os.WriteFile(policyPath, []byte(`{"require_gosum_verifed": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write policy file: %v", err)
+	}
+
+	_, err := policy.LoadPolicy(policyPath)
+	if err == nil {
+		t.Fatal("expected error for unknown field, got nil")
+	}
+	if !strings.Contains(err.Error(), "require_gosum_verifed") {
+		t.Errorf("expected error to name the offending key 'require_gosum_verifed', got: %v", err)
+	}
+}
+
+func TestLoadPolicy_ShippedExamplesAreValid(t *testing.T) {
+	for _, name := range []string{"policy-strict.json", "policy-custom.json"} {
+		path := filepath.Join("..", "..", "examples", name)
+		if _, err := policy.LoadPolicy(path); err != nil {
+			t.Errorf("LoadPolicy(%s) failed: %v", name, err)
+		}
+	}
 }
 
 func TestLoadPolicy_InvalidJSON(t *testing.T) {
@@ -160,6 +194,15 @@ func TestDefaultStrictPolicy(t *testing.T) {
 	}
 	if p.MaxCIScore == nil || *p.MaxCIScore != 50 {
 		t.Errorf("MaxCIScore: expected 50, got %v", p.MaxCIScore)
+	}
+	if !p.ForbidReplaceRedirect {
+		t.Errorf("ForbidReplaceRedirect: expected true")
+	}
+	if !p.RequireGoSumVerified {
+		t.Errorf("RequireGoSumVerified: expected true")
+	}
+	if !p.ForbidPseudoVersions {
+		t.Errorf("ForbidPseudoVersions: expected true")
 	}
 }
 
@@ -535,6 +578,244 @@ func TestEvaluate_NoArchived(t *testing.T) {
 	}
 	if !strings.Contains(result.Violations[0].Detail, "archived") {
 		t.Errorf("expected detail to mention 'archived', got: %s", result.Violations[0].Detail)
+	}
+}
+
+// Tests for Evaluate - ForbidReplaceRedirect
+func TestEvaluate_ForbidReplaceRedirect_Redirect(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "replace_redirect",
+				Severity: scanner.IntegrityHigh,
+				Module:   "github.com/foo/bar",
+				Detail:   "github.com/foo/bar is redirected to a different module: github.com/attacker/bar",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "forbid_replace_redirect" {
+		t.Errorf("expected rule 'forbid_replace_redirect', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Module != "github.com/foo/bar" {
+		t.Errorf("expected module 'github.com/foo/bar', got %s", result.Violations[0].Module)
+	}
+}
+
+// TestEvaluate_ForbidReplaceRedirect_OtherHighFindingPasses verifies the rule
+// matches by finding category, not severity: a HIGH-severity finding of a
+// different kind (e.g. a future go.sum integrity check) must not trigger it.
+func TestEvaluate_ForbidReplaceRedirect_OtherHighFindingPasses(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "gosum_mismatch",
+				Severity: scanner.IntegrityHigh,
+				Module:   "github.com/foo/bar",
+				Detail:   "go.sum entry does not match module content",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (non-redirect HIGH finding must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidReplaceRedirect_VersionPinPasses verifies that a
+// version-pin (LOW) replace does not trigger the policy — only redirect
+// replaces are rejected.
+func TestEvaluate_ForbidReplaceRedirect_VersionPinPasses(t *testing.T) {
+	p := &policy.Policy{ForbidReplaceRedirect: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "replace_version_pin",
+				Severity: scanner.IntegrityLow,
+				Module:   "github.com/foo/bar",
+				Detail:   "github.com/foo/bar is version-pinned to v1.0.1",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (version-pin replace must not trigger forbid_replace_redirect), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_NonTestOnly verifies that a non-test-only
+// dependency pinned to a pseudo-version fails the policy.
+func TestEvaluate_ForbidPseudoVersions_NonTestOnly(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	isTestOnly := false
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "github.com/unidoc/garabic",
+			Version:       "v0.0.0-20220101000000-abc123def456",
+			Direct:        true,
+			PseudoVersion: true,
+			IsTestOnly:    &isTestOnly,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "forbid_pseudo_versions" {
+		t.Errorf("expected rule 'forbid_pseudo_versions', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Module != "github.com/unidoc/garabic" {
+		t.Errorf("expected module 'github.com/unidoc/garabic', got %s", result.Violations[0].Module)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_ConfirmedTestOnlyPasses verifies that a
+// confirmed test-only (IsTestOnly == &true) pseudo-version pin is exempted.
+func TestEvaluate_ForbidPseudoVersions_ConfirmedTestOnlyPasses(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	isTestOnly := true
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "github.com/google/go-cmdtest",
+			Version:       "v0.4.1-0.20220921163831-64d0910b0f3a",
+			Direct:        true,
+			PseudoVersion: true,
+			IsTestOnly:    &isTestOnly,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true (confirmed test-only pseudo-version must be exempted), got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_UnknownTestOnlyDenies verifies that a
+// nil (unknown) IsTestOnly classification is treated as not-test-only and
+// denied, matching the scorer's under-discount-when-unverified convention.
+func TestEvaluate_ForbidPseudoVersions_UnknownTestOnlyDenies(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:        "golang.org/x/telemetry",
+			Version:       "v0.0.0-20260101000000-abc123def456",
+			Direct:        false,
+			PseudoVersion: true,
+			IsTestOnly:    nil,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if result.Pass {
+		t.Errorf("expected Pass=false (unknown test-only must be denied, not exempted), got true")
+	}
+}
+
+// TestEvaluate_ForbidPseudoVersions_NoPin verifies that a dependency without
+// a pseudo-version pin never triggers the policy.
+func TestEvaluate_ForbidPseudoVersions_NoPin(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+
+	deps := []*scorer.DependencyScore{
+		{
+			Module:  "golang.org/x/text",
+			Version: "v1.0.0",
+			Direct:  true,
+		},
+	}
+
+	result := p.Evaluate(makeEvalInput(deps, 30))
+
+	if !result.Pass {
+		t.Errorf("expected Pass=true, got false: %+v", result.Violations)
+	}
+}
+
+// TestEvaluate_RequireGoSumVerified_Mismatch verifies that a confirmed
+// `go mod verify` mismatch fails the require_gosum_verified rule and the
+// violation carries the gosum_mismatch finding detail.
+func TestEvaluate_RequireGoSumVerified_Mismatch(t *testing.T) {
+	p := &policy.Policy{RequireGoSumVerified: true}
+
+	input := makeEvalInput(nil, 0)
+	input.IntegrityReport = &scanner.IntegrityReport{
+		GoSumVerified: scanner.GoSumVerifiedFalse,
+		Findings: []scanner.IntegrityFinding{
+			{
+				Category: "gosum_mismatch",
+				Severity: scanner.IntegrityCritical,
+				Module:   "go.sum",
+				Detail:   "go mod verify failed: verifying gopkg.in/yaml.v3@v3.0.1/go.mod: checksum mismatch",
+			},
+		},
+	}
+
+	result := p.Evaluate(input)
+
+	if result.Pass {
+		t.Errorf("expected Pass=false, got true")
+	}
+	if len(result.Violations) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(result.Violations))
+	}
+	if result.Violations[0].Rule != "require_gosum_verified" {
+		t.Errorf("expected rule 'require_gosum_verified', got %s", result.Violations[0].Rule)
+	}
+	if result.Violations[0].Detail != input.IntegrityReport.Findings[0].Detail {
+		t.Errorf("expected violation to carry the gosum_mismatch detail, got %q", result.Violations[0].Detail)
+	}
+}
+
+// TestEvaluate_RequireGoSumVerified_UnknownStatesPass verifies the
+// honest-UNKNOWN contract: "true", "offline", "skipped", and never-attempted
+// verification all pass — only a confirmed mismatch fails.
+func TestEvaluate_RequireGoSumVerified_UnknownStatesPass(t *testing.T) {
+	p := &policy.Policy{RequireGoSumVerified: true}
+
+	for _, state := range []string{
+		scanner.GoSumVerifiedTrue,
+		scanner.GoSumVerifiedOffline,
+		scanner.GoSumVerifiedSkipped,
+		"", // verification never attempted
+	} {
+		input := makeEvalInput(nil, 0)
+		input.IntegrityReport = &scanner.IntegrityReport{GoSumVerified: state}
+
+		result := p.Evaluate(input)
+
+		if !result.Pass {
+			t.Errorf("state %q: expected Pass=true (only a confirmed mismatch fails), got false: %+v", state, result.Violations)
+		}
 	}
 }
 

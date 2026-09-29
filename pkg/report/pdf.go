@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/unidoc/unipdf/v3/common/license"
-	"github.com/unidoc/unipdf/v3/creator"
-	"github.com/unidoc/unipdf/v3/model"
+	"github.com/unidoc/unipdf/v5/common/license"
+	"github.com/unidoc/unipdf/v5/creator"
+	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/progress"
@@ -20,10 +21,11 @@ import (
 
 // PDFOptions configures PDF report generation.
 type PDFOptions struct {
-	OutputPath string
-	GoVersion  string
-	CIReport   *scanner.CIReport
-	Takeovers  []*scanner.MaintainerInfo
+	OutputPath      string
+	GoVersion       string
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
+	Takeovers       []*scanner.MaintainerInfo
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
@@ -77,10 +79,18 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 		writeCISection(c, opts.CIReport, helvetica, helveticaBold)
 	}
 
+	if opts.IntegrityReport != nil {
+		rep.Step("module directives section")
+		writeIntegritySection(c, opts.IntegrityReport, helvetica, helveticaBold)
+	}
+
 	if len(opts.Takeovers) > 0 {
 		rep.Step("takeover candidates section")
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
+
+	rep.Step("vulnerability ID appendix")
+	writeVulnAliasAppendix(c, ps, helvetica, helveticaBold)
 
 	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
@@ -141,7 +151,7 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 	// Supply-chain risk score — large indicator.
 	scoreColor := pdfRiskColor(ps.OverallLevel)
 	scorePara := c.NewStyledParagraph()
-	sChunk := scorePara.Append(fmt.Sprintf("Supply-Chain Risk: %d/100 (%s)", ps.OverallScore, ps.OverallLevel))
+	sChunk := scorePara.Append("Supply-Chain Risk: " + pdfHeadlineText(ps))
 	sChunk.Style.Font = bold
 	sChunk.Style.FontSize = 24
 	sChunk.Style.Color = scoreColor
@@ -214,7 +224,10 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Direct Dependencies", fmt.Sprintf("%d", directCount), regular, bold)
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
-	addTableRow(c, table, "Supply-Chain Risk", fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel), regular, bold)
+	addTableRow(c, table, "Supply-Chain Risk", pdfHeadlineText(ps), regular, bold)
+	if ps.HeadlineUnscoredReason != "" {
+		addTableRow(c, table, "Not Scored Because", ps.HeadlineUnscoredReason, regular, bold)
+	}
 	if ps.HeadlineDriver != "" {
 		addTableRow(c, table, "Headline Driver", ps.HeadlineDriver, regular, bold)
 		addTableRow(c, table, "Mean Dep Risk", fmt.Sprintf("%d", ps.MeanDepRiskScore), regular, bold)
@@ -258,11 +271,11 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	_ = c.Draw(findings)
 
 	// Data-quality notes: list vulns where enrichment was attempted but failed.
-	var failedVulns []scanner.Vulnerability
+	var failedVulns []*scanner.Vulnerability
 	for _, ds := range ps.Dependencies {
-		for _, v := range ds.Vulns {
-			if v.EnrichmentFailed {
-				failedVulns = append(failedVulns, v)
+		for i := range ds.Vulns {
+			if ds.Vulns[i].EnrichmentFailed {
+				failedVulns = append(failedVulns, &ds.Vulns[i])
 			}
 		}
 	}
@@ -367,6 +380,8 @@ func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular
 	}
 
 	_ = c.Draw(table)
+
+	writeVulnDetailBlocks(c, medRisk, regular, bold)
 }
 
 func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
@@ -394,6 +409,27 @@ func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, b
 	}
 
 	_ = c.Draw(table)
+
+	writeVulnDetailBlocks(c, lowRisk, regular, bold)
+}
+
+// writeVulnDetailBlocks appends full dependency blocks for the deps in
+// bucket that carry vulnerabilities. No-op when none do.
+func writeVulnDetailBlocks(c *creator.Creator, bucket []*scorer.DependencyScore, regular, bold *model.PdfFont) {
+	var vulnDeps []*scorer.DependencyScore
+	for _, ds := range bucket {
+		if len(ds.Vulns) > 0 {
+			vulnDeps = append(vulnDeps, ds)
+		}
+	}
+	if len(vulnDeps) == 0 {
+		return
+	}
+
+	subheading(c, "Vulnerability Details", bold)
+	for _, ds := range vulnDeps {
+		writeDependencyBlock(c, ds, regular, bold, true)
+	}
 }
 
 func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bold *model.PdfFont) {
@@ -417,9 +453,9 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 	addBullet(stats, fmt.Sprintf("Total findings: %d", ciReport.TotalFindings), regular)
 	_ = c.Draw(stats)
 
-	// ## CI/CD — per-workflow findings. Always present so reviewers can confirm the
+	// CI/CD — per-workflow findings. Always present so reviewers can confirm the
 	// scanner ran even when there are no workflow findings.
-	subheading(c, "## CI/CD", bold)
+	subheading(c, "CI/CD", bold)
 
 	ciCount := 0
 	for _, wr := range ciReport.Workflows {
@@ -453,9 +489,9 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 		_ = c.Draw(p)
 	}
 
-	// ## Build files — build pipeline findings. Always present so reviewers can
+	// Build files — build pipeline findings. Always present so reviewers can
 	// confirm the scanner ran even when there are no build-file findings.
-	subheading(c, "## Build files", bold)
+	subheading(c, "Build files", bold)
 
 	if len(ciReport.BuildFindings) > 0 {
 		table := c.NewTable(4)
@@ -482,6 +518,44 @@ func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bol
 		ch.Style.FontSize = 10
 		_ = c.Draw(p)
 	}
+}
+
+func writeIntegritySection(c *creator.Creator, ir *scanner.IntegrityReport, regular, bold *model.PdfFont) {
+	c.NewPage()
+	heading(c, "Module Directives", bold)
+
+	stats := c.NewStyledParagraph()
+	stats.SetLineHeight(1.6)
+	addBullet(stats, fmt.Sprintf("Replace directives: %d (%d redirect to a different module)", ir.ReplaceCount, ir.RedirectCount), regular)
+	addBullet(stats, fmt.Sprintf("Exclude directives: %d", ir.ExcludeCount), regular)
+	addBullet(stats, fmt.Sprintf("Pseudo-version pins: %d", ir.PseudoVersionCount), regular)
+	if ir.GoSumVerified != "" {
+		addBullet(stats, "go.sum verification (go mod verify): "+gosumLabel(ir.GoSumVerified), regular)
+	}
+	_ = c.Draw(stats)
+
+	if len(ir.Findings) == 0 {
+		p := c.NewStyledParagraph()
+		ch := p.Append("No findings")
+		ch.Style.Font = regular
+		ch.Style.FontSize = 10
+		_ = c.Draw(p)
+		return
+	}
+
+	table := c.NewTable(3)
+	table.SetMargins(0, 0, 5, 10)
+	if err := table.SetColumnWidths(0.15, 0.55, 0.3); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
+	addTableHeader(c, table, []string{"Severity", "Detail", "Remediation"}, bold)
+
+	for _, f := range ir.Findings {
+		addTableRow3(c, table, string(f.Severity), f.Detail, f.Remediation, regular)
+	}
+
+	_ = c.Draw(table)
 }
 
 func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInfo, regular, bold *model.PdfFont) {
@@ -513,6 +587,44 @@ func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInf
 		)
 	}
 
+	_ = c.Draw(table)
+}
+
+// writeVulnAliasAppendix renders the Go-advisory-ID → CVE/GHSA mapping. The
+// report identifies advisories by their Go advisory ID, the only identifier
+// govulncheck guarantees; this appendix is where a reader translates one into
+// the identifier their own tooling uses. Skipped when no advisory in the
+// report carries an alias.
+func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	// nil stdlib: PDFOptions carries no StdlibVulns, because the PDF has no
+	// stdlib-vulnerability section to alias in the first place (a text/PDF
+	// parity gap, tracked separately).
+	entries := collectVulnAliases(ps, nil)
+	if len(entries) == 0 {
+		return
+	}
+
+	c.NewPage()
+	heading(c, "Appendix: Vulnerability ID Aliases", bold)
+
+	intro := c.NewStyledParagraph()
+	intro.SetMargins(0, 0, 0, 10)
+	introChunk := intro.Append("Findings in this report identify each advisory by its Go advisory ID. " +
+		"The table below maps those to the CVE and GHSA identifiers for the same advisory.")
+	introChunk.Style.Font = regular
+	introChunk.Style.FontSize = 9
+	if err := c.Draw(intro); err != nil {
+		return
+	}
+
+	table := c.NewTable(2)
+	if err := table.SetColumnWidths(0.35, 0.65); err != nil {
+		return
+	}
+	addTableHeader(c, table, []string{"Go Advisory", "Also known as"}, bold)
+	for _, e := range entries {
+		addTableRow(c, table, e.ID, strings.Join(e.Aliases, ", "), regular, bold)
+	}
 	_ = c.Draw(table)
 }
 
@@ -675,9 +787,18 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	details.SetMargins(20, 0, 0, 10)
 	details.SetLineHeight(1.5)
 
-	// Vulnerabilities.
-	for _, v := range ds.Vulns {
-		aliases := strings.Join(v.Aliases, ", ")
+	// Vulnerabilities, sorted KEV-first then EPSS descending — highest
+	// threat-intel risk at the top of the listing.
+	vulns := make([]scanner.Vulnerability, len(ds.Vulns))
+	copy(vulns, ds.Vulns)
+	sort.SliceStable(vulns, func(i, j int) bool {
+		if vulns[i].InKEV != vulns[j].InKEV {
+			return vulns[i].InKEV
+		}
+		return epssOrZero(&vulns[i]) > epssOrZero(&vulns[j])
+	})
+	for i := range vulns {
+		v := &vulns[i]
 		// Append an inline reachability tag when the tier is not "called" (the
 		// most-severe tier).  Empty Reachability is treated as called for
 		// backward compatibility with non-govulncheck CVE sources.
@@ -686,7 +807,11 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		case "imported", "required":
 			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
 		}
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s — %s", v.ID, v.Severity, reachTag, aliases), regular)
+		ti := epssBadge(v)
+		if v.InKEV {
+			ti += " [KEV — exploited in the wild]"
+		}
+		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), regular)
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}
@@ -718,6 +843,40 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	_ = c.Draw(details)
 }
 
+// epssOrZero returns the vuln's EPSS score, treating absent as 0 for sorting.
+func epssOrZero(v *scanner.Vulnerability) float64 {
+	if v.EPSSScore == nil {
+		return 0
+	}
+	return *v.EPSSScore
+}
+
+// epssBadge renders the " [EPSS NN%]" badge from the vuln's EPSS score — the
+// estimated exploitation probability, the same signal the scorer acts on (not
+// the percentile). Empty when no score is available. Scores that would round
+// to 0% render as "<1%" so a real, tiny probability is not shown as zero.
+func epssBadge(v *scanner.Vulnerability) string {
+	if v.EPSSScore == nil {
+		return ""
+	}
+	pct := *v.EPSSScore * 100
+	if pct > 0 && pct < 1 {
+		return " [EPSS <1%]"
+	}
+	return fmt.Sprintf(" [EPSS %.0f%%]", pct)
+}
+
+// pdfHeadlineText renders the headline for both the cover indicator and the
+// summary table. An unscored headline leads with UNKNOWN and labels the number
+// as indicative — a PDF gets forwarded to people who never ran the scan, so
+// "26/100 (UNKNOWN)" would be read as a scored 26.
+func pdfHeadlineText(ps *scorer.ProjectScore) string {
+	if ps.OverallLevel == scorer.RiskUnknown {
+		return fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)
+	}
+	return fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)
+}
+
 func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 	switch level {
 	case scorer.RiskCritical:
@@ -726,6 +885,10 @@ func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 		return creator.ColorRGBFromHex("#e67300")
 	case scorer.RiskMedium:
 		return creator.ColorRGBFromHex("#ccaa00")
+	case scorer.RiskUnknown:
+		// Grey, not the default green — an unscored headline must not read as a
+		// pass in a report that gets forwarded to people who never ran the scan.
+		return creator.ColorRGBFromHex("#666666")
 	default:
 		return creator.ColorRGBFromHex("#009900")
 	}

@@ -2,6 +2,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,6 +58,34 @@ type Policy struct {
 
 	// MaxCIScore fails if the CI/CD risk score exceeds this.
 	MaxCIScore *int `json:"max_ci_score,omitempty"`
+
+	// ForbidReplaceRedirect fails if any go.mod replace directive redirects a
+	// module to a different module path (fork/private-mirror redirect).
+	// Version-pin and local-path replaces are not affected by this rule.
+	//
+	// Deliberate asymmetry with the integrity_floor headline candidate (which
+	// skips test-only dependencies): this policy check fires on a redirect
+	// even when the replaced module is test-only, because test-time code still
+	// executes in CI (with access to CI secrets) and a hijacked test-only
+	// dependency is not a safe blind spot.
+	ForbidReplaceRedirect bool `json:"forbid_replace_redirect,omitempty"`
+
+	// RequireGoSumVerified fails when `go mod verify` reported a checksum
+	// mismatch (IntegrityReport.GoSumVerified == "false"). Honest-UNKNOWN
+	// outcomes ("offline", "skipped", or verification never attempted) do NOT
+	// fail — this rule rejects confirmed tampering, not missing data.
+	RequireGoSumVerified bool `json:"require_gosum_verified,omitempty"`
+
+	// ForbidPseudoVersions fails if any non-test-only dependency is pinned to
+	// a pseudo-version (scorer.DependencyScore.PseudoVersion).
+	//
+	// Deliberate asymmetry with ForbidReplaceRedirect (which fires even on
+	// test-only deps because test code still runs in CI with access to
+	// secrets): a pseudo-version pin is a provenance/pinning-hygiene signal,
+	// not a hijack vector, so this rule exempts confirmed test-only deps.
+	// A nil (unknown) IsTestOnly is treated as not-test-only — deny — matching
+	// the scorer convention of under-discounting unverified classifications.
+	ForbidPseudoVersions bool `json:"forbid_pseudo_versions,omitempty"`
 }
 
 // Violation represents a single policy violation.
@@ -81,7 +110,9 @@ func LoadPolicy(path string) (*Policy, error) {
 	}
 
 	var p Policy
-	if err := json.Unmarshal(data, &p); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("parsing policy file: %w", err)
 	}
 
@@ -90,10 +121,11 @@ func LoadPolicy(path string) (*Policy, error) {
 
 // EvalInput bundles all data needed for policy evaluation.
 type EvalInput struct {
-	ProjectScore *scorer.ProjectScore
-	Maintainers  map[string]*scanner.MaintainerInfo
-	Typosquats   map[string]*scanner.TyposquatResult
-	CIReport     *scanner.CIReport
+	ProjectScore    *scorer.ProjectScore
+	Maintainers     map[string]*scanner.MaintainerInfo
+	Typosquats      map[string]*scanner.TyposquatResult
+	CIReport        *scanner.CIReport
+	IntegrityReport *scanner.IntegrityReport
 }
 
 // Evaluate checks all dependencies against the policy and returns violations.
@@ -118,8 +150,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		// No known vulns.
 		if p.NoKnownVulns && len(ds.Vulns) > 0 {
 			ids := make([]string, 0, len(ds.Vulns))
-			for _, v := range ds.Vulns {
-				ids = append(ids, v.ID)
+			for i := range ds.Vulns {
+				ids = append(ids, ds.Vulns[i].ID)
 			}
 			result.addError("no_known_vulns", ds.Module,
 				fmt.Sprintf("has %d known vulnerabilities: %s", len(ds.Vulns), strings.Join(ids, ", ")))
@@ -127,7 +159,8 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// No critical vulns.
 		if p.NoCriticalVulns {
-			for _, v := range ds.Vulns {
+			for i := range ds.Vulns {
+				v := &ds.Vulns[i]
 				sev := strings.ToUpper(v.Severity)
 				if sev == "CRITICAL" || sev == "HIGH" {
 					result.addError("no_critical_vulns", ds.Module,
@@ -143,6 +176,17 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 					result.addError("no_single_maintainer", ds.Module,
 						fmt.Sprintf("bus factor is %d (single maintainer risk)", mi.BusFactor))
 				}
+			}
+		}
+
+		// Forbid pseudo-versions on the import path. Confirmed test-only deps
+		// (IsTestOnly == &true) are exempted; nil (unknown) is treated as
+		// not-test-only and denied.
+		if p.ForbidPseudoVersions && ds.PseudoVersion {
+			testOnly := ds.IsTestOnly != nil && *ds.IsTestOnly
+			if !testOnly {
+				result.addError("forbid_pseudo_versions", ds.Module,
+					fmt.Sprintf("pinned to pseudo-version %s", ds.Version))
 			}
 		}
 
@@ -206,6 +250,33 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 	}
 
+	// No replace-redirect: fail on any replace directive that redirects to a
+	// different module path. Version-pin, local-path, and major-version
+	// replaces are not affected, nor are other integrity finding kinds —
+	// the rule matches by category, not severity.
+	if p.ForbidReplaceRedirect && input.IntegrityReport != nil {
+		for _, f := range input.IntegrityReport.Findings {
+			if f.Category == scanner.IntegrityCategoryReplaceRedirect {
+				result.addError("forbid_replace_redirect", f.Module, f.Detail)
+			}
+		}
+	}
+
+	// Go.sum verification: fail only on a confirmed mismatch. Use the
+	// gosum_mismatch finding detail when present so the violation carries the
+	// actual `go mod verify` output.
+	if p.RequireGoSumVerified && input.IntegrityReport != nil &&
+		input.IntegrityReport.GoSumVerified == scanner.GoSumVerifiedFalse {
+		detail := "go mod verify reported a checksum mismatch — go.sum does not match the local module cache"
+		for _, f := range input.IntegrityReport.Findings {
+			if f.Category == "gosum_mismatch" {
+				detail = f.Detail
+				break
+			}
+		}
+		result.addError("require_gosum_verified", "go.sum", detail)
+	}
+
 	return result
 }
 
@@ -264,14 +335,17 @@ func DefaultStrictPolicy() *Policy {
 	maxCI := 50
 
 	return &Policy{
-		MaxRiskScore:         &maxRisk,
-		MaxOverallScore:      &maxOverall,
-		NoCriticalVulns:      true,
-		NoSingleMaintainer:   true,
-		NoUnmaintainedMonths: &maxUnmaintained,
-		NoArchived:           true,
-		NoTyposquatting:      true,
-		MaxCIScore:           &maxCI,
+		MaxRiskScore:          &maxRisk,
+		MaxOverallScore:       &maxOverall,
+		NoCriticalVulns:       true,
+		NoSingleMaintainer:    true,
+		NoUnmaintainedMonths:  &maxUnmaintained,
+		NoArchived:            true,
+		NoTyposquatting:       true,
+		MaxCIScore:            &maxCI,
+		ForbidReplaceRedirect: true,
+		RequireGoSumVerified:  true,
+		ForbidPseudoVersions:  true,
 	}
 }
 

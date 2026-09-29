@@ -139,7 +139,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		if cached == nil || cached.Source == "none" || cached.Severity == "" {
 			// Cached failure — restore failure state identically to the live path.
 			markEnrichmentFailed(v)
-			msg := fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID)
+			msg := severityLookupFailedPrefix + v.ID + "; severity remains UNKNOWN"
 			if len(v.EnrichmentErrors) == 0 {
 				v.EnrichmentErrors = []string{msg}
 			}
@@ -203,7 +203,7 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 	failureResult := &enrichResult{Source: "none"}
 	e.saveCache(v.ID, failureResult)
 	markEnrichmentFailed(v)
-	msg := fmt.Sprintf("severity lookup failed (OSV/NVD/GitHub) for %s; severity remains UNKNOWN", v.ID)
+	msg := severityLookupFailedPrefix + v.ID + "; severity remains UNKNOWN"
 	v.EnrichmentErrors = []string{msg}
 	warnings = append(warnings, msg)
 	return warnings
@@ -294,6 +294,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 		Host:     osvHost,
 		MaxBytes: enrichMaxBytes,
 		Accept:   "application/json",
+		Purpose:  "vulnenrich:osv",
 	})
 
 	if err != nil {
@@ -385,6 +386,7 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 		Host:     nvdHost,
 		MaxBytes: enrichMaxBytes,
 		Accept:   "application/json",
+		Purpose:  "vulnenrich:nvd",
 	})
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
@@ -453,6 +455,7 @@ func (e *VulnEnricher) fetchGHSAByCVE(ctx context.Context, cveID string) (result
 		MaxBytes:   enrichMaxBytes,
 		AuthHeader: authHeader,
 		Accept:     "application/vnd.github+json",
+		Purpose:    "vulnenrich:ghsa",
 	})
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: GitHub Advisory fetch error for %s: %v", cveID, err))
