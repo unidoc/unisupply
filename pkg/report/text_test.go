@@ -761,7 +761,7 @@ func TestWriteText_TimeBombScopeNote(t *testing.T) {
 	out := opts.Writer.(*bytes.Buffer).String()
 
 	for _, want := range []string{
-		"TIME-BOMBS (1)\n  Any non-test dependency, direct or transitive,",
+		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only,",
 		"github.com/google/go-cmdtest — archived 53 months",
 	} {
 		if !strings.Contains(out, want) {
@@ -791,7 +791,7 @@ func TestWriteText_NoTimeBombsNoNote(t *testing.T) {
 		t.Fatalf("WriteText() failed: %v", err)
 	}
 	out := opts.Writer.(*bytes.Buffer).String()
-	if strings.Contains(out, "TIME-BOMBS") || strings.Contains(out, "Any non-test dependency") {
+	if strings.Contains(out, "TIME-BOMBS") || strings.Contains(out, "not confirmed as test-only") {
 		t.Errorf("no time bombs: TIME-BOMBS block and its note must be absent:\n%s", out)
 	}
 }

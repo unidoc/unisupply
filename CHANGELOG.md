@@ -12,8 +12,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 #### Time bombs explained in every report; PDF reports now list them
 
 - **The text report, PDF report and weekly security issue now say what a
-  time bomb is:** any non-test dependency, direct or transitive, that is
-  archived upstream or has a CISA KEV-listed or CRITICAL CVE. An archived
+  time bomb is:** any dependency, direct or transitive and not confirmed as
+  test-only, that is archived upstream or has a CISA KEV-listed or CRITICAL
+  CVE. An archived
   module cannot be fixed by updating — it has to be replaced or removed — and
   age alone does not make a time bomb (modules with no recent release are
   counted under Unmaintained).

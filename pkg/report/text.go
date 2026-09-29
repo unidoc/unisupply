@@ -895,8 +895,8 @@ func reachabilityTag(r string) string {
 // would fix. Shared by the text and PDF reports; the weekly issue renderer
 // (.github/scripts/render-scan-report.sh) keeps its own copy, which also
 // relates it to the workflow's stale-dependency check.
-const timeBombScopeNote = "Any non-test dependency, direct or transitive, that is archived upstream " +
-	"or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
+const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only, that is " +
+	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
 	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
 	"modules with no recent release are counted under Unmaintained."
 

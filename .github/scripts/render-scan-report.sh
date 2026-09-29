@@ -161,11 +161,11 @@ fi
 TIMEBOMB_COUNT=$(jq_field '(.time_bombs // []) | length')
 echo "## Time bombs (${TIMEBOMB_COUNT})"
 echo
-echo "_Any non-test dependency, direct or transitive, that is archived"
-echo "upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix"
-echo "an archived module, because upstream has stopped: it has to be replaced"
-echo "or removed. It shows under Stale dependencies only when it is a direct"
-echo "dependency that still has a newer release to take._"
+echo "_Any dependency, direct or transitive and not confirmed as test-only,"
+echo "that is archived upstream or has a CISA KEV-listed or CRITICAL CVE."
+echo "Updating cannot fix an archived module, because upstream has stopped: it"
+echo "has to be replaced or removed. It shows under Stale dependencies only when"
+echo "it is a direct dependency that still has a newer release to take._"
 echo
 if [ "$TIMEBOMB_COUNT" -gt 0 ]; then
   echo "| Kind | Module | Detail | Reachability |"

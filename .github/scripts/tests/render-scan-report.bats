@@ -3,8 +3,8 @@
 #
 # The weekly issue lists stale dependencies and time bombs side by side, and
 # they measure different things: stale covers direct dependencies behind an
-# available update, time bombs cover any non-test dependency that is archived
-# or carries a KEV/CRITICAL CVE. Each section carries a note saying so, so a
+# available update, time bombs cover any dependency not confirmed as test-only
+# that is archived or carries a KEV/CRITICAL CVE. Each section carries a note saying so, so a
 # report with "no stale dependencies" next to an archived time bomb does not
 # read as a contradiction.
 
@@ -23,7 +23,7 @@ ARCHIVED_BOMB='{"time_bombs":[{"kind":"archived","module":"github.com/google/go-
   run "$SCRIPT" "$JSON"
   [ "$status" -eq 0 ]
   [[ "$output" == *"## Time bombs (1)"* ]]
-  [[ "$output" == *"Any non-test dependency, direct or transitive"* ]]
+  [[ "$output" == *"Any dependency, direct or transitive and not confirmed as test-only,"* ]]
   [[ "$output" == *"Updating cannot fix"* ]]
   [[ "$output" == *'`github.com/google/go-cmdtest`'* ]]
 }
@@ -33,7 +33,7 @@ ARCHIVED_BOMB='{"time_bombs":[{"kind":"archived","module":"github.com/google/go-
   run "$SCRIPT" "$JSON"
   [ "$status" -eq 0 ]
   [[ "$output" == *"## Time bombs (0)"* ]]
-  [[ "$output" == *"Any non-test dependency, direct or transitive"* ]]
+  [[ "$output" == *"Any dependency, direct or transitive and not confirmed as test-only,"* ]]
 }
 
 @test "stale dependencies section states it covers direct dependencies only" {
