@@ -3,7 +3,7 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-29
 
 ### New Features
 
@@ -500,6 +500,7 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/unidoc/unisupply/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/unidoc/unisupply/releases/tag/v0.4.0
