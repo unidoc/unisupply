@@ -94,7 +94,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 
 - Go 1.26.8, no CGo
 - `github.com/spf13/pflag` — CLI flags
-- `github.com/unidoc/unipdf/v3` — PDF report generation (dogfooding)
+- `github.com/unidoc/unipdf/v5` — PDF report generation (dogfooding)
 - `github.com/unidoc/unichart` — Charts in PDF reports
 - `golang.org/x/vuln` — Go vulnerability database
 - `gopkg.in/yaml.v3` — GitHub Actions workflow parsing

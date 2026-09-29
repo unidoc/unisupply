@@ -104,6 +104,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `requires go >= 1.26.8` error. Prebuilt release binaries are unaffected.
 - CI now tests against Go 1.26.8 and 1.27.1.
 
+#### PDF reports now use UniPDF v5
+
+- **The archived `github.com/gorilla/i18n` is no longer compiled into the
+  binary.** UniPDF v3's line breaking imported it, so every v0.5.0 binary
+  shipped code from an archived repository, pinned at a 2015 commit. PDF generation
+  moves from `github.com/unidoc/unipdf/v3` v3.69.0 to
+  `github.com/unidoc/unipdf/v5` v5.1.0, which no longer depends on it; the
+  change is import paths only. Report output is unchanged: on the same scan
+  target, six of seven pages have byte-identical content streams, and the
+  seventh differs only in the order of the takeover-candidate rows, which
+  already varies between runs of the same binary.
+- Compiled in: removed `github.com/gorilla/i18n` and
+  `github.com/gabriel-vasile/mimetype`; added `github.com/unidoc/typesetting`
+  (Unlicense OR BSD-3-Clause, used under BSD-3-Clause) and
+  `github.com/h2non/filetype` (MIT). In the module graph only: removed
+  `github.com/trimmer-io/go-xmp`; added `github.com/unidoc/go-xmp` and
+  `github.com/go-text/typesetting-utils`. UniPDF's own dependencies also move
+  (`unidoc/unichart` v0.5.2, `unidoc/freetype` v0.2.5, `unidoc/pkcs7` v0.3.0).
+
 #### Reports: one vulnerability identifier, and one warning per failure mode
 
 - **The Go advisory ID is now the single identifier in text and PDF output.**
@@ -253,6 +272,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and charged up to 6 points for it. Both the factor and the bonus now require
   `DataAvailable`, as does the matching explanation line in text reports.
   Affects any scan where the module proxy is unreachable or rate-limits.
+- **PDF reports no longer print a literal `##` in CI/CD subheadings.** The
+  "CI/CD" and "Build files" subheadings of the CI/CD Risk Assessment section
+  rendered as `## CI/CD` and `## Build files` — a Markdown marker the PDF
+  printed as text.
 
 ### Security Patches
 
