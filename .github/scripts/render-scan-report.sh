@@ -153,7 +153,10 @@ fi
 
 # --- Time bombs --------------------------------------------------------------
 #
-# Never inside <details>. These exist to be undeniable.
+# Never inside <details>. These exist to be undeniable. The scope note mirrors
+# timeBombScopeNote in pkg/report/text.go (used by the text and PDF reports);
+# this copy also relates it to the stale-dependency check, which only the
+# workflow runs.
 
 TIMEBOMB_COUNT=$(jq_field '(.time_bombs // []) | length')
 echo "## Time bombs (${TIMEBOMB_COUNT})"

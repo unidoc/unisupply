@@ -9,18 +9,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
-#### Weekly security report: stale dependencies and time bombs explained
+#### Time bombs explained in every report; PDF reports now list them
 
-- **Each section now says what it counts.** A report could read "Stale
-  dependencies (>90d): false" next to an archived time bomb — for example
-  `github.com/google/go-cmdtest` in 2026-W40 — which looks like a
-  contradiction but is not: the stale check covers direct dependencies that
-  have a newer version available, pinned more than 90 days ago, while time
-  bombs cover any non-test dependency, direct or transitive, that is archived
-  or has a CISA KEV-listed or CRITICAL CVE. `go-cmdtest` is transitive and has
-  no newer release, so the stale check never considers it. Both sections now
-  carry a note stating their scope, in the issue body and the job summary
-  alike, and the renderer has bats tests in CI.
+- **The text report, PDF report and weekly security issue now say what a
+  time bomb is:** any non-test dependency, direct or transitive, that is
+  archived upstream or has a CISA KEV-listed or CRITICAL CVE. An archived
+  module cannot be fixed by updating — it has to be replaced or removed — and
+  age alone does not make a time bomb (modules with no recent release are
+  counted under Unmaintained).
+- **PDF reports now have a Time Bombs section** under Key Findings, listing
+  each one's kind, module and detail. Previously the PDF named only the
+  headline rule on its cover (`Driver: archived_floor`), not the module
+  behind it.
+- **The weekly security issue explains its stale-dependency check.** It could
+  read "Stale dependencies (>90d): false" next to an archived time bomb — for
+  example `github.com/google/go-cmdtest` in 2026-W40. That is not a
+  contradiction: the stale check covers direct dependencies that have a newer
+  version available, pinned more than 90 days ago, and `go-cmdtest` is
+  transitive with no newer release. Both sections of the issue and the job
+  summary now carry a note stating their scope, and the renderer has bats
+  tests in CI.
 
 ## [0.6.0] - 2026-09-29
 
