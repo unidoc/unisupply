@@ -255,7 +255,7 @@ just clean                     # remove artifacts
 
 ## Status
 
-**v0.4.0 — Feature complete.** All 10 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
+**v0.6.0 — Feature complete.** All 10 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
 
 ## Relationship to UniDoc ecosystem
 
