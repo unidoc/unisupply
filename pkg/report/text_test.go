@@ -725,3 +725,94 @@ func TestWriteText_ReachabilityAllCalled(t *testing.T) {
 		t.Errorf("[called] tag should be suppressed; output:\n%s", out)
 	}
 }
+
+// archivedTimeBombScore returns a project with one archived transitive
+// dependency, which CollectTimeBombs reports as an "archived" time bomb.
+func archivedTimeBombScore() *scorer.ProjectScore {
+	return &scorer.ProjectScore{
+		OverallScore: 51,
+		OverallLevel: scorer.RiskHigh,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "github.com/google/go-cmdtest",
+				Version:   "v0.4.1-0.20220921163831-55ab3332a786",
+				RiskScore: 30,
+				RiskLevel: scorer.RiskMedium,
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived:           true,
+					MonthsSinceRelease: 53,
+				},
+			},
+		},
+	}
+}
+
+// TestWriteText_TimeBombScopeNote verifies the TIME-BOMBS block says what a
+// time bomb is, so an archived transitive module is not read as an outdated
+// dependency that an update would fix.
+func TestWriteText_TimeBombScopeNote(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{
+		Path: "github.com/google/go-cmdtest", Version: "v0.4.1-0.20220921163831-55ab3332a786", Depth: 2,
+	})
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, archivedTimeBombScore(), &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	out := opts.Writer.(*bytes.Buffer).String()
+
+	for _, want := range []string{
+		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only,",
+		"github.com/google/go-cmdtest — archived 53 months",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The note is wrapped, so compare it with whitespace collapsed.
+	flat := strings.Join(strings.Fields(out), " ")
+	if !strings.Contains(flat, timeBombScopeNote) {
+		t.Errorf("output does not contain the full time-bomb note:\n%s", out)
+	}
+}
+
+// TestWriteText_NoTimeBombsNoNote verifies the note is not printed on its own:
+// the TIME-BOMBS block stays absent when there are none.
+func TestWriteText_NoTimeBombsNoNote(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "pkg1", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{
+		OverallScore: 5,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "pkg1", Version: "v1.0.0", Direct: true, RiskScore: 5, RiskLevel: scorer.RiskLow},
+		},
+	}
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	out := opts.Writer.(*bytes.Buffer).String()
+	if strings.Contains(out, "TIME-BOMBS") || strings.Contains(out, "not confirmed as test-only") {
+		t.Errorf("no time bombs: TIME-BOMBS block and its note must be absent:\n%s", out)
+	}
+}
+
+func TestWrapWords(t *testing.T) {
+	lines := wrapWords(timeBombScopeNote, 74)
+	if len(lines) < 2 {
+		t.Fatalf("wrapWords() = %d line(s), want the note wrapped", len(lines))
+	}
+	for _, l := range lines {
+		if n := len([]rune(l)); n > 74 {
+			t.Errorf("line of %d runes exceeds width 74: %q", n, l)
+		}
+	}
+	if got := strings.Join(lines, " "); got != strings.Join(strings.Fields(timeBombScopeNote), " ") {
+		t.Errorf("wrapping lost or reordered words:\n got %q", got)
+	}
+	if got := wrapWords("a-very-long-single-word", 5); len(got) != 1 || got[0] != "a-very-long-single-word" {
+		t.Errorf("an over-long word must get its own line, got %q", got)
+	}
+	if got := wrapWords("", 10); len(got) != 0 {
+		t.Errorf("wrapWords(\"\") = %q, want no lines", got)
+	}
+}

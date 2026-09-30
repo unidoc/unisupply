@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -100,6 +101,9 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	// undeniable visibility, even when the headline already reflects them.
 	if timeBombs := scorer.CollectTimeBombs(ps); len(timeBombs) > 0 {
 		fmt.Fprintf(w, "TIME-BOMBS (%d)\n", len(timeBombs))
+		for _, line := range wrapWords(timeBombScopeNote, 74) {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 		for _, tb := range timeBombs {
 			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
 		}
@@ -884,6 +888,42 @@ func reachabilityTag(r string) string {
 		// "" (legacy / non-govulncheck) and "called" are both untagged.
 		return ""
 	}
+}
+
+// timeBombScopeNote says what makes a dependency a time bomb, so an archived
+// transitive module is not mistaken for an outdated dependency that an update
+// would fix. Shared by the text and PDF reports; the weekly issue renderer
+// (.github/scripts/render-scan-report.sh) keeps its own copy, which also
+// relates it to the workflow's stale-dependency check.
+const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only, that is " +
+	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
+	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
+	"modules with no recent release are counted under Unmaintained."
+
+// wrapWords splits s into lines of at most width runes, breaking at spaces.
+// A single word longer than width gets a line of its own.
+func wrapWords(s string, width int) []string {
+	var lines []string
+	var line strings.Builder
+	n := 0 // runes in line
+	for _, word := range strings.Fields(s) {
+		wn := utf8.RuneCountInString(word)
+		if n > 0 && n+1+wn > width {
+			lines = append(lines, line.String())
+			line.Reset()
+			n = 0
+		}
+		if n > 0 {
+			line.WriteByte(' ')
+			n++
+		}
+		line.WriteString(word)
+		n += wn
+	}
+	if n > 0 {
+		lines = append(lines, line.String())
+	}
+	return lines
 }
 
 // allRequiredReachability returns true when the TIME-BOMBS list contains at

@@ -270,6 +270,8 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addBullet(findings, fmt.Sprintf("Unmaintained dependencies (>1yr): %d", ps.Unmaintained1yr), regular)
 	_ = c.Draw(findings)
 
+	writeTimeBombsSection(c, ps, regular, bold)
+
 	// Data-quality notes: list vulns where enrichment was attempted but failed.
 	var failedVulns []*scanner.Vulnerability
 	for _, ds := range ps.Dependencies {
@@ -676,6 +678,49 @@ func heading(c *creator.Creator, text string, bold *model.PdfFont) {
 	ch.Style.Color = creator.ColorRGBFromHex("#1a1a2e")
 	p.SetMargins(0, 0, 0, 15)
 	_ = c.Draw(p)
+}
+
+// writeTimeBombsSection lists the time bombs, as the text report does. The
+// cover's "Driver: archived_floor" line names the rule, not the module, so
+// without this section a PDF reader cannot tell which dependency drives the
+// headline. Drawn only when there is at least one, like the text report.
+func writeTimeBombsSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+	rows := pdfTimeBombRows(ps)
+	if len(rows) == 0 {
+		return
+	}
+
+	subheading(c, fmt.Sprintf("Time Bombs (%d)", len(rows)), bold)
+
+	note := c.NewStyledParagraph()
+	note.SetMargins(0, 0, 0, 5)
+	ch := note.Append(timeBombScopeNote)
+	ch.Style.Font = regular
+	ch.Style.FontSize = 9
+	ch.Style.Color = creator.ColorRGBFromHex("#666666")
+	_ = c.Draw(note)
+
+	table := c.NewTable(3)
+	table.SetMargins(0, 0, 5, 10)
+	if err := table.SetColumnWidths(0.15, 0.45, 0.4); err != nil {
+		fmt.Printf("Error setting column widths: %v\n", err)
+		return
+	}
+	addTableHeader(c, table, []string{"Kind", "Module", "Detail"}, bold)
+	for _, r := range rows {
+		addTableRow3(c, table, r[0], r[1], r[2], regular)
+	}
+	_ = c.Draw(table)
+}
+
+// pdfTimeBombRows returns one {kind, module, detail} row per time bomb.
+func pdfTimeBombRows(ps *scorer.ProjectScore) [][3]string {
+	bombs := scorer.CollectTimeBombs(ps)
+	rows := make([][3]string, 0, len(bombs))
+	for _, tb := range bombs {
+		rows = append(rows, [3]string{tb.Kind, tb.Module, tb.Detail})
+	}
+	return rows
 }
 
 func subheading(c *creator.Creator, text string, bold *model.PdfFont) {

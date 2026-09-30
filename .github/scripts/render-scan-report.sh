@@ -153,10 +153,19 @@ fi
 
 # --- Time bombs --------------------------------------------------------------
 #
-# Never inside <details>. These exist to be undeniable.
+# Never inside <details>. These exist to be undeniable. The scope note mirrors
+# timeBombScopeNote in pkg/report/text.go (used by the text and PDF reports);
+# this copy also relates it to the stale-dependency check, which only the
+# workflow runs.
 
 TIMEBOMB_COUNT=$(jq_field '(.time_bombs // []) | length')
 echo "## Time bombs (${TIMEBOMB_COUNT})"
+echo
+echo "_Any dependency, direct or transitive and not confirmed as test-only,"
+echo "that is archived upstream or has a CISA KEV-listed or CRITICAL CVE."
+echo "Updating cannot fix an archived module, because upstream has stopped: it"
+echo "has to be replaced or removed. It shows under Stale dependencies only when"
+echo "it is a direct dependency that still has a newer release to take._"
 echo
 if [ "$TIMEBOMB_COUNT" -gt 0 ]; then
   echo "| Kind | Module | Detail | Reachability |"
@@ -360,6 +369,13 @@ fi
 # --- Stale dependencies ------------------------------------------------------
 
 echo "## Stale dependencies"
+echo
+echo "_Direct dependencies only (go.mod requirements without \`// indirect\`)"
+echo "that have a newer version available; the second list narrows that to"
+echo "pinned versions released more than 90 days ago, which is what the"
+echo "\"Stale dependencies (>90d)\" row reports. Transitive dependencies and"
+echo "modules with no newer release are never listed here, however old: see"
+echo "Time bombs and the Summary's unmaintained counts._"
 echo
 echo "<details><summary><strong>Direct dependencies with available updates</strong></summary>"
 echo

@@ -229,3 +229,33 @@ func TestPDFHeadlineText_Unscored(t *testing.T) {
 		t.Error("UNKNOWN renders in the same colour as LOW")
 	}
 }
+
+// TestPDFTimeBombRows verifies the PDF lists each time bomb with its module,
+// which the cover's "Driver: archived_floor" line does not name.
+func TestPDFTimeBombRows(t *testing.T) {
+	rows := pdfTimeBombRows(archivedTimeBombScore())
+	want := [3]string{"archived", "github.com/google/go-cmdtest", "archived 53 months"}
+	if len(rows) != 1 || rows[0] != want {
+		t.Errorf("pdfTimeBombRows() = %q, want [%q]", rows, want)
+	}
+	if got := pdfTimeBombRows(&scorer.ProjectScore{}); len(got) != 0 {
+		t.Errorf("pdfTimeBombRows(no deps) = %q, want none", got)
+	}
+}
+
+// TestWriteTimeBombsSection_Smoke verifies the section draws without panicking,
+// and is a no-op when there are no time bombs.
+func TestWriteTimeBombsSection_Smoke(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	writeTimeBombsSection(c, archivedTimeBombScore(), regular, bold)
+	writeTimeBombsSection(c, &scorer.ProjectScore{}, regular, bold)
+}
