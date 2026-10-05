@@ -31,6 +31,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   summary now carry a note stating their scope, and the renderer has bats
   tests in CI.
 
+### Bug Fixes
+
+- **The same scan now produces the same report.** Several lists were built
+  from Go maps, so their order changed from run to run: the takeover
+  candidates in the text, JSON and PDF reports, CI/CD findings (workflow jobs
+  and step `env`/`with` secrets), and the CycloneDX `dependsOn` lists and SPDX
+  package list. In SPDX, each `SPDXRef-Package-N` ID could point at a
+  different module on every run. All of these are now sorted (takeovers and
+  SBOM entries by module path, CI jobs by job ID), so SPDX package IDs follow
+  module-path order. Fields that are meant to differ per run (timestamps, the
+  CycloneDX `serialNumber`, the SPDX `documentNamespace`) are unchanged.
+
 ## [0.6.0] - 2026-09-29
 
 ### New Features
