@@ -3,9 +3,13 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
@@ -629,5 +633,118 @@ func TestWriteSPDX_RootPackageVersion(t *testing.T) {
 	}
 	if got, want := string(dep["downloadLocation"]), `"https://proxy.golang.org/github.com/example/pkg/@v/v1.0.0.zip"`; got != want {
 		t.Errorf("dependency downloadLocation = %s, want %s", got, want)
+	}
+}
+
+// determinismGraph builds a graph with enough modules and parent edges that
+// ranging its maps in iteration order would almost surely reorder the output
+// between runs.
+func determinismGraph() (*resolver.Graph, *scorer.ProjectScore) {
+	names := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"}
+	specs := make([]testutil.DepSpec, 0, len(names))
+	ps := &scorer.ProjectScore{}
+	for i, n := range names {
+		path := "example.com/" + n
+		spec := testutil.DepSpec{Path: path, Version: "v1.0.0", Direct: i%2 == 0}
+		if spec.Direct {
+			spec.UsedBy = []string{"test/module"}
+		} else {
+			// Every transitive module is used by several earlier modules.
+			for _, p := range names[:i] {
+				spec.UsedBy = append(spec.UsedBy, "example.com/"+p)
+			}
+			spec.Depth = 1
+		}
+		specs = append(specs, spec)
+		ps.Dependencies = append(ps.Dependencies, &scorer.DependencyScore{
+			Module: path, Version: "v1.0.0", RiskScore: i, RiskLevel: scorer.RiskLow,
+		})
+	}
+	return testutil.MakeGraph(specs...), ps
+}
+
+// TestWriteCycloneDX_DeterministicOrder verifies that repeated generation
+// yields identical output once the per-run timestamp and serial number are
+// zeroed, and that the dependency lists are sorted.
+func TestWriteCycloneDX_DeterministicOrder(t *testing.T) {
+	graph, ps := determinismGraph()
+
+	generate := func() cdxBOM {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteCycloneDX(graph, ps, SBOMOptions{}, &buf); err != nil {
+			t.Fatalf("WriteCycloneDX() failed: %v", err)
+		}
+		var bom cdxBOM
+		if err := json.Unmarshal(buf.Bytes(), &bom); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		bom.SerialNumber = ""
+		bom.Metadata.Timestamp = ""
+		return bom
+	}
+
+	want := generate()
+	for i := 0; i < 20; i++ {
+		if got := generate(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: CycloneDX output differs from first run", i+1)
+		}
+	}
+
+	for _, dep := range want.Dependencies {
+		if !sort.StringsAreSorted(dep.DependsOn) {
+			t.Errorf("dependsOn of %s is not sorted: %v", dep.Ref, dep.DependsOn)
+		}
+	}
+	refs := make([]string, 0, len(want.Dependencies))
+	for _, dep := range want.Dependencies[1:] { // the root entry comes first
+		refs = append(refs, dep.Ref)
+	}
+	if !sort.StringsAreSorted(refs) {
+		t.Errorf("dependency entries are not sorted by parent: %v", refs)
+	}
+}
+
+// TestWriteSPDX_DeterministicOrder verifies that repeated generation yields
+// identical output once per-run timestamps are zeroed, and that package IDs
+// are assigned in sorted module order so SPDXRef-Package-N always names the
+// same module.
+func TestWriteSPDX_DeterministicOrder(t *testing.T) {
+	graph, ps := determinismGraph()
+
+	generate := func() spdxDocument {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteSPDX(graph, ps, SBOMOptions{}, &buf); err != nil {
+			t.Fatalf("WriteSPDX() failed: %v", err)
+		}
+		var doc spdxDocument
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		doc.DocumentNamespace = ""
+		doc.CreationInfo.Created = ""
+		for i := range doc.Packages {
+			for j := range doc.Packages[i].Annotations {
+				doc.Packages[i].Annotations[j].AnnotationDate = ""
+			}
+		}
+		return doc
+	}
+
+	want := generate()
+	for i := 0; i < 20; i++ {
+		if got := generate(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: SPDX output differs from first run", i+1)
+		}
+	}
+
+	// Package 0 is the root; dependencies follow in sorted module order.
+	for i, path := range graph.SortedPaths() {
+		pkg := want.Packages[i+1]
+		wantID := fmt.Sprintf("SPDXRef-Package-%d", i+1)
+		if pkg.SPDXID != wantID || pkg.Name != path {
+			t.Errorf("package %d = %s (%s), want %s (%s)", i+1, pkg.SPDXID, pkg.Name, wantID, path)
+		}
 	}
 }

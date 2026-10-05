@@ -455,12 +455,7 @@ func run(cfg *runConfig) error {
 	}
 
 	// Collect takeover candidates.
-	var takeovers []*scanner.MaintainerInfo
-	for _, mi := range maintainers {
-		if mi.TakeoverCandidate {
-			takeovers = append(takeovers, mi)
-		}
-	}
+	takeovers := scanner.TakeoverCandidates(maintainers)
 
 	// Separate stdlib vulns from module vulns.
 	var stdlibVulns []scanner.Vulnerability

@@ -1729,3 +1729,51 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	client := &http.Client{}
 	return client.Do(newReq)
 }
+
+// TestTakeoverCandidates_SortedByModulePath verifies that only takeover
+// candidates are returned and that they come back in module-path order on
+// every call, regardless of map iteration order.
+func TestTakeoverCandidates_SortedByModulePath(t *testing.T) {
+	maintainers := map[string]*MaintainerInfo{
+		"github.com/pmezard/go-difflib": {Owner: "pmezard", Repo: "go-difflib", TakeoverCandidate: true},
+		"github.com/spf13/pflag":        {Owner: "spf13", Repo: "pflag"},
+		"github.com/unidoc/garabic":     {Owner: "unidoc", Repo: "garabic", TakeoverCandidate: true},
+		"github.com/davecgh/go-spew":    {Owner: "davecgh", Repo: "go-spew", TakeoverCandidate: true},
+		"golang.org/x/mod":              {Owner: "golang", Repo: "mod"},
+		"github.com/google/go-cmdtest":  {Owner: "google", Repo: "go-cmdtest", TakeoverCandidate: true},
+		"gopkg.in/yaml.v3":              {Owner: "go-yaml", Repo: "yaml"},
+	}
+	want := []string{
+		"github.com/davecgh/go-spew",
+		"github.com/google/go-cmdtest",
+		"github.com/pmezard/go-difflib",
+		"github.com/unidoc/garabic",
+	}
+
+	for i := 0; i < 20; i++ {
+		got := TakeoverCandidates(maintainers)
+		if len(got) != len(want) {
+			t.Fatalf("run %d: got %d candidates, want %d", i+1, len(got), len(want))
+		}
+		for j, mi := range got {
+			if !mi.TakeoverCandidate {
+				t.Errorf("run %d: %s/%s is not a takeover candidate", i+1, mi.Owner, mi.Repo)
+			}
+			if maintainers[want[j]] != mi {
+				t.Fatalf("run %d: candidate %d is %s/%s, want module %s", i+1, j, mi.Owner, mi.Repo, want[j])
+			}
+		}
+	}
+}
+
+// TestTakeoverCandidates_Empty verifies that no candidates yields an empty
+// result rather than a panic.
+func TestTakeoverCandidates_Empty(t *testing.T) {
+	if got := TakeoverCandidates(nil); len(got) != 0 {
+		t.Errorf("TakeoverCandidates(nil) = %d entries, want 0", len(got))
+	}
+	none := map[string]*MaintainerInfo{"example.com/a": {}}
+	if got := TakeoverCandidates(none); len(got) != 0 {
+		t.Errorf("TakeoverCandidates(no candidates) = %d entries, want 0", len(got))
+	}
+}

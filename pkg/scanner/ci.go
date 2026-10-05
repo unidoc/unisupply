@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -151,7 +153,12 @@ func (cs *CIScanner) analyzeWorkflow(wf *parser.Workflow) *WorkflowRisk {
 		})
 	}
 
-	for _, job := range wf.Jobs {
+	// Jobs is a map, so range it in job-ID order to keep finding order stable
+	// across runs. Parsing through yaml.Node could switch this to document
+	// order later; either is deterministic.
+	for _, jobID := range slices.Sorted(maps.Keys(wf.Jobs)) {
+		job := wf.Jobs[jobID]
+
 		// Check self-hosted runners.
 		if job.IsSelfHosted {
 			wr.Findings = append(wr.Findings, CIFinding{
@@ -237,8 +244,9 @@ func (cs *CIScanner) checkSecretsExposure(step parser.WorkflowStep, filePath str
 	secretPattern := regexp.MustCompile(`\$\{\{\s*secrets\.`)
 
 	// Check env vars for secrets passed to untrusted steps.
-	for key, val := range step.Env {
-		if secretPattern.MatchString(val) {
+	// Sorted key order keeps the finding order stable across runs.
+	for _, key := range slices.Sorted(maps.Keys(step.Env)) {
+		if secretPattern.MatchString(step.Env[key]) {
 			ref := parser.ParseActionRef(step.Uses)
 			if ref != nil && !parser.IsOfficialAction(ref) {
 				wr.Findings = append(wr.Findings, CIFinding{
@@ -253,8 +261,8 @@ func (cs *CIScanner) checkSecretsExposure(step parser.WorkflowStep, filePath str
 	}
 
 	// Check 'with' inputs for secrets.
-	for key, val := range step.With {
-		if secretPattern.MatchString(val) {
+	for _, key := range slices.Sorted(maps.Keys(step.With)) {
+		if secretPattern.MatchString(step.With[key]) {
 			ref := parser.ParseActionRef(step.Uses)
 			if ref != nil && !parser.IsOfficialAction(ref) {
 				wr.Findings = append(wr.Findings, CIFinding{

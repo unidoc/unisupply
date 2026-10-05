@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +76,19 @@ func EnrichMaintainersFromTrustIndex(maintainers map[string]*MaintainerInfo, tru
 			mi.OwnerVerified = entry.MaintainerVerified
 		}
 	}
+}
+
+// TakeoverCandidates returns the maintainers flagged as takeover candidates,
+// sorted by module path. maintainers is keyed by module path, and ranging it
+// directly would reorder the report's takeover list on every run.
+func TakeoverCandidates(maintainers map[string]*MaintainerInfo) []*MaintainerInfo {
+	var candidates []*MaintainerInfo
+	for _, mod := range slices.Sorted(maps.Keys(maintainers)) {
+		if mi := maintainers[mod]; mi.TakeoverCandidate {
+			candidates = append(candidates, mi)
+		}
+	}
+	return candidates
 }
 
 // MaintainerScanner analyzes module maintainership via the GitHub API.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -1110,4 +1111,68 @@ func TestFindFiles_SkipsSymlink(t *testing.T) {
 	if len(got) != 1 {
 		t.Errorf("expected 1 real file, got %d: %v", len(got), got)
 	}
+}
+
+// TestCIScanner_ScanWorkflows_DeterministicOrder verifies that findings come
+// out in the same order on every scan. Jobs, env keys and with keys are all
+// maps, so ranging them without sorting reorders findings between runs.
+func TestCIScanner_ScanWorkflows_DeterministicOrder(t *testing.T) {
+	dir := filepath.Join("..", "..", "test", "integration", "testdata", "workflows-multijob")
+	cs := NewCIScanner()
+
+	scan := func() []CIFinding {
+		t.Helper()
+		report, err := cs.ScanWorkflows(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("ScanWorkflows failed: %v", err)
+		}
+		if len(report.Workflows) != 1 {
+			t.Fatalf("expected 1 workflow, got %d", len(report.Workflows))
+		}
+		return report.Workflows[0].Findings
+	}
+
+	want := scan()
+	if len(want) < 20 {
+		t.Fatalf("fixture produced %d findings, want at least 20 to exercise ordering", len(want))
+	}
+
+	for i := 0; i < 20; i++ {
+		if got := scan(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: finding order differs from first scan\n got: %v\nwant: %v", i+1, descriptions(got), descriptions(want))
+		}
+	}
+
+	// Jobs are visited in job-ID order, and keys within a step in key order.
+	var got []string
+	for _, f := range want {
+		if f.Category == "secrets_exposure" {
+			got = append(got, f.Description)
+		}
+	}
+	wantSecrets := []string{
+		"Secret passed via env 'TOKEN_A' to third-party action 'someone/thing@v1'",
+		"Secret passed via env 'TOKEN_B' to third-party action 'someone/thing@v1'",
+		"Secret passed via env 'TOKEN_C' to third-party action 'someone/thing@v1'",
+		"Secret passed via input 'key-a' to third-party action 'other/thing@main'",
+		"Secret passed via input 'key-b' to third-party action 'other/thing@main'",
+		"Secret passed via input 'key-c' to third-party action 'other/thing@main'",
+		"Secret passed via env 'SECRET_X' to third-party action 'fourth/thing@v3'",
+		"Secret passed via env 'SECRET_Y' to third-party action 'fourth/thing@v3'",
+		"Secret passed via env 'SECRET_Z' to third-party action 'fourth/thing@v3'",
+		"Secret passed via input 'input-x' to third-party action 'fourth/thing@v3'",
+		"Secret passed via input 'input-y' to third-party action 'fourth/thing@v3'",
+		"Secret passed via input 'input-z' to third-party action 'fourth/thing@v3'",
+	}
+	if !reflect.DeepEqual(got, wantSecrets) {
+		t.Errorf("secrets_exposure findings not in job-ID, key order:\n got: %v\nwant: %v", got, wantSecrets)
+	}
+}
+
+func descriptions(findings []CIFinding) []string {
+	out := make([]string, len(findings))
+	for i, f := range findings {
+		out[i] = f.Category + ": " + f.Description
+	}
+	return out
 }

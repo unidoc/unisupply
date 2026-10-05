@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"time"
 
@@ -106,7 +108,8 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 	// Build dependency lookup for the dependency graph section.
 	depChildren := make(map[string][]string) // module -> modules it depends on
 
-	for _, dep := range graph.Dependencies {
+	for _, path := range graph.SortedPaths() {
+		dep := graph.Dependencies[path]
 		scope := "required"
 		if !dep.Direct {
 			scope = "optional" // CycloneDX uses optional for transitive
@@ -151,18 +154,20 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 	// Build dependencies section.
 	// Root depends on direct deps.
 	rootDep := cdxDependency{Ref: graph.Root}
-	for _, dep := range graph.Dependencies {
-		if dep.Direct {
+	for _, path := range graph.SortedPaths() {
+		if dep := graph.Dependencies[path]; dep.Direct {
 			rootDep.DependsOn = append(rootDep.DependsOn, dep.Module.Path)
 		}
 	}
 	bom.Dependencies = append(bom.Dependencies, rootDep)
 
 	// Each module depends on its children.
-	for parent, children := range depChildren {
+	for _, parent := range slices.Sorted(maps.Keys(depChildren)) {
 		if parent == graph.Root {
 			continue
 		}
+		children := depChildren[parent]
+		sort.Strings(children)
 		bom.Dependencies = append(bom.Dependencies, cdxDependency{
 			Ref:       parent,
 			DependsOn: children,
@@ -267,7 +272,10 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 	})
 
 	pkgIdx := 0
-	for _, dep := range graph.Dependencies {
+	// Sorted order makes the SPDXRef-Package-N IDs map to the same modules on
+	// every run.
+	for _, path := range graph.SortedPaths() {
+		dep := graph.Dependencies[path]
 		pkgIdx++
 		spdxID := fmt.Sprintf("SPDXRef-Package-%d", pkgIdx)
 

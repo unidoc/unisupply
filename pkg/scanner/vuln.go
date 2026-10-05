@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -291,7 +292,10 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
 	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
 	var enrichWarnings []string
-	for modPath, modVulns := range results {
+	// Sorted module order keeps the warning order, and the single-failure path
+	// in collapseSeverityLookupWarnings, stable across runs.
+	for _, modPath := range slices.Sorted(maps.Keys(results)) {
+		modVulns := results[modPath]
 		for i := range modVulns {
 			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
 				continue
