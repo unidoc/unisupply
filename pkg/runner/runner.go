@@ -53,6 +53,12 @@ type Options struct {
 
 	DebugScoring bool
 
+	// Offline tells the scanners the process makes no network requests: go mod
+	// verify is skipped and degraded lookups are reported accordingly. It does
+	// NOT block the network itself; the caller installs pkg/offline.Enable (the
+	// CLI does) if it wants that enforced.
+	Offline bool
+
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
 	// time.Now().UTC().Truncate(24*time.Hour) if zero — the same
@@ -79,6 +85,10 @@ type Result struct {
 	// itself, separated out of ProjectScore's per-dependency vulns (the
 	// stdlib isn't a "dependency" in the graph sense).
 	StdlibVulns []scanner.Vulnerability
+
+	// IntegrityReport is the go.mod replace/exclude, pseudo-version and go.sum
+	// audit. Always non-nil on a successful Run.
+	IntegrityReport *scanner.IntegrityReport
 
 	// VulnScanErr is non-nil when the vulnerability scan did not complete
 	// (govulncheck failed, or produced no usable output). Run still returns a
@@ -136,12 +146,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	projectDir := filepath.Dir(gomodPath)
 	rep.Done("%s", gomodPath)
 
+	// Audit replace/exclude directives (pure go.mod analysis, no network).
+	rep.Stage("Auditing go.mod directives")
+	integrityScanner := scanner.NewIntegrityScanner()
+	integrityScanner.Offline = opts.Offline
+	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
+	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
+
 	rep.Stage("Resolving dependency graph")
-	graph, warnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
+	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
 	if err != nil {
 		return nil, fmt.Errorf("resolving dependencies: %w", err)
 	}
-	for _, w := range warnings {
+	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)
 	}
 	rep.Done("%d modules", len(graph.Dependencies))
@@ -157,15 +174,28 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			Now:       scanStart,
 			DebugMode: opts.DebugScoring,
 		})
-		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore}, nil
+		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, IntegrityReport: integrityReport}, nil
 	}
 
+	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
+	rep.Stage("Auditing pseudo-version pins")
+	pseudoVersionClasses := integrityScanner.ScanPseudoVersions(graph, integrityReport)
+	rep.Done("%d pseudo-version pins", integrityReport.PseudoVersionCount)
+
+	rep.Stage("Verifying go.sum (go mod verify)")
+	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
+	integrityScanner.VerifyGoSum(ctx, gomodPath, integrityReport)
+	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
+
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, opts.GithubToken)
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, opts.GithubToken)
+	// The scanner reports availability directly: govulncheck failures come back
+	// as a warning with a nil error, so err alone reads a failed scan as clean.
+	vulnScanUnavailable := !vulnScanned
 	if err != nil {
 		rep.Warn("Vulnerability scan failed: %v", err)
 	}
-	vulnScanErr := vulnScanFailure(err, vulnWarnings)
+	vulnScanErr := vulnScanFailure(err, vulnScanned, vulnWarnings)
 	for _, w := range vulnWarnings {
 		rep.Warn("%s", w)
 	}
@@ -175,12 +205,22 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	maintScanner := scanner.NewMaintenanceScanner(timeout)
 	maintScanner.ScanStart = scanStart
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
+	var maintWarnings []string
 	if err != nil {
-		rep.Warn("Some maintenance checks failed: %v", err)
+		if opts.Offline {
+			// The scorer emits the authoritative report warning for this.
+			rep.Warn("%v", err)
+		} else {
+			// The wrapped error embeds the module proxy URL (a module path),
+			// so it goes to the progress reporter only, not into the report.
+			maintWarnings = append(maintWarnings,
+				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
+			rep.Warn("Some maintenance checks failed: %v", err)
+		}
 	}
 	rep.Done("")
 
-	if opts.GithubToken == "" {
+	if opts.GithubToken == "" && !opts.Offline {
 		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
 			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
@@ -207,7 +247,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Stage("Assessing AI-generation risk")
 	aiGenScanner := scanner.NewAIGenScanner()
 	aiGenScanner.ScanStart = scanStart
-	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
+	for _, w := range aiGenWarnings {
+		rep.Warn("%s", w)
+	}
 	rep.Done("%d flagged", len(aiGenRisks))
 
 	var trustIndex map[string]*scanner.TrustIndexEntry
@@ -228,18 +271,28 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	rep.Stage("Computing risk scores")
 	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:       graph,
-		Vulns:       vulns,
-		Maintenance: maintenance,
-		Maintainers: maintainers,
-		Typosquats:  typosquats,
-		Resilience:  resilience,
-		AIGenRisks:  aiGenRisks,
-		TrustIndex:  trustIndex,
-		DebugMode:   opts.DebugScoring,
-		Now:         scanStart,
+		Graph:         graph,
+		Vulns:         vulns,
+		Maintenance:   maintenance,
+		Maintainers:   maintainers,
+		Typosquats:    typosquats,
+		Resilience:    resilience,
+		AIGenRisks:    aiGenRisks,
+		TrustIndex:    trustIndex,
+		Integrity:     integrityClasses,
+		PseudoVersion: pseudoVersionClasses,
+		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
+
+		VulnScanUnavailable: vulnScanUnavailable,
+
+		DebugMode: opts.DebugScoring,
+		Now:       scanStart,
 	})
+	// Resolver degradations change the numbers, so they belong in the report.
+	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
+	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
+	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport
@@ -287,32 +340,34 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	return &Result{
-		GoMod:        gomod,
-		Graph:        graph,
-		ProjectScore: projectScore,
-		CIReport:     ciReport,
-		Takeovers:    takeovers,
-		StdlibVulns:  stdlibVulns,
-		VulnScanErr:  vulnScanErr,
-		Interrupted:  interrupted,
-		Maintainers:  maintainers,
-		Typosquats:   typosquats,
+		GoMod:           gomod,
+		Graph:           graph,
+		ProjectScore:    projectScore,
+		CIReport:        ciReport,
+		Takeovers:       takeovers,
+		StdlibVulns:     stdlibVulns,
+		IntegrityReport: integrityReport,
+		VulnScanErr:     vulnScanErr,
+		Interrupted:     interrupted,
+		Maintainers:     maintainers,
+		Typosquats:      typosquats,
 	}, nil
 }
 
 // vulnScanFailure reports whether a ScanVulns outcome means the vulnerability
-// scan did not complete: it returned an error, or a warning of its own failure
-// (the scanner downgrades govulncheck errors to a warning and carries on with
-// an empty result).
-func vulnScanFailure(err error, warnings []string) error {
+// scan did not complete: it returned an error, or it reports itself as not
+// having run (the scanner downgrades govulncheck failures to a warning and
+// carries on with an empty result).
+func vulnScanFailure(err error, scanned bool, warnings []string) error {
 	if err != nil {
 		return err
 	}
-	for _, w := range warnings {
-		if strings.HasPrefix(w, "govulncheck") {
-			line, _, _ := strings.Cut(w, "\n")
-			return errors.New(line)
-		}
+	if scanned {
+		return nil
 	}
-	return nil
+	for _, w := range warnings {
+		line, _, _ := strings.Cut(w, "\n")
+		return errors.New(line)
+	}
+	return errors.New("vulnerability scan did not run")
 }

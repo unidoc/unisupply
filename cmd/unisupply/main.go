@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/netlog"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
@@ -51,6 +53,8 @@ func main() {
 		trustIndexAllowPrivate bool
 		progressMode           string
 		debugScoring           bool
+		networkLog             bool
+		offlineMode            bool
 	)
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
@@ -72,6 +76,8 @@ func main() {
 	flag.StringVar(&trustIndexURL, "trust-index-url", "", "UniDoc Trust Index API URL (e.g. http://localhost:8080)")
 	flag.BoolVar(&trustIndexAllowPrivate, "trust-index-allow-private", false, "Allow --trust-index-url to target RFC1918/link-local addresses (e.g. self-hosted on a private network)")
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
+	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
+	flag.BoolVar(&offlineMode, "offline", false, "Make no network requests; scanners that need the network degrade to UNKNOWN with a warning")
 	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
 
 	flag.Parse()
@@ -120,6 +126,8 @@ func main() {
 		trustIndexAllowPrivate: trustIndexAllowPrivate,
 		progressMode:           progressMode,
 		debugScoring:           debugScoring,
+		networkLog:             networkLog,
+		offlineMode:            offlineMode,
 	}
 
 	if err := run(&cfg); err != nil {
@@ -157,6 +165,8 @@ type runConfig struct {
 	trustIndexAllowPrivate bool
 	progressMode           string
 	debugScoring           bool
+	networkLog             bool
+	offlineMode            bool
 }
 
 func run(cfg *runConfig) error {
@@ -173,9 +183,57 @@ func run(cfg *runConfig) error {
 			cfg.policyPreset, cfg.policyFile)
 	}
 
+	if cfg.offlineMode {
+		// --trust-index-url names a specific endpoint the user asked to reach,
+		// so combining it with --offline is a contradiction, not a redundancy.
+		if cfg.trustIndexURL != "" {
+			return fmt.Errorf("--offline cannot be combined with --trust-index-url %q: the Trust Index is a network service", cfg.trustIndexURL)
+		}
+		// UniPDF validates its license over the network before rendering.
+		// Without this guard the scan runs to completion and then dies at the
+		// last step, leaving a 0-byte file where the report should be. Fail up
+		// front and name the format that works.
+		if cfg.format == "pdf" {
+			return errors.New("--offline cannot be combined with --format pdf: PDF generation requires a UniDoc license check over the network; use --format text, json, or sbom-*")
+		}
+		// --require-github-token is only a precondition on the token being
+		// present, and it was already checked above. A token supplied
+		// alongside --offline is unused, not contradictory — CI configs
+		// routinely set the token and the mode flag from separate layers — so
+		// warn and continue rather than failing the run.
+		if cfg.requireGithubToken {
+			fmt.Fprintln(os.Stderr, "warning: --require-github-token is satisfied but --offline means GitHub will not be contacted")
+		}
+	}
+
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
+	}
+
+	if cfg.offlineMode {
+		// Install the refusing transport before any request is issued, and
+		// before netlog below, so netlog wraps the refusal and every refused
+		// request still appears in the network log when both flags are set.
+		// Same interception point as netlog, for the same reason: it is the
+		// only one that also covers http.DefaultClient consumers.
+		offline.Enable()
+	}
+
+	if cfg.networkLog {
+		// Install the logging transport before any request is issued. This is
+		// the single interception point: the hardened scanner client delegates
+		// to http.DefaultTransport, as do dependencies that use
+		// http.DefaultClient directly (x/vuln → vuln.go.dev, UniPDF →
+		// cloud.unidoc.io).
+		netlog.Enable(os.Stderr)
+
+		// The TTY reporter repaints lines in place, which raw log lines would
+		// corrupt. Downgrade auto to plain; an explicit --progress none stays
+		// silent.
+		if mode == progress.ModeAuto {
+			mode = progress.ModePlain
+		}
 	}
 	rep := progress.New(mode)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -193,6 +251,7 @@ func run(cfg *runConfig) error {
 		ScanCI:                 cfg.scanCI,
 		WorkflowPath:           cfg.workflowPath,
 		DebugScoring:           cfg.debugScoring,
+		Offline:                cfg.offlineMode,
 	})
 	if err != nil {
 		return err
@@ -211,6 +270,7 @@ func run(cfg *runConfig) error {
 	stdlibVulns := scanResult.StdlibVulns
 	maintainers := scanResult.Maintainers
 	typosquats := scanResult.Typosquats
+	integrityReport := scanResult.IntegrityReport
 
 	// Generate output.
 	writer := os.Stdout
@@ -244,26 +304,29 @@ func run(cfg *runConfig) error {
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
-			NoColor:     cfg.noColor,
-			Verbose:     cfg.verbose,
-			MinRisk:     cfg.minRisk,
-			Writer:      writer,
-			CIReport:    ciReport,
-			Takeovers:   takeovers,
-			StdlibVulns: stdlibVulns,
+			NoColor:         cfg.noColor,
+			Verbose:         cfg.verbose,
+			MinRisk:         cfg.minRisk,
+			Writer:          writer,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
+			StdlibVulns:     stdlibVulns,
 		})
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
-			GoVersion: gomod.GoVersion,
-			CIReport:  ciReport,
-			Takeovers: takeovers,
+			GoVersion:       gomod.GoVersion,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
 		}, writer)
 	case "pdf":
 		err = report.WritePDF(ctx, graph, projectScore, report.PDFOptions{
-			OutputPath: cfg.output,
-			GoVersion:  gomod.GoVersion,
-			CIReport:   ciReport,
-			Takeovers:  takeovers,
+			OutputPath:      cfg.output,
+			GoVersion:       gomod.GoVersion,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
+			Takeovers:       takeovers,
 		})
 	case "sbom-cyclonedx":
 		err = report.WriteCycloneDX(graph, projectScore, sbomOpts, writer)
@@ -305,10 +368,11 @@ func run(cfg *runConfig) error {
 		}
 
 		result := pol.Evaluate(policy.EvalInput{
-			ProjectScore: projectScore,
-			Maintainers:  maintainers,
-			Typosquats:   typosquats,
-			CIReport:     ciReport,
+			ProjectScore:    projectScore,
+			Maintainers:     maintainers,
+			Typosquats:      typosquats,
+			CIReport:        ciReport,
+			IntegrityReport: integrityReport,
 		})
 
 		if result.Pass {
@@ -349,6 +413,9 @@ func printUsage() {
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
+	fmt.Println("  unisupply --network-log 2>net.log            # Log every outbound request to stderr")
+	fmt.Println("  unisupply --offline                          # Air-gapped scan; no network requests")
+	fmt.Println("  unisupply --offline --network-log 2>net.log  # Prove the scan made no requests")
 	fmt.Println()
 	fmt.Println("Exit codes:")
 	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")

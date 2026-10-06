@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -30,12 +31,20 @@ const (
 	RiskMedium   RiskLevel = "MEDIUM"
 	RiskHigh     RiskLevel = "HIGH"
 	RiskCritical RiskLevel = "CRITICAL"
+
+	// RiskUnknown is the project-level headline band when the scan could not
+	// measure enough to earn a verdict. It is NOT a band on the 0-100 scale and
+	// levelFromScore never returns it — only ScoreAll assigns it, and only to
+	// ProjectScore.OverallLevel. Per-dependency risk_level always carries a
+	// real band.
+	RiskUnknown RiskLevel = "UNKNOWN"
 )
 
 // HeadlineCandidate records one axis that competes to become the headline score.
-// The four candidates are: severity_adjusted, p95_dep_risk, archived_floor, cve_floor.
+// The five candidates are: severity_adjusted, p95_dep_risk, archived_floor,
+// cve_floor, integrity_floor.
 type HeadlineCandidate struct {
-	Name       string  `json:"name"`        // "severity_adjusted" | "p95_dep_risk" | "archived_floor" | "cve_floor"
+	Name       string  `json:"name"`        // "severity_adjusted" | "p95_dep_risk" | "archived_floor" | "cve_floor" | "integrity_floor"
 	Score      float64 `json:"score"`       // raw candidate value (0–100)
 	DrivingDep string  `json:"driving_dep"` // module path of the dep that set the score, e.g. "github.com/gorilla/i18n"
 	Reason     string  `json:"reason"`      // human-readable explanation, e.g. "archived 129 months"
@@ -58,6 +67,19 @@ type DependencyScore struct {
 	TrustIndex     *scanner.TrustIndexEntry `json:"trust_index,omitempty"`
 	RiskFactors    []string                 `json:"risk_factors,omitempty"`
 
+	// ReplaceClass is the severity of this dependency's go.mod replace
+	// directive ("LOW" version-pin, "MEDIUM" local-path or same-module
+	// major-version redirect, "HIGH" redirect to a different module), or
+	// empty when the dependency is not replaced. See
+	// scanner.IntegrityScanner.ScanDirectives.
+	ReplaceClass scanner.IntegrityRiskLevel `json:"replace_class,omitempty"`
+
+	// PseudoVersion is true when this dependency's pinned go.mod version is a
+	// pseudo-version (see scanner.IntegrityScanner.ScanPseudoVersions). Set
+	// regardless of test-only status — IsTestOnly is the honest signal for
+	// whether it carried score/policy impact, this field is purely descriptive.
+	PseudoVersion bool `json:"pseudo_version,omitempty"`
+
 	// IsTestOnly carries the three-state test-only classification from the
 	// resolver. See resolver.Dependency.IsTestOnly for the full semantics.
 	// Task 10's discount logic MUST only apply the discount when this is &true
@@ -72,9 +94,11 @@ type DependencyScore struct {
 	MaturityScore    float64 `json:"-"`
 
 	// Additive bonus terms applied after the weighted base (for verbose output).
-	ResilienceBonus float64 `json:"-"`
-	AIGenBonus      float64 `json:"-"`
-	TyposquatBonus  float64 `json:"-"`
+	ResilienceBonus    float64 `json:"-"`
+	AIGenBonus         float64 `json:"-"`
+	TyposquatBonus     float64 `json:"-"`
+	IntegrityBonus     float64 `json:"-"`
+	PseudoVersionBonus float64 `json:"-"`
 	// FlooredTo is non-zero when severityFloor overrode the weighted total.
 	// The gap is NOT additive — rendered as "floored→N".
 	FlooredTo int `json:"-"`
@@ -83,19 +107,43 @@ type DependencyScore struct {
 	// renormalized to sum to 1.0. The displayed component scores no longer equal
 	// their nominal ×weight contributions.
 	MaintainerWeightExcluded bool `json:"-"`
+
+	// VulnWeightExcluded is true when the vulnerability scan did not run, so the
+	// 0.40 weight was dropped rather than scored as zero. See
+	// ScoreInput.VulnScanUnavailable — an unrun scan is not a clean result.
+	VulnWeightExcluded bool `json:"-"`
+
+	// MaintenanceWeightExcluded is true when this module's maintenance lookup
+	// failed, so the 0.25 weight was dropped rather than scored with the
+	// hard-coded unknown constant.
+	MaintenanceWeightExcluded bool `json:"-"`
+
+	// MeasuredWeight is the denominator the weighted base was divided by: the
+	// sum of the weights actually available for this dependency. 1.0 means every
+	// axis was measured. Below that, the score describes only the measured axes
+	// and is not comparable to a fully-measured one.
+	MeasuredWeight float64 `json:"-"`
 }
 
 // ProjectScore holds the overall project risk assessment.
 //
-// The headline score is the maximum of four candidates:
+// The headline score is the maximum of five candidates:
 //
-//	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+//	OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor)
 //
 // MeanDepRiskScore is retained as a non-normative portfolio-wide signal.
-// HeadlineDriver records which of the four candidates won.
+// HeadlineDriver records which of the five candidates won.
 type ProjectScore struct {
-	OverallScore      int                `json:"overall_risk_score"`
-	OverallLevel      RiskLevel          `json:"overall_risk_level"`
+	OverallScore int       `json:"overall_risk_score"`
+	OverallLevel RiskLevel `json:"overall_risk_level"`
+
+	// HeadlineUnscoredReason is non-empty when OverallLevel is RiskUnknown: it
+	// names what the scan could not measure and why that disqualifies a verdict.
+	// OverallScore still carries the computed number so dashboards and policy
+	// gates keep working, but it must not be presented as a verdict — consumers
+	// that render a band MUST check this field.
+	HeadlineUnscoredReason string `json:"headline_unscored_reason,omitempty"`
+
 	Dependencies      []*DependencyScore `json:"dependencies"`
 	CriticalRiskCount int                `json:"critical_risk_count"`
 	HighRiskCount     int                `json:"high_risk_count"`
@@ -116,8 +164,8 @@ type ProjectScore struct {
 	SeverityAdjustedVulnScore int `json:"severity_adjusted_vuln_score"`
 
 	// HeadlineDriver is one of "severity_adjusted", "p95_dep_risk", "archived_floor",
-	// "cve_floor" — which of the four candidates produced OverallScore.
-	// Empty when there are no dependencies.
+	// "cve_floor", "integrity_floor" — which of the five candidates produced
+	// OverallScore. Empty when there are no dependencies.
 	HeadlineDriver string `json:"headline_driver,omitempty"`
 
 	// HeadlineCandidate records the winning candidate's full detail (score, driving dep, reason).
@@ -221,6 +269,12 @@ type DebugCVE struct {
 	// ReachabilityDowngrade describes the tier shift applied due to reachability
 	// (e.g. "CRITICAL→HIGH (imported)"). Empty when no downgrade was applied.
 	ReachabilityDowngrade string `json:"reachability_downgrade,omitempty"`
+	// EPSSScore mirrors scanner.Vulnerability.EPSSScore — the input to the
+	// EPSS amplifier (promotes one tier at >= 0.5). Nil when unavailable.
+	EPSSScore *float64 `json:"epss_score,omitempty"`
+	// InKEV mirrors scanner.Vulnerability.InKEV — the input to the KEV
+	// override (forces CRITICAL on any non-dropped tier).
+	InKEV bool `json:"in_kev,omitempty"`
 }
 
 // DebugPerDepInput records the inputs to vulnScore for one dependency.
@@ -245,6 +299,33 @@ type ScoreInput struct {
 	Resilience  map[string]*scanner.ResilienceInfo
 	AIGenRisks  map[string]*scanner.AIGenRisk
 	TrustIndex  map[string]*scanner.TrustIndexEntry
+
+	// Integrity maps a module path to its go.mod replace directive severity
+	// (see scanner.IntegrityScanner.ScanDirectives). A missing entry means the
+	// dependency is not replaced.
+	Integrity map[string]scanner.IntegrityRiskLevel
+
+	// PseudoVersion maps a module path to its pseudo-version pin severity
+	// (see scanner.IntegrityScanner.ScanPseudoVersions). A missing entry means
+	// the dependency is not pinned to a pseudo-version.
+	PseudoVersion map[string]scanner.IntegrityRiskLevel
+
+	// VulnScanUnavailable is true when the vulnerability scan did not run at all
+	// — offline mode skips govulncheck, and an online run can fail outright. It
+	// is project-scoped because govulncheck is all-or-nothing: it either
+	// analyzed the module graph or it did not.
+	//
+	// This cannot be inferred from an empty Vulns map, which legitimately means
+	// "scanned, nothing found". Without the distinction a skipped scan scores
+	// identically to a verified-clean project, which is the one wrong answer.
+	VulnScanUnavailable bool
+
+	// GoSumMismatch is true when `go mod verify` reported a checksum mismatch
+	// (scanner.IntegrityReport.GoSumVerified == "false"). It floors the
+	// headline into the CRITICAL band via the integrity_floor candidate.
+	// Honest-UNKNOWN verification states ("offline"/"skipped") must map to
+	// false — only a confirmed mismatch drives the headline.
+	GoSumMismatch bool
 
 	// DebugMode populates ps.DebugScoring with diagnostic data when true.
 	// Wired to the --debug-scoring CLI flag.
@@ -272,9 +353,12 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		now = time.Now()
 	}
 
-	// Count modules whose maintainer data was unavailable. Used to build a
-	// top-level warning so consumers understand the scoring gap.
+	// Count modules whose data was unavailable per axis. Used to build
+	// top-level warnings so consumers understand the scoring gap. A degraded
+	// scan that reports no gap is indistinguishable from a complete one.
 	maintainerUnavailable := 0
+	maintenanceUnavailable := 0
+	resilienceUnavailable := 0
 
 	// Sort dependency keys so that ScoreAll produces a deterministic
 	// ps.Dependencies slice regardless of Go's map iteration order. This is
@@ -298,6 +382,9 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 			input.Resilience[dep.Module.Path],
 			input.AIGenRisks[dep.Module.Path],
 			input.TrustIndex[dep.Module.Path],
+			input.Integrity[dep.Module.Path],
+			input.PseudoVersion[dep.Module.Path],
+			input.VulnScanUnavailable,
 			now,
 		)
 		ps.Dependencies = append(ps.Dependencies, ds)
@@ -332,21 +419,79 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable {
 			maintainerUnavailable++
 		}
+
+		// A missing maintenance entry means the lookup failed — the scanner
+		// inserts only on success (see MaintenanceScanner.ScanAll).
+		if ds.MaintenanceWeightExcluded {
+			maintenanceUnavailable++
+		}
+
+		// Resilience carries no scoring weight of its own (it feeds a bonus,
+		// already gated on DataAvailable), so there is no weight to exclude.
+		// It still needs saying: an unavailable resilience axis silently
+		// disables both the low-resilience bonus and the AI-gen detector, which
+		// depends on ResilienceInfo.FirstReleaseDate.
+		if r := input.Resilience[dep.Module.Path]; r != nil && !r.DataAvailable {
+			resilienceUnavailable++
+		}
+	}
+
+	// Name the actual cause. Offline is not a rate-limit problem, and telling an
+	// air-gapped user their token is missing sends them after a fix that cannot
+	// work.
+	cause := "GitHub API unauthenticated"
+	// prefix applies to the proxy-sourced axes below. Only the maintainer axis
+	// reads the GitHub API, so `cause` must not be reused for the others —
+	// naming the wrong service sends the user after a fix that cannot work, the
+	// same reason offline is distinguished from a rate limit here at all.
+	prefix := ""
+	if offline.Enabled() {
+		cause = "offline"
+		prefix = "offline — "
 	}
 
 	if maintainerUnavailable > 0 {
 		ps.Warnings = append(ps.Warnings,
-			fmt.Sprintf("GitHub API unauthenticated — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", maintainerUnavailable),
+			fmt.Sprintf("%s — maintainer data unavailable for %d module(s); maintainer weight excluded from those scores", cause, maintainerUnavailable),
 		)
 	}
 
-	// Four-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
+	if maintenanceUnavailable > 0 {
+		// The maintenance scanner reads the module proxy, so the maintainer cause
+		// above would be wrong. Any non-offline cause is left to the
+		// scanner-sourced warning, which has the underlying error.
+		ps.Warnings = append(ps.Warnings,
+			fmt.Sprintf("%smaintenance data unavailable for %d module(s); maintenance weight excluded from those scores rather than scored as unknown", prefix, maintenanceUnavailable),
+		)
+	}
+
+	if resilienceUnavailable > 0 {
+		// Not `cause`: ResilienceInfo.DataAvailable is gated on the module-proxy
+		// version-list fetch, so "GitHub API unauthenticated" would name the wrong
+		// service. Offline is the only cause this layer can state accurately.
+		//
+		// The AI-gen consequence is deliberately not mentioned here — the AI-gen
+		// scanner emits its own warning naming the same modules, and stating it in
+		// both put two lines about one gap in the SCAN LIMITATIONS block.
+		ps.Warnings = append(ps.Warnings,
+			fmt.Sprintf("%sresilience data unavailable for %d module(s); release-cadence and governance signals not measured", prefix, resilienceUnavailable),
+		)
+	}
+
+	if input.VulnScanUnavailable {
+		ps.Warnings = append(ps.Warnings,
+			"vulnerability scan did not run; the 40% vulnerability weight is excluded from every dependency score — these scores describe only the axes that were measured and are NOT comparable to a scan that checked for CVEs",
+		)
+	}
+
+	// Five-candidate headline: max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor).
 	//
 	// MeanDepRiskScore is non-normative — retained for dashboards/trend lines.
-	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor).
+	// OverallScore = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor).
 	ps.MeanDepRiskScore = computeOverallScore(ps.Dependencies)
 
 	sevResult := severityAdjustedVulnScore(now, ps.Dependencies)
+	ps.Warnings = append(ps.Warnings, sevResult.warnings...)
 	ps.SeverityAdjustedVulnScore = sevResult.score
 	ps.WorstCVEID = sevResult.worstID
 	ps.WorstCVESeverity = sevResult.worstSeverity
@@ -370,6 +515,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		p95DepRiskCandidate(ps.Dependencies),
 		archivedFloor(ps.Dependencies),
 		cveFloor(ps.Dependencies),
+		integrityFloor(ps.Dependencies, input.GoSumMismatch),
 	}
 	winner := selectHeadline(candidates)
 	ps.HeadlineCandidate = &winner
@@ -383,6 +529,25 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		ps.HeadlineCandidate = nil
 	}
 	ps.OverallLevel = levelFromScore(ps.OverallScore)
+
+	// A headline band requires a scan that could actually earn one.
+	//
+	// Three of the five candidates are CVE-derived (severity_adjusted, cve_floor,
+	// and the fix-age amplifier inside it). With no vulnerability data all three
+	// are structurally zero, so the headline collapses onto p95_dep_risk — a
+	// candidate designed to be one voice among five, not the sole decider. What
+	// it then measures is whatever axes survived, which offline means depth and
+	// maturity: graph position and a version string.
+	//
+	// Measured on UniDoc's own libraries, that promoted UniOffice from LOW to
+	// MEDIUM offline on four untagged pseudo-version transitives, with no CVE
+	// check performed. A band nobody can defend is worse than no band, so report
+	// UNKNOWN and say what is missing. OverallScore keeps the computed number for
+	// dashboards and policy gates.
+	if input.VulnScanUnavailable && len(ps.Dependencies) > 0 {
+		ps.OverallLevel = RiskUnknown
+		ps.HeadlineUnscoredReason = "vulnerability scan did not run — 3 of the 5 headline candidates are CVE-derived and scored 0, leaving the headline decided by dependency-graph position and version scheme alone; the numeric score is indicative only"
+	}
 
 	// Diagnostics retained for debugging only — NON-NORMATIVE. Suppressed when
 	// there are no deps (max/p95 over an empty set carries no information).
@@ -413,6 +578,9 @@ func scoreDependency(
 	resilience *scanner.ResilienceInfo,
 	aiGenRisk *scanner.AIGenRisk,
 	trustIndex *scanner.TrustIndexEntry,
+	integrityClass scanner.IntegrityRiskLevel,
+	pseudoVersionClass scanner.IntegrityRiskLevel,
+	vulnScanUnavailable bool,
 	now time.Time,
 ) *DependencyScore {
 	// Backfill Maintenance.Archived from the maintainer scanner before building
@@ -441,6 +609,15 @@ func scoreDependency(
 		Resilience:     resilience,
 		AIGenRisk:      aiGenRisk,
 		TrustIndex:     trustIndex,
+	}
+
+	// A version-scoped replace whose old-version does not match the selected
+	// version is inert: dep.Replaced (via parser.GoMod.ReplacementFor) is false
+	// and the directive has no effect on the build. Only record the class when
+	// the replace actually applies, so integrityFloor and the JSON
+	// replace_class field stay consistent with dep.Replaced.
+	if dep.Replaced {
+		ds.ReplaceClass = integrityClass
 	}
 
 	// 1. Vulnerability score (0-100).
@@ -508,50 +685,120 @@ func scoreDependency(
 	}
 
 	// Low resilience adds to score.
+	//
+	// DataAvailable gates this: when the proxy could not be reached the whole
+	// struct is zero-valued, so Score is 0 and an ungated check would flag
+	// every module as low-resilience on the strength of data it never had.
+	// ResilienceInfo.DataAvailable documents exactly this ("all numeric fields
+	// are zero-valued and MUST NOT be interpreted as real measurements").
 	resilienceBonus := 0.0
-	if resilience != nil && resilience.Score < 30 {
+	if resilience != nil && resilience.DataAvailable && resilience.Score < 30 {
 		resilienceBonus = float64(30-resilience.Score) * 0.2 // up to 6 extra points for very low resilience
 		ds.RiskFactors = append(ds.RiskFactors, "low_resilience")
+	}
+
+	// Replace directive: any replace (version-pin, local-path, or redirect)
+	// surfaces as a risk factor for transparency. Only the MEDIUM (local-path
+	// or same-module major-version redirect) and HIGH (redirect to a different
+	// module) classes add to the score — a version-pin replace is expected and
+	// carries no bonus.
+	integrityBonus := 0.0
+	if dep.Replaced {
+		ds.RiskFactors = append(ds.RiskFactors, "replaced")
+		switch integrityClass {
+		case scanner.IntegrityHigh:
+			integrityBonus = 20
+		case scanner.IntegrityMedium:
+			integrityBonus = 8
+		}
+	}
+
+	// Pseudo-version pin: a distinct signal from aigen's pseudo_version_only
+	// indicator (fires on zero-tagged-releases-ever, a historical property;
+	// see the (*scanner.IntegrityScanner).ScanPseudoVersions doc comment for
+	// the full distinction). INFO (test-only) carries no score impact by
+	// design — only MEDIUM (direct) and LOW (transitive) add a bonus. Kept
+	// intentionally small: a dep can trigger both this bonus (max 4) and the
+	// pseudo_version_only indicator's share of the aigen bonus (that indicator
+	// contributes 10 to the aigen score, i.e. 10*0.15 = 1.5 points here — the
+	// aigen bonus as a whole can be larger) simultaneously, capping the
+	// combined pseudo-version contribution at 5.5 — well below any
+	// single-factor promotion threshold.
+	pseudoVersionBonus := 0.0
+	if pseudoVersionClass != "" {
+		ds.PseudoVersion = true
+		ds.RiskFactors = append(ds.RiskFactors, "pseudo_version_pin")
+		switch pseudoVersionClass {
+		case scanner.IntegrityMedium:
+			pseudoVersionBonus = 4
+		case scanner.IntegrityLow:
+			pseudoVersionBonus = 2
+		}
 	}
 
 	// Weighted total.
 	//
 	// Normal case: the five weights sum to 1.0 (0.40 + 0.25 + 0.15 + 0.10 + 0.10).
 	//
-	// Re-normalization: when maintainer data is unavailable (DataAvailable == false),
-	// the 0.10 maintainer weight is dropped and the four remaining weights are
-	// rescaled by dividing by their sum (0.90) so they still sum to 1.0.
-	// NOTE: after re-normalization the five declared WeightMaintainerRisk +
-	// remaining weights no longer equal 1.0 — this is intentional and
-	// expected; the denominator variable below carries the corrected total.
-	weightedBase := ds.VulnScore*WeightVulnerabilities +
-		ds.MaintenanceScore*WeightMaintenance +
-		ds.DepthScore*WeightDepthRisk +
-		ds.MaturityScore*WeightMaturity
+	// Re-normalization: an axis whose data could not be collected is dropped
+	// from BOTH the numerator and the denominator, so the surviving weights
+	// rescale to 1.0. The alternative — scoring an unmeasured axis as zero, or
+	// as a hard-coded "unknown" constant — reports a fabricated measurement as
+	// a finding, which is the failure mode this whole block exists to prevent.
+	//
+	// Depth and maturity are never excluded: both derive from the resolved
+	// graph and the version string, so they are available even offline. That
+	// guarantees the denominator never reaches zero (floor 0.25).
+	//
+	// NOTE: after re-normalization the declared weights no longer sum to the
+	// denominator — intentional; the denominator variable carries the corrected
+	// total, and ds.MeasuredWeight records it for the report.
+	weightedBase := ds.DepthScore*WeightDepthRisk + ds.MaturityScore*WeightMaturity
+	denominator := WeightDepthRisk + WeightMaturity
 
-	denominator := WeightVulnerabilities + WeightMaintenance + WeightDepthRisk + WeightMaturity
+	// Vulnerabilities. An empty vuln list means "clean" only when the scan
+	// actually ran; vulnScanUnavailable distinguishes the two.
+	if vulnScanUnavailable {
+		ds.VulnWeightExcluded = true
+	} else {
+		weightedBase += ds.VulnScore * WeightVulnerabilities
+		denominator += WeightVulnerabilities
+	}
 
-	if maintainerInfo == nil || maintainerInfo.DataAvailable {
-		// Maintainer data is present: include its contribution and restore
-		// the full denominator so the total weight equals 1.0.
+	// Maintenance. MaintenanceScanner.ScanAll inserts into its result map only
+	// on a successful lookup, so a nil entry here means that module's lookup
+	// failed — not that it has an unknown-but-measured status.
+	if maint == nil {
+		ds.MaintenanceWeightExcluded = true
+	} else {
+		weightedBase += ds.MaintenanceScore * WeightMaintenance
+		denominator += WeightMaintenance
+	}
+
+	// Maintainer. A nil entry means the scanner never ran for this module (not
+	// GitHub-hosted), which is not a collection failure — the axis scores 0 and
+	// keeps its weight. DataAvailable == false means it ran and failed.
+	if maintainerInfo != nil && !maintainerInfo.DataAvailable {
+		ds.MaintainerWeightExcluded = true
+	} else {
 		weightedBase += ds.MaintainerScore * WeightMaintainerRisk
 		denominator += WeightMaintainerRisk
 	}
-	// When maintainerInfo != nil && !maintainerInfo.DataAvailable the
-	// maintainer component is silently excluded; denominator stays at 0.90
-	// and the division below rescales the remaining four weights to 1.0.
-	if maintainerInfo != nil && !maintainerInfo.DataAvailable {
-		ds.MaintainerWeightExcluded = true
-	}
+
+	ds.MeasuredWeight = denominator
 
 	ds.TyposquatBonus = typosquatBonus
 	ds.AIGenBonus = aiGenBonus
 	ds.ResilienceBonus = resilienceBonus
+	ds.IntegrityBonus = integrityBonus
+	ds.PseudoVersionBonus = pseudoVersionBonus
 
 	weighted := weightedBase/denominator +
 		typosquatBonus +
 		aiGenBonus +
-		resilienceBonus
+		resilienceBonus +
+		integrityBonus +
+		pseudoVersionBonus
 
 	ds.RiskScore = int(math.Round(weighted))
 
@@ -646,8 +893,10 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 
 	maxWeight := 0.0
 	highOrAboveCount := 0
+	maxEPSS := 0.0
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
 		// Apply the reachability factor before comparing and accumulating.
 		// "called"/""→×1.0, "imported"→×0.7, "required"→×0.3.
 		w := severityWeight(v.Severity) * reachabilityFactor(v.Reachability)
@@ -660,6 +909,9 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 		if w >= highOrAboveWeightFloor {
 			highOrAboveCount++
 		}
+		if v.EPSSScore != nil && *v.EPSSScore > maxEPSS {
+			maxEPSS = *v.EPSSScore
+		}
 	}
 
 	// Accumulator: base is the worst CVE; each additional HIGH-or-above adds 5.
@@ -668,7 +920,9 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 		bonus = float64(highOrAboveCount-1) * 5
 	}
 
-	total := maxWeight + bonus
+	// EPSS additive bonus: the dep's worst exploitation probability adds up to
+	// 15 points (e.g. one EPSS-0.8 CVE adds +12), capped at the 100 ceiling.
+	total := maxWeight + bonus + maxEPSS*epssVulnScoreWeight
 	if total > 100 {
 		total = 100
 	}
@@ -682,6 +936,7 @@ func vulnScore(vulns []scanner.Vulnerability) float64 {
 //
 // Floor table:
 //
+//	any KEV-listed CVE (any reachability)  → 76 (CRITICAL band)
 //	CRITICAL or HIGH                       → 51 (HIGH band)
 //	MEDIUM                                 → 26 (MEDIUM band)
 //	LOW                                    → 0  (no floor; amplifier below may still raise it)
@@ -702,8 +957,18 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 	hasMedium := false
 	hasUnknownCalledFailed := false // UNKNOWN + enrichment failure + confirmed called
 	hasUnknownFailed := false       // UNKNOWN + enrichment failure, reachability unconfirmed
+	hasKEV := false
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
+		// KEV check runs before the "required" skip: a CVE that CISA has
+		// confirmed exploited in the wild floors the dep at CRITICAL (76)
+		// regardless of severity or reachability — the per-dep axis answers
+		// "how risky is this module?", and a module shipping a weaponized CVE
+		// is critically risky whether or not this project links it.
+		if v.InKEV {
+			hasKEV = true
+		}
 		// Skip required-only CVEs — they do not contribute to the floor.
 		if v.Reachability == "required" {
 			continue
@@ -731,6 +996,10 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 	}
 
 	switch {
+	case hasKEV:
+		// Confirmed exploited in the wild: CRITICAL floor (76) regardless of
+		// severity — presence on KEV essentially mandates patching.
+		return 76, RiskCritical
 	case hasCritical:
 		return 51, RiskCritical
 	case hasHigh:
@@ -774,7 +1043,8 @@ func lowFixAgeFloor(now time.Time, vulns []scanner.Vulnerability) int {
 	}
 	floor := 0
 
-	for _, v := range vulns {
+	for i := range vulns {
+		v := &vulns[i]
 		// Only apply amplifier to LOW-severity CVEs.
 		if !strings.EqualFold(v.Severity, "LOW") {
 			continue
@@ -943,8 +1213,8 @@ func computeOverallScore(deps []*DependencyScore) int {
 			// Mirror severityFloor's logic: "required" CVEs are excluded because
 			// their code never links into the build. Only "called", "imported", or
 			// unset (backward-compat alias for "called") trigger the floor.
-			for _, v := range ds.Vulns {
-				if v.Reachability != "required" {
+			for i := range ds.Vulns {
+				if ds.Vulns[i].Reachability != "required" {
 					hasVulns = true
 					break
 				}
@@ -1008,6 +1278,9 @@ type severityAdjustedResult struct {
 	stepInputs          StepFunctionInputs
 	enrichedCVEs        []DebugCVE
 	perDepInputs        []DebugPerDepInput
+	// warnings holds hidden-risk notices (KEV or very-high EPSS on a CVE the
+	// downgrades suppressed); the caller appends them to ps.Warnings.
+	warnings []string
 }
 
 // severityAdjustedVulnScore computes the CVE-driven step-function axis.
@@ -1068,7 +1341,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			// UNKNOWN + confirmed called → treat as HIGH for the step function.
 			// Empty reachability stays MEDIUM (unconfirmed ≠ reachable).
 			// Mirrors the severityFloor policy for the per-dep axis.
-			if strings.EqualFold(v.Severity, "UNKNOWN") && isConfirmedReachable(*v) {
+			if strings.EqualFold(v.Severity, "UNKNOWN") && isConfirmedReachable(v) {
 				rawTier = "HIGH"
 			}
 
@@ -1080,6 +1353,31 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 			finalTier := reachabilityTier
 			if isTestOnlyConfirmed && finalTier != "" {
 				finalTier = downgradeTier(reachabilityTier)
+			}
+
+			// Step 3: apply threat-intel adjustment (EPSS amplifier, then KEV
+			// override) on top of the downgrades. A downgrade-dropped CVE is
+			// NOT resurrected — see adjustTierForThreatIntel.
+			finalTier = adjustTierForThreatIntel(finalTier, v)
+
+			// Hidden-risk warnings: static analysis downgraded this CVE, but
+			// threat intel says it is being exploited (KEV) or is very likely
+			// to be (EPSS >= 0.9). The right answer is human review.
+			if wasDowngraded := reachDesc != "" || isTestOnlyConfirmed; wasDowngraded {
+				context := v.Reachability
+				if isTestOnlyConfirmed {
+					context = "test-only"
+				}
+				switch {
+				case v.InKEV:
+					res.warnings = append(res.warnings, fmt.Sprintf(
+						"KEV CVE %s on dep %s (%s) — confirmed exploited in the wild; verify reachability manually",
+						v.ID, ds.Module, context))
+				case v.EPSSScore != nil && *v.EPSSScore >= epssManualReviewThreshold:
+					res.warnings = append(res.warnings, fmt.Sprintf(
+						"high-EPSS CVE %s (%.0f%% exploitation probability) on dep %s (%s) — verify reachability manually",
+						v.ID, *v.EPSSScore*100, ds.Module, context))
+				}
 			}
 
 			// Track raw worst severity on this dep (for debug only).
@@ -1102,6 +1400,8 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 					EnrichmentFailed:      v.EnrichmentFailed,
 					Reachability:          v.Reachability,
 					ReachabilityDowngrade: reachDesc,
+					EPSSScore:             v.EPSSScore,
+					InKEV:                 v.InKEV,
 				}
 				res.enrichedCVEs = append(res.enrichedCVEs, dc)
 				continue
@@ -1139,6 +1439,8 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 				EnrichmentFailed:      v.EnrichmentFailed,
 				Reachability:          v.Reachability,
 				ReachabilityDowngrade: reachDesc,
+				EPSSScore:             v.EPSSScore,
+				InKEV:                 v.InKEV,
 			}
 			// Populate DowngradedTier when any downgrade (reachability or test-only)
 			// changed the effective tier from the raw tier.
@@ -1216,7 +1518,7 @@ func effectiveTier(v *scanner.Vulnerability) string {
 //
 // Use this instead of v.Severity when rendering scored results — it keeps the
 // display and scoring logic in sync without duplicating the policy in reporters.
-func ScoredSeverity(v scanner.Vulnerability) string {
+func ScoredSeverity(v *scanner.Vulnerability) string {
 	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 		if isConfirmedReachable(v) {
 			return "HIGH"
@@ -1224,6 +1526,62 @@ func ScoredSeverity(v scanner.Vulnerability) string {
 		return "MEDIUM"
 	}
 	return strings.ToUpper(v.Severity)
+}
+
+// epssPromoteThreshold is the EPSS score at or above which a CVE's tier is
+// promoted one notch. 0.5 means FIRST.org estimates >50% probability of
+// exploitation within 30 days — the threshold for "actively dangerous".
+const epssPromoteThreshold = 0.5
+
+// epssManualReviewThreshold is the EPSS score at or above which a downgraded
+// CVE triggers a "verify reachability manually" warning: static analysis says
+// the code path isn't reachable, but the exploitation probability is so high
+// that human review is warranted.
+const epssManualReviewThreshold = 0.9
+
+// epssVulnScoreWeight scales the per-dep EPSS additive bonus in vulnScore:
+// bonus = max_epss_on_dep × 15.
+const epssVulnScoreWeight = 15
+
+// promoteTier shifts a tier up by one notch. CRITICAL stays CRITICAL.
+func promoteTier(t string) string {
+	switch t {
+	case "LOW":
+		return "MEDIUM"
+	case "MEDIUM":
+		return "HIGH"
+	case "HIGH", "CRITICAL":
+		return "CRITICAL"
+	default:
+		return t
+	}
+}
+
+// adjustTierForThreatIntel applies the post-downgrade threat-intel rules to a
+// CVE's step-function tier:
+//
+//  1. EPSS amplifier — score >= 0.5 and tier below CRITICAL: promote one tier.
+//  2. KEV override   — CVE is in CISA's KEV catalog: force CRITICAL.
+//
+// Both apply AFTER the reachability and test-only downgrades because those
+// encode "this code path isn't reachable in this project" — wild-exploitation
+// status doesn't make an unreachable path more vulnerable. For the same
+// reason, a downgrade-dropped CVE (tier == "") is NOT resurrected: once the
+// downgrades remove a CVE from the step function, EPSS and KEV do not bring
+// it back. This is the most counter-intuitive composition case — the
+// hidden-risk warnings in severityAdjustedVulnScore surface it for human
+// review instead.
+func adjustTierForThreatIntel(tier string, v *scanner.Vulnerability) string {
+	if tier == "" {
+		return ""
+	}
+	if v.EPSSScore != nil && *v.EPSSScore >= epssPromoteThreshold {
+		tier = promoteTier(tier)
+	}
+	if v.InKEV {
+		tier = "CRITICAL"
+	}
+	return tier
 }
 
 // downgradeTier shifts a tier down by one notch. Used for test-only deps.
@@ -1254,7 +1612,7 @@ func downgradeTier(t string) string {
 //
 //   - Weight axis: "" → 1.0 (pessimistic; don't under-weight unknown sources).
 //   - Confirmation axis: "" → false (conservative; don't over-escalate severity).
-func isConfirmedReachable(v scanner.Vulnerability) bool {
+func isConfirmedReachable(v *scanner.Vulnerability) bool {
 	return v.Reachability == "called"
 }
 
@@ -1504,6 +1862,54 @@ func cveFloor(deps []*DependencyScore) HeadlineCandidate {
 				best.DrivingDep = ds.Module
 				best.Reason = fmt.Sprintf("%s %s %s", reach, tier, v.ID)
 			}
+		}
+	}
+
+	return best
+}
+
+// integrityFloor floors the headline to HIGH when any non-test-only dep in the
+// graph carries a HIGH-severity replace directive (a redirect to a different
+// module path — see scanner.IntegrityScanner.ScanDirectives), and to CRITICAL
+// when `go mod verify` reported a go.sum checksum mismatch (gosumMismatch).
+//
+// LOW (version-pin) and MEDIUM (local-path) replace classes must never drive
+// the headline — only a redirect to a different module signals a possible
+// fork hijack or private-mirror compromise. HIGH band starts at 51
+// (levelFromScore), so all HIGH floors use 51, not 50; direct dependency
+// escalates to 60, mirroring archivedFloor. CRITICAL band starts at 76, so
+// the go.sum-mismatch floor is 76 — it always outranks the replace floors.
+func integrityFloor(deps []*DependencyScore, gosumMismatch bool) HeadlineCandidate {
+	if gosumMismatch {
+		return HeadlineCandidate{
+			Name:       "integrity_floor",
+			Score:      76,
+			DrivingDep: "go.sum",
+			Reason:     "go mod verify failed — a module in the local cache does not match its go.sum checksum",
+		}
+	}
+
+	best := HeadlineCandidate{Name: "integrity_floor"}
+
+	for _, ds := range deps {
+		if ds.IsTestOnly != nil && *ds.IsTestOnly {
+			continue
+		}
+		if ds.ReplaceClass != scanner.IntegrityHigh {
+			continue
+		}
+
+		var score float64
+		if ds.Direct {
+			score = 60
+		} else {
+			score = 51
+		}
+
+		if score > best.Score {
+			best.Score = score
+			best.DrivingDep = ds.Module
+			best.Reason = "replace directive redirects to a different module path"
 		}
 	}
 

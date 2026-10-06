@@ -545,3 +545,89 @@ func TestWriteSPDX_RiskAnnotation(t *testing.T) {
 func containsSubstring(str, substr string) bool {
 	return bytes.Contains([]byte(str), []byte(substr))
 }
+
+// TestWriteCycloneDX_RootComponentVersion checks that the go directive is not
+// reported as the scanned project's own version. A go.mod carries no version
+// for the main module, so the root component has none; the go directive is
+// kept as a labelled property instead.
+func TestWriteCycloneDX_RootComponentVersion(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true},
+	)
+
+	var buf bytes.Buffer
+	if err := WriteCycloneDX(graph, nil, SBOMOptions{GoVersion: "1.26.8"}, &buf); err != nil {
+		t.Fatalf("WriteCycloneDX() failed: %v", err)
+	}
+
+	var raw struct {
+		Metadata struct {
+			Component map[string]json.RawMessage `json:"component"`
+		} `json:"metadata"`
+		Components []map[string]json.RawMessage `json:"components"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal CycloneDX JSON: %v", err)
+	}
+	if v, ok := raw.Metadata.Component["version"]; ok {
+		t.Errorf("root component version = %s, want the field omitted", v)
+	}
+	if len(raw.Components) != 1 {
+		t.Fatalf("components = %d, want 1", len(raw.Components))
+	}
+	if got := string(raw.Components[0]["version"]); got != `"v1.0.0"` {
+		t.Errorf("dependency version = %s, want \"v1.0.0\"", got)
+	}
+
+	var bom cdxBOM
+	if err := json.Unmarshal(buf.Bytes(), &bom); err != nil {
+		t.Fatalf("Failed to unmarshal CycloneDX JSON: %v", err)
+	}
+	var goVersion string
+	for _, p := range bom.Metadata.Component.Properties {
+		if p.Name == "unisupply:go_version" {
+			goVersion = p.Value
+		}
+	}
+	if goVersion != "1.26.8" {
+		t.Errorf("root property unisupply:go_version = %q, want %q", goVersion, "1.26.8")
+	}
+}
+
+// TestWriteSPDX_RootPackageVersion checks that the root package omits
+// versionInfo and has a NOASSERTION downloadLocation, while dependencies
+// keep both.
+func TestWriteSPDX_RootPackageVersion(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true},
+	)
+
+	var buf bytes.Buffer
+	if err := WriteSPDX(graph, nil, SBOMOptions{GoVersion: "1.26.8"}, &buf); err != nil {
+		t.Fatalf("WriteSPDX() failed: %v", err)
+	}
+
+	var raw struct {
+		Packages []map[string]json.RawMessage `json:"packages"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("Failed to unmarshal SPDX JSON: %v", err)
+	}
+	if len(raw.Packages) != 2 {
+		t.Fatalf("packages = %d, want 2 (root + 1 dependency)", len(raw.Packages))
+	}
+
+	root, dep := raw.Packages[0], raw.Packages[1]
+	if v, ok := root["versionInfo"]; ok {
+		t.Errorf("root versionInfo = %s, want the field omitted", v)
+	}
+	if got := string(root["downloadLocation"]); got != `"NOASSERTION"` {
+		t.Errorf("root downloadLocation = %s, want \"NOASSERTION\"", got)
+	}
+	if got := string(dep["versionInfo"]); got != `"v1.0.0"` {
+		t.Errorf("dependency versionInfo = %s, want \"v1.0.0\"", got)
+	}
+	if got, want := string(dep["downloadLocation"]), `"https://proxy.golang.org/github.com/example/pkg/@v/v1.0.0.zip"`; got != want {
+		t.Errorf("dependency downloadLocation = %s, want %s", got, want)
+	}
+}

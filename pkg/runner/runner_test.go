@@ -68,13 +68,16 @@ func TestRun_MissingGoMod(t *testing.T) {
 }
 
 func TestVulnScanFailure(t *testing.T) {
-	if vulnScanFailure(nil, []string{"GitHub API unauthenticated", "vuln enrichment: NVD returned HTTP 429"}) != nil {
-		t.Error("enrichment and maintainer warnings are not a vulnerability scan failure")
+	if vulnScanFailure(nil, true, []string{"GitHub API unauthenticated"}) != nil {
+		t.Error("a completed vulnerability scan is not a failure, whatever else it warned about")
 	}
-	if err := vulnScanFailure(nil, []string{"govulncheck: no go.mod file\n\nonly works with Go modules"}); err == nil || err.Error() != "govulncheck: no go.mod file" {
-		t.Errorf("a govulncheck warning must be reported (first line only), got %v", err)
+	if err := vulnScanFailure(nil, false, []string{"govulncheck: no go.mod file\n\nonly works with Go modules"}); err == nil || err.Error() != "govulncheck: no go.mod file" {
+		t.Errorf("a scan that did not run must report its warning (first line only), got %v", err)
 	}
-	if vulnScanFailure(errors.New("starting govulncheck: boom"), nil) == nil {
+	if err := vulnScanFailure(nil, false, nil); err == nil {
+		t.Error("a scan that did not run and said nothing must still be a failure")
+	}
+	if vulnScanFailure(errors.New("starting govulncheck: boom"), true, nil) == nil {
 		t.Error("a ScanVulns error must be reported")
 	}
 }

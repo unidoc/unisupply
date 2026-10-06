@@ -11,12 +11,14 @@
 ## What it does
 
 `unisupply` analyzes a Go project's full module dependency chain and produces a
-supply chain risk assessment. It runs nine focused scanners — vulnerability
+supply chain risk assessment. It runs ten focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
-file inspection, and Trust Index lookup — combines the in-tree scanner signals
-into a weighted risk score per dependency, attaches the optional Trust Index
-data to each report alongside that score, and renders the result as a colored terminal
+file inspection, `go.mod`/`go.sum` integrity audit (replace/exclude
+directives, go.sum completeness, go.sum verification), and Trust Index
+lookup — combines the in-tree scanner signals into a weighted risk score per
+dependency, attaches the optional Trust Index data to each report alongside
+that score, and renders the result as a colored terminal
 summary, machine-readable JSON, an enterprise PDF report, or a CycloneDX /
 SPDX SBOM. A built-in policy engine fails CI on configurable thresholds
 (critical vulns, max age, blocked modules, unpinned actions, ...).
@@ -27,11 +29,11 @@ release-time decisions about third-party Go code.
 ## Install
 
 ```bash
-# Latest release (Go 1.25+ required)
+# Latest release (Go 1.26+ required)
 go install github.com/unidoc/unisupply/cmd/unisupply@latest
 
 # Pinned version (recommended for reproducible environments)
-go install github.com/unidoc/unisupply/cmd/unisupply@v0.4.0
+go install github.com/unidoc/unisupply/cmd/unisupply@v0.6.0
 
 # Or download a prebuilt binary from the Releases page
 #   https://github.com/unidoc/unisupply/releases
@@ -104,6 +106,7 @@ path that pulled the module in.
 | AI-Generated     | Fresh modules, few releases, generic names (heuristics) | Module metadata            |
 | CI/CD            | Action pinning, permissions, secret exposure            | `.github/workflows/*.yml`  |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns         | Dockerfile, Makefile, *.sh |
+| Integrity        | `go.mod` `replace`/`exclude` directive audit            | `go.mod` (offline)         |
 | Trust Index      | Curated trust scores                                    | unitrust API (optional)    |
 
 The risk score is a weighted composite per dependency:
@@ -118,12 +121,13 @@ Per-Dep Risk Score (0–100) =
   + Typosquat Penalty      (0–20)
   + AI-Gen Penalty         (0–15)
   + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
+  + Replace Penalty        (0–20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
 ```
 
-**Project headline score** is the maximum of four candidates — it never dilutes a single bad actor into a healthy-looking average:
+**Project headline score** is the maximum of five candidates — it never dilutes a single bad actor into a healthy-looking average:
 
 ```
-Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
+Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor)
 ```
 
 | Candidate | Description |
@@ -132,6 +136,7 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor)
 | `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
 | `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
 | `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
+| `integrity_floor` | HIGH floor (51) when any transitive dep has a `replace` directive redirecting to a different module; 60 for a direct dep |
 
 **Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
 
@@ -165,12 +170,18 @@ your build's call graph — see
 [docs/scanners.md § Vulnerability reachability](docs/scanners.md#vulnerability-reachability)
 for the exact definitions and scoring effect.
 
+Each CVE also carries threat-intel enrichment: `epss_score` /
+`epss_percentile` (FIRST.org's exploitation-probability prediction) and
+`in_kev` (presence in CISA's Known Exploited Vulnerabilities catalog). Both
+feed the risk score — see
+[docs/scanners.md § Threat-intel enrichment](docs/scanners.md#threat-intel-enrichment-epss--cisa-kev).
+
 ```json
 {
   "module": "golang.org/x/net",
   "version": "v0.35.0",
-  "risk_score": 72,
-  "risk_level": "HIGH",
+  "risk_score": 76,
+  "risk_level": "CRITICAL",
   "vulnerabilities": [
     {
       "id": "GO-2025-0001",
@@ -178,7 +189,13 @@ for the exact definitions and scoring effect.
       "summary": "HTTP/2 request smuggling in golang.org/x/net/http2",
       "severity": "HIGH",
       "fixed_version": "v0.36.0",
-      "reachability": "called"
+      "reachability": "called",
+      "epss_score": 0.89,
+      "epss_percentile": 0.994,
+      "epss_date": "2026-07-10",
+      "in_kev": true,
+      "kev_date_added": "2026-07-01",
+      "kev_known_ransomware": "Unknown"
     },
     {
       "id": "GO-2025-0002",
@@ -186,13 +203,21 @@ for the exact definitions and scoring effect.
       "summary": "DoS in unused websocket handler",
       "severity": "MEDIUM",
       "fixed_version": "v0.36.0",
-      "reachability": "imported"
+      "reachability": "imported",
+      "epss_score": 0.004,
+      "epss_percentile": 0.31,
+      "epss_date": "2026-07-10",
+      "in_kev": false
     }
   ]
 }
 ```
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
+Absent `epss_score` means EPSS has no score for that CVE (expected — EPSS does
+not score every CVE), the lookup failed, or the vuln has no CVE alias;
+absent `in_kev` means the KEV catalog was not consulted (`false` means
+"checked, not listed").
 
 ## Policy engine
 
@@ -241,6 +266,13 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
+- `require_gosum_verified` — fail when `go mod verify` reported a checksum
+  mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
+  (offline, no go.sum, toolchain unavailable) do not fail this rule.
+
+Policy files are decoded strictly: any key that is not a recognized field is
+rejected at load time (exit 1, naming the offending key), so a typo'd or
+outdated rule name can never silently disable a check.
 
 <!-- TODO (PR 08 / M6.5): once the examples/ directory lands, link to ready-to-copy policy files here. -->
 
@@ -334,7 +366,7 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 9 security scanners        pkg/scanner/
+  ├── Run 10 security scanners       pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
@@ -342,8 +374,9 @@ CLI (pflag)
   │   ├── Resilience scoring
   │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
-  │   ├── Trust Index lookup (unitrust, optional)
-  │   └── Build file scanning
+  │   ├── Build file scanning
+  │   ├── Integrity (go.mod/go.sum audit, go mod verify)
+  │   └── Trust Index lookup (unitrust, optional)
   ├── Compute risk scores             pkg/scorer/
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/
@@ -374,7 +407,7 @@ The most frequently used flags:
 | `--policy`              | Path to a custom policy JSON file                             |
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
 | `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts |
-| `--min-risk`            | Hide dependencies below the given score                       |
+| `--min-risk`            | Hide dependencies below the given score (e.g. `--min-risk 26` for medium+) |
 | `--direct-only`         | Skip transitive dependencies                                  |
 | `-v, --verbose`         | Per-dependency breakdown                                      |
 
@@ -402,19 +435,96 @@ the same data already public in your `go.mod`.
 | `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
 | `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
+| `api.first.org` | CVE IDs (batched) | EPSS exploitation-probability lookup for flagged CVEs | always runs (no-op if no CVE alias); 24h cache |
+| `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
 
-**Not contacted:** `sum.golang.org` (checksum verification is the user's responsibility at `go mod download` time, outside unisupply), `pkg.go.dev` (web UI only; not used as an API), no analytics beacon, crash reporter, or telemetry endpoint.
+**Not contacted directly:** `sum.golang.org` and `pkg.go.dev` are never called by unisupply itself; no analytics beacon, crash reporter, or telemetry endpoint. Note that the Integrity scanner shells out to `go mod verify`, which checks the **local module cache** against go.sum — normally a fully offline operation. On a cold cache the `go` toolchain may fetch missing module metadata through your configured `GOPROXY` and verify it against `sum.golang.org`, exactly as any `go build` would; `GOPRIVATE`/`GONOSUMDB` are honored as usual. unisupply adds no network host beyond what the `go` toolchain itself contacts.
 
 **Trust Index disclosure.** The `--trust-index-url` call sends the full list
 of discovered module paths — equivalent to your published `go.mod`. No
 versions, no source. The feature is opt-in and off by default; see the
 [Trust Index section](#trust-index-integration) for full details.
 
+**Verify the contract yourself.** `--network-log` prints every outbound HTTP
+request to stderr — method, host, purpose, status, size, duration — so you can
+confirm the table above matches real behavior rather than taking it on trust:
+
+```bash
+unisupply ./ --network-log 2> net.log
+grep -E '^NET (GET|POST|HEAD|PUT|PATCH|DELETE) ' net.log \
+  | awk '{print $3}' | sort -u   # every host contacted
+```
+
+```
+NET SUBPROCESS go mod graph (module proxy/VCS may be contacted by the go toolchain; see GOPROXY)
+NET GET vuln.go.dev vulndb → 200 (59116 bytes, 55ms)
+NET GET proxy.golang.org maintenance:latest → 200 (78 bytes, 380ms)
+NET HEAD api.github.com resilience:governance → 403 (279 bytes, 55ms)
+```
+
+A response whose length the server does not declare (chunked, or transparently
+decompressed) reports `? bytes`; a failed request reports `→ error: …` with the
+URL stripped from the error text, so a failure cannot disclose a request path or
+query that the success line would not have printed.
+
+Traffic from child processes (`go mod graph`, `go list`, `go mod verify`)
+cannot be logged per-request, so it is reported as a `NET SUBPROCESS`
+lifecycle line naming what the `go` toolchain may contact. Requests are
+written to stderr only — `--network-log --format json > out.json` still
+produces clean JSON. The flag downgrades an auto-detected TTY progress
+spinner to plain lines so the two do not overwrite each other; `--progress
+none` stays silent.
+
 **Air-gapped environments.** Allow only the hosts above at your network
 boundary; each scanner degrades gracefully with explicit warnings when a
 host is unreachable.
+
+For a scan that makes **no outbound requests at all**, use `--offline`:
+
+```bash
+unisupply ./ --offline
+```
+
+Enforcement is not advisory. Every in-process request is refused before a
+socket is opened, and the `go` toolchain is run with `GOPROXY=off` plus cleared
+`GOPRIVATE`/`GONOPROXY`/`GONOSUMDB` and `GOSUMDB=off`, so child processes read
+only your local module cache. Clearing the private-module patterns matters:
+the toolchain checks them *before* it honors `GOPROXY=off`, so a `GOPRIVATE`
+entry would otherwise let a matching module fetch directly from VCS, and the
+checksum database has its own direct fallback. You can confirm this the same way
+you confirm anything else here — combine the two flags and read the log:
+
+```bash
+unisupply ./ --offline --network-log 2> net.log
+grep -c 'error: offline mode' net.log   # every attempt, refused
+```
+
+What `--offline` costs you, and how each loss is reported:
+
+| Scanner | Offline behavior |
+|---------|------------------|
+| Vulnerability (govulncheck) | Skipped — warning states no local vuln DB mirror is configured; the 40% weight is excluded from every score, never scored as clean |
+| Maintenance | Not measured — warning names the module count; the 25% weight is excluded rather than scored with an unknown constant |
+| Maintainer, Resilience | UNKNOWN; the maintainer axis is excluded from scores rather than counted as zero |
+| **Headline verdict** | **`UNKNOWN — not scored`.** Three of the five headline candidates are CVE-derived, so with no vulnerability data the headline would rest on dependency-graph position and version scheme alone. The numeric score is still reported, labelled indicative |
+| Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
+| go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
+| AI-gen | Does not run — every indicator derives from the module's first-release date, which comes from the proxy. Reported as unexamined, with a warning naming the module count; **not** reported as "no AI-gen risk found" |
+| Typosquat, CI/CD, build files, `go.mod` integrity | Unaffected — these never used the network |
+
+Degraded axes are marked, never fabricated: an unavailable signal is reported
+as unavailable and dropped from the weighting, so an offline scan cannot read
+as a clean bill of health.
+
+`--offline` is rejected alongside `--trust-index-url` (a network service by
+definition) and `--format pdf` (UniPDF validates its license over the network
+before rendering). Use `--format text`, `json`, or `sbom-*` offline.
+
+Offline scans currently report no vulnerabilities, because govulncheck needs
+the Go vulnerability database. A documented local-mirror workflow is not yet
+available — track it before relying on `--offline` for vulnerability findings.
 
 ## Documentation
 
@@ -431,7 +541,7 @@ host is unreachable.
 The `unisupply` CLI binary is Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
 
 **Library-use note:** The PDF report package (`pkg/report/pdf`) depends on
-[UniPDF v3](https://github.com/unidoc/unipdf/tree/v3), a commercial product governed by
+[UniPDF v3](https://github.com/unidoc/unipdf/releases/tag/v3.69.0), a commercial product governed by
 the [UniDoc EULA](https://unidoc.io/eula/). PDF generation requires a license
 key via `UNIDOC_LICENSE_API_KEY` — see [unidoc.io](https://unidoc.io) for licensing options. Importing `pkg/report/pdf` in your own
 application is subject to the UniDoc EULA; the rest of UniSupply carries no

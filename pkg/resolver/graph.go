@@ -5,12 +5,15 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/pkg/netlog"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/progress"
 )
@@ -75,7 +78,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 			if req.Indirect {
 				continue
 			}
-			_, replaced := gomod.Replaces[req.Path]
+			_, replaced := gomod.ReplacementFor(req.Path, req.Version)
 			graph.Dependencies[req.Path] = &Dependency{
 				Module:   req,
 				Direct:   true,
@@ -94,7 +97,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))
 		// Fall back: add everything from go.mod.
 		for _, req := range gomod.Requirements {
-			_, replaced := gomod.Replaces[req.Path]
+			_, replaced := gomod.ReplacementFor(req.Path, req.Version)
 			graph.Dependencies[req.Path] = &Dependency{
 				Module:   req,
 				Direct:   !req.Indirect,
@@ -130,8 +133,11 @@ func depthFromIndirect(indirect bool) int {
 
 func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, gomod *parser.GoMod, directPaths map[string]bool) error {
 	dir := filepath.Dir(gomodPath)
+	netlog.Subprocess("go mod graph", offline.SubprocessNote("module proxy/VCS may be contacted by the go toolchain; see GOPROXY"))
+
 	cmd := exec.CommandContext(ctx, "go", "mod", "graph")
 	cmd.Dir = dir
+	cmd.Env = offline.Env(os.Environ())
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -224,7 +230,7 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 			continue
 		}
 
-		_, replaced := gomod.Replaces[modPath]
+		_, replaced := gomod.ReplacementFor(modPath, version)
 		isDirect := directPaths[modPath]
 
 		depth := 1 // default for modules not reached by BFS (shouldn't happen)
@@ -267,16 +273,27 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 // test-only discount when the field is nil (unknown). Under-discounting is
 // safer than a silent wrong discount on an unverified classification.
 func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string {
+	// Offline runs the toolchain with GOPROXY=off, so `go list` fails whenever
+	// the module cache is cold. That is the mode working as designed, not a
+	// broken environment — say so, and report the exit status as the reason it
+	// could not be classified rather than as a fault.
+	unavailable := func(which string, err error) string {
+		if offline.Enabled() {
+			return fmt.Sprintf("offline — %s could not resolve from the local module cache; test-only classification unavailable (IsTestOnly will be nil for all deps)", which)
+		}
+		return fmt.Sprintf("%s failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", which, err)
+	}
+
 	// Collect production (non-test) module paths.
 	prodMods, err := listModulePaths(ctx, dir, false)
 	if err != nil {
-		return fmt.Sprintf("go list (production) failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
+		return unavailable("go list (production)", err)
 	}
 
 	// Collect module paths including test imports.
 	allMods, err := listModulePaths(ctx, dir, true)
 	if err != nil {
-		return fmt.Sprintf("go list -test failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", err)
+		return unavailable("go list -test", err)
 	}
 
 	// Require at least one module path from each call — an empty result means
@@ -321,8 +338,11 @@ func listModulePaths(ctx context.Context, dir string, withTest bool) (map[string
 	}
 	args = append(args, "all")
 
+	netlog.Subprocess("go "+strings.Join(args, " "), offline.SubprocessNote("module proxy/VCS may be contacted by the go toolchain; see GOPROXY"))
+
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
+	cmd.Env = offline.Env(os.Environ())
 
 	out, err := cmd.Output()
 	if err != nil {
@@ -353,7 +373,7 @@ func addFromGoSum(sumPath string, graph *Graph, gomod *parser.GoMod) error {
 			continue
 		}
 
-		_, replaced := gomod.Replaces[entry.Path]
+		_, replaced := gomod.ReplacementFor(entry.Path, entry.Version)
 		graph.Dependencies[entry.Path] = &Dependency{
 			Module: parser.Module{
 				Path:     entry.Path,
