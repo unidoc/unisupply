@@ -251,7 +251,6 @@ func run(cfg *runConfig) error {
 		ScanCI:                 cfg.scanCI,
 		WorkflowPath:           cfg.workflowPath,
 		DebugScoring:           cfg.debugScoring,
-		Offline:                cfg.offlineMode,
 	})
 	if err != nil {
 		return err

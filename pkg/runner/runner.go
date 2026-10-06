@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -34,8 +35,7 @@ type Options struct {
 	Path string
 
 	// Timeout bounds each scanner's outbound HTTP calls (Go Module Proxy,
-	// GitHub API, Trust Index). Defaults to 30s (the CLI's own --timeout
-	// default) if zero.
+	// GitHub API, Trust Index). Zero means the scanners' own default.
 	Timeout time.Duration
 
 	DirectOnly bool
@@ -52,12 +52,6 @@ type Options struct {
 	WorkflowPath string
 
 	DebugScoring bool
-
-	// Offline tells the scanners the process makes no network requests: go mod
-	// verify is skipped and degraded lookups are reported accordingly. It does
-	// NOT block the network itself; the caller installs pkg/offline.Enable (the
-	// CLI does) if it wants that enforced.
-	Offline bool
 
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
@@ -79,7 +73,8 @@ type Result struct {
 
 	// CIReport is nil unless Options.ScanWorkflows or Options.ScanCI was set.
 	CIReport *scanner.CIReport
-	// Takeovers lists maintainers flagged as takeover candidates.
+	// Takeovers lists maintainers flagged as takeover candidates: one entry per
+	// repository, sorted by owner/repo.
 	Takeovers []*scanner.MaintainerInfo
 	// StdlibVulns holds vulnerabilities found in the Go standard library
 	// itself, separated out of ProjectScore's per-dependency vulns (the
@@ -94,7 +89,9 @@ type Result struct {
 	// (govulncheck failed, or produced no usable output). Run still returns a
 	// Result in that case - the dependency graph and the other scanners ran -
 	// but the vulnerability data is EMPTY, which a caller must not present as
-	// "no vulnerabilities".
+	// "no vulnerabilities". It is nil on the zero-dependency path, where there
+	// is nothing to scan: govulncheck is not run, so the standard library is not
+	// checked either, and IntegrityReport.GoSumVerified is empty.
 	VulnScanErr error
 	// Interrupted is true when the context ended before every scanner finished,
 	// so the report may be incomplete.
@@ -123,16 +120,19 @@ type Result struct {
 // (as any library caller will pass) gets progress.From's built-in no-op
 // reporter, so Run is silent by default.
 func Run(ctx context.Context, opts Options) (*Result, error) {
+	// Timeout is passed through unchanged: the scanner clients map 0 to their
+	// own default, exactly as the CLI's --timeout 0 always has.
 	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
 	scanStart := opts.Now
 	if scanStart.IsZero() {
 		scanStart = time.Now().UTC().Truncate(24 * time.Hour)
 	}
 
 	rep := progress.From(ctx)
+	// Offline mode is process-wide (pkg/offline swaps http.DefaultTransport), so
+	// read the same switch the vulnerability scanner, resolver and scorer read.
+	// A caller that wants an offline scan calls offline.Enable() before Run.
+	offlineMode := offline.Enabled()
 
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(opts.Path)
@@ -149,7 +149,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// Audit replace/exclude directives (pure go.mod analysis, no network).
 	rep.Stage("Auditing go.mod directives")
 	integrityScanner := scanner.NewIntegrityScanner()
-	integrityScanner.Offline = opts.Offline
+	integrityScanner.Offline = offlineMode
 	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
 	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
 
@@ -207,7 +207,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	maintenance, err := maintScanner.ScanAll(ctx, graph)
 	var maintWarnings []string
 	if err != nil {
-		if opts.Offline {
+		if offlineMode {
 			// The scorer emits the authoritative report warning for this.
 			rep.Warn("%v", err)
 		} else {
@@ -220,7 +220,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	rep.Done("")
 
-	if opts.GithubToken == "" && !opts.Offline {
+	if opts.GithubToken == "" && !offlineMode {
 		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
 			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
@@ -321,12 +321,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rep.Done("")
 	}
 
-	var takeovers []*scanner.MaintainerInfo
-	for _, mi := range maintainers {
-		if mi.TakeoverCandidate {
-			takeovers = append(takeovers, mi)
-		}
-	}
+	// One entry per repository, sorted by owner/repo: deterministic output
+	// (the text, JSON and PDF reports and Result.Takeovers all depend on it).
+	takeovers := scanner.TakeoverCandidates(maintainers)
 
 	var stdlibVulns []scanner.Vulnerability
 	if stdlibList, ok := vulns["stdlib"]; ok {

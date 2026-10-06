@@ -91,6 +91,19 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   endpoints (`api.first.org`, `www.cisa.gov`), both best-effort with 24h
   on-disk caches — threat-intel unavailability never fails a scan.
 
+### New Features
+
+#### `pkg/runner`: the scan pipeline as an importable package
+
+- **`runner.Run(ctx, Options)` runs the full scan-and-score pipeline in
+  process.** `cmd/unisupply` now calls it, so the CLI and library callers share
+  one implementation; flags and output are unchanged. Offline mode is the
+  process-wide `pkg/offline` switch, so call `offline.Enable()` before `Run`.
+- **`Result` tells a library caller when a scan is incomplete.**
+  `VulnScanErr` is non-nil when the vulnerability scan did not complete, and
+  `Interrupted` is true when the context ended before every scanner finished.
+  A caller must not present either as "no vulnerabilities".
+
 ### Improvements
 
 #### Minimum Go version is now 1.26
