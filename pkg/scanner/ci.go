@@ -170,12 +170,17 @@ func (cs *CIScanner) analyzeWorkflow(wf *parser.Workflow) *WorkflowRisk {
 			})
 		}
 
-		// Check job-level permissions.
+		// Check job-level permissions. A job without a `name:` key is known
+		// only by its ID, so fall back to it rather than print "Job ''".
 		if job.Permissions.IsWriteAll {
+			jobLabel := job.Name
+			if jobLabel == "" {
+				jobLabel = jobID
+			}
 			wr.Findings = append(wr.Findings, CIFinding{
 				Category:    "excessive_permissions",
 				Severity:    CIRiskHigh,
-				Description: fmt.Sprintf("Job '%s' has write-all permissions", job.Name),
+				Description: fmt.Sprintf("Job '%s' has write-all permissions", jobLabel),
 				File:        wf.FilePath,
 				Remediation: "Restrict job permissions to minimum required",
 			})
@@ -240,39 +245,41 @@ func (cs *CIScanner) analyzeAction(step parser.WorkflowStep, filePath string, wr
 	}
 }
 
+// secretPattern matches a `${{ secrets.* }}` expression in a step's env or with value.
+var secretPattern = regexp.MustCompile(`\$\{\{\s*secrets\.`)
+
 func (cs *CIScanner) checkSecretsExposure(step parser.WorkflowStep, filePath string, wr *WorkflowRisk) {
-	secretPattern := regexp.MustCompile(`\$\{\{\s*secrets\.`)
+	// Secrets are only flagged when passed to a third-party action, and that
+	// depends on the step alone, not on the key, so decide it once per step.
+	ref := parser.ParseActionRef(step.Uses)
+	if ref == nil || parser.IsOfficialAction(ref) {
+		return
+	}
 
 	// Check env vars for secrets passed to untrusted steps.
 	// Sorted key order keeps the finding order stable across runs.
 	for _, key := range slices.Sorted(maps.Keys(step.Env)) {
 		if secretPattern.MatchString(step.Env[key]) {
-			ref := parser.ParseActionRef(step.Uses)
-			if ref != nil && !parser.IsOfficialAction(ref) {
-				wr.Findings = append(wr.Findings, CIFinding{
-					Category:    "secrets_exposure",
-					Severity:    CIRiskCritical,
-					Description: fmt.Sprintf("Secret passed via env '%s' to third-party action '%s'", key, step.Uses),
-					File:        filePath,
-					Remediation: "Avoid passing secrets to third-party actions. Use OIDC tokens or scoped tokens instead.",
-				})
-			}
+			wr.Findings = append(wr.Findings, CIFinding{
+				Category:    "secrets_exposure",
+				Severity:    CIRiskCritical,
+				Description: fmt.Sprintf("Secret passed via env '%s' to third-party action '%s'", key, step.Uses),
+				File:        filePath,
+				Remediation: "Avoid passing secrets to third-party actions. Use OIDC tokens or scoped tokens instead.",
+			})
 		}
 	}
 
 	// Check 'with' inputs for secrets.
 	for _, key := range slices.Sorted(maps.Keys(step.With)) {
 		if secretPattern.MatchString(step.With[key]) {
-			ref := parser.ParseActionRef(step.Uses)
-			if ref != nil && !parser.IsOfficialAction(ref) {
-				wr.Findings = append(wr.Findings, CIFinding{
-					Category:    "secrets_exposure",
-					Severity:    CIRiskHigh,
-					Description: fmt.Sprintf("Secret passed via input '%s' to third-party action '%s'", key, step.Uses),
-					File:        filePath,
-					Remediation: "Audit the action to ensure secrets are handled securely",
-				})
-			}
+			wr.Findings = append(wr.Findings, CIFinding{
+				Category:    "secrets_exposure",
+				Severity:    CIRiskHigh,
+				Description: fmt.Sprintf("Secret passed via input '%s' to third-party action '%s'", key, step.Uses),
+				File:        filePath,
+				Remediation: "Audit the action to ensure secrets are handled securely",
+			})
 		}
 	}
 }

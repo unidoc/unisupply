@@ -88,6 +88,42 @@ func TestCIScanner_AnalyzeWorkflow_JobWriteAll(t *testing.T) {
 	}
 }
 
+// TestCIScanner_AnalyzeWorkflow_JobWriteAll_Label verifies the write-all
+// finding names the job: by its name when it has one, by its ID otherwise.
+func TestCIScanner_AnalyzeWorkflow_JobWriteAll_Label(t *testing.T) {
+	tests := []struct {
+		name    string
+		jobName string
+		want    string
+	}{
+		{"named job", "Build and test", "Job 'Build and test' has write-all permissions"},
+		{"unnamed job", "", "Job 'build' has write-all permissions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := &parser.Workflow{
+				Name:     "test",
+				FilePath: "test.yml",
+				Jobs: map[string]*parser.WorkflowJob{
+					"build": {
+						Name:        tt.jobName,
+						Permissions: parser.WorkflowPermissions{IsWriteAll: true},
+					},
+				},
+			}
+
+			result := NewCIScanner().analyzeWorkflow(wf)
+
+			if len(result.Findings) != 1 {
+				t.Fatalf("expected 1 finding, got %d", len(result.Findings))
+			}
+			if got := result.Findings[0].Description; got != tt.want {
+				t.Errorf("Description = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestCIScanner_AnalyzeWorkflow_SelfHosted tests self-hosted runner detection.
 func TestCIScanner_AnalyzeWorkflow_SelfHosted(t *testing.T) {
 	cs := NewCIScanner()

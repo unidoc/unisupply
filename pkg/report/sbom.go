@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
@@ -107,8 +106,12 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 
 	// Build dependency lookup for the dependency graph section.
 	depChildren := make(map[string][]string) // module -> modules it depends on
+	scores := scoresByModule(ps)
 
-	for _, path := range graph.SortedPaths() {
+	// Sorted order fixes the order of the components, of the root's dependsOn
+	// list, and of each depChildren slice, which is filled in this loop.
+	paths := graph.SortedPaths()
+	for _, path := range paths {
 		dep := graph.Dependencies[path]
 		scope := "required"
 		if !dep.Direct {
@@ -125,22 +128,17 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		}
 
 		// Add risk score as a property.
-		if ps != nil {
-			for _, ds := range ps.Dependencies {
-				if ds.Module == dep.Module.Path {
-					comp.Properties = append(comp.Properties,
-						cdxProperty{
-							Name:  "unisupply:risk_score",
-							Value: fmt.Sprintf("%d", ds.RiskScore),
-						},
-						cdxProperty{
-							Name:  "unisupply:risk_level",
-							Value: string(ds.RiskLevel),
-						},
-					)
-					break
-				}
-			}
+		if ds, ok := scores[dep.Module.Path]; ok {
+			comp.Properties = append(comp.Properties,
+				cdxProperty{
+					Name:  "unisupply:risk_score",
+					Value: fmt.Sprintf("%d", ds.RiskScore),
+				},
+				cdxProperty{
+					Name:  "unisupply:risk_level",
+					Value: string(ds.RiskLevel),
+				},
+			)
 		}
 
 		bom.Components = append(bom.Components, comp)
@@ -154,29 +152,23 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 	// Build dependencies section.
 	// Root depends on direct deps.
 	rootDep := cdxDependency{Ref: graph.Root}
-	for _, path := range graph.SortedPaths() {
+	for _, path := range paths {
 		if dep := graph.Dependencies[path]; dep.Direct {
 			rootDep.DependsOn = append(rootDep.DependsOn, dep.Module.Path)
 		}
 	}
 	bom.Dependencies = append(bom.Dependencies, rootDep)
 
-	// Each module depends on its children.
+	// Each module depends on its children, already sorted by the loop above.
 	for _, parent := range slices.Sorted(maps.Keys(depChildren)) {
 		if parent == graph.Root {
 			continue
 		}
-		children := depChildren[parent]
-		sort.Strings(children)
 		bom.Dependencies = append(bom.Dependencies, cdxDependency{
 			Ref:       parent,
-			DependsOn: children,
+			DependsOn: depChildren[parent],
 		})
 	}
-
-	sort.Slice(bom.Components, func(i, j int) bool {
-		return bom.Components[i].Name < bom.Components[j].Name
-	})
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -271,6 +263,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		RelatedSPDXElement: "SPDXRef-RootPackage",
 	})
 
+	scores := scoresByModule(ps)
 	pkgIdx := 0
 	// Sorted order makes the SPDXRef-Package-N IDs map to the same modules on
 	// every run.
@@ -295,18 +288,13 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		}
 
 		// Add risk score as annotation.
-		if ps != nil {
-			for _, ds := range ps.Dependencies {
-				if ds.Module == dep.Module.Path {
-					pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
-						AnnotationDate: now.Format(time.RFC3339),
-						AnnotationType: "REVIEW",
-						Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
-						Comment:        fmt.Sprintf("risk_score=%d risk_level=%s", ds.RiskScore, ds.RiskLevel),
-					})
-					break
-				}
-			}
+		if ds, ok := scores[dep.Module.Path]; ok {
+			pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
+				AnnotationDate: now.Format(time.RFC3339),
+				AnnotationType: "REVIEW",
+				Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
+				Comment:        fmt.Sprintf("risk_score=%d risk_level=%s", ds.RiskScore, ds.RiskLevel),
+			})
 		}
 
 		doc.Packages = append(doc.Packages, pkg)
@@ -323,6 +311,22 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// scoresByModule indexes ps.Dependencies by module path so each SBOM entry
+// finds its risk score without scanning the whole slice. The first score for a
+// module wins, as the linear search it replaces did. Nil ps yields an empty map.
+func scoresByModule(ps *scorer.ProjectScore) map[string]*scorer.DependencyScore {
+	scores := make(map[string]*scorer.DependencyScore)
+	if ps == nil {
+		return scores
+	}
+	for _, ds := range ps.Dependencies {
+		if _, seen := scores[ds.Module]; !seen {
+			scores[ds.Module] = ds
+		}
+	}
+	return scores
 }
 
 // goPurl constructs a Package URL for a Go module.

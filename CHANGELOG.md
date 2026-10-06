@@ -42,6 +42,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   SBOM entries by module path, CI jobs by job ID), so SPDX package IDs follow
   module-path order. Fields that are meant to differ per run (timestamps, the
   CycloneDX `serialNumber`, the SPDX `documentNamespace`) are unchanged.
+- **Modules from the same GitHub repository now report their own
+  sub-dependency count.** Modules such as `foo/bar` and `foo/bar/v2` shared
+  one cached maintainer record, so "Pulls in N sub-dependencies" (text) and
+  `sub_dependencies` (JSON) showed the same, last-written count for all of
+  them, and that count changed from run to run.
+- **The takeover list names each repository once**, sorted by owner/repo.
+  Several modules from one repository used to produce identical rows.
+- **The CI/CD write-all permissions finding names unnamed jobs by their job
+  ID.** A job without a `name:` key was reported as "Job '' has write-all
+  permissions".
 
 ## [0.6.0] - 2026-09-29
 

@@ -1281,6 +1281,49 @@ func TestMaintainerScanner_ScanAll_TransitiveDeps(t *testing.T) {
 	}
 }
 
+// TestMaintainerScanner_ScanAll_SharedRepoPerModuleFields verifies that modules
+// from one GitHub repository each keep their own SubDependencies. analyzeRepo
+// caches one *MaintainerInfo per owner/repo; writing per-module fields into
+// that shared value made every module report whichever count was written last,
+// and raced under -race. More modules than ScanAll's concurrency limit (5)
+// ensures later goroutines hit the cache.
+func TestMaintainerScanner_ScanAll_SharedRepoPerModuleFields(t *testing.T) {
+	server := newMockGitHub()
+	defer server.Close()
+
+	g := &resolver.Graph{
+		Root:         "test/module",
+		Dependencies: make(map[string]*resolver.Dependency),
+	}
+	for i := 1; i <= 12; i++ {
+		path := fmt.Sprintf("github.com/golang/go/mod%02d", i)
+		g.Dependencies[path] = &resolver.Dependency{
+			Module:         parser.Module{Path: path, Version: "v1.0.0"},
+			TransitiveDeps: i,
+		}
+	}
+
+	ms := NewMaintainerScanner(5*time.Second, "test-token")
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	results := ms.ScanAll(context.Background(), g)
+
+	seen := make(map[*MaintainerInfo]string)
+	for path, dep := range g.Dependencies {
+		mi := results[path]
+		if mi == nil {
+			t.Fatalf("no result for %s", path)
+		}
+		if mi.SubDependencies != dep.TransitiveDeps {
+			t.Errorf("%s: SubDependencies = %d, want %d", path, mi.SubDependencies, dep.TransitiveDeps)
+		}
+		if other, dup := seen[mi]; dup {
+			t.Errorf("%s and %s share one *MaintainerInfo", path, other)
+		}
+		seen[mi] = path
+	}
+}
+
 // TestMaintainerScanner_TopContributors verifies top 5 contributors are extracted.
 func TestMaintainerScanner_TopContributors(t *testing.T) {
 	server := newMockGitHub()
@@ -1733,7 +1776,7 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // TestTakeoverCandidates_SortedByModulePath verifies that only takeover
 // candidates are returned and that they come back in module-path order on
 // every call, regardless of map iteration order.
-func TestTakeoverCandidates_SortedByModulePath(t *testing.T) {
+func TestTakeoverCandidates_SortedByRepo(t *testing.T) {
 	maintainers := map[string]*MaintainerInfo{
 		"github.com/pmezard/go-difflib": {Owner: "pmezard", Repo: "go-difflib", TakeoverCandidate: true},
 		"github.com/spf13/pflag":        {Owner: "spf13", Repo: "pflag"},
@@ -1744,10 +1787,10 @@ func TestTakeoverCandidates_SortedByModulePath(t *testing.T) {
 		"gopkg.in/yaml.v3":              {Owner: "go-yaml", Repo: "yaml"},
 	}
 	want := []string{
-		"github.com/davecgh/go-spew",
-		"github.com/google/go-cmdtest",
-		"github.com/pmezard/go-difflib",
-		"github.com/unidoc/garabic",
+		"davecgh/go-spew",
+		"google/go-cmdtest",
+		"pmezard/go-difflib",
+		"unidoc/garabic",
 	}
 
 	for i := 0; i < 20; i++ {
@@ -1759,10 +1802,34 @@ func TestTakeoverCandidates_SortedByModulePath(t *testing.T) {
 			if !mi.TakeoverCandidate {
 				t.Errorf("run %d: %s/%s is not a takeover candidate", i+1, mi.Owner, mi.Repo)
 			}
-			if maintainers[want[j]] != mi {
-				t.Fatalf("run %d: candidate %d is %s/%s, want module %s", i+1, j, mi.Owner, mi.Repo, want[j])
+			if repo := mi.Owner + "/" + mi.Repo; repo != want[j] {
+				t.Fatalf("run %d: candidate %d is %s, want %s", i+1, j, repo, want[j])
 			}
 		}
+	}
+}
+
+// TestTakeoverCandidates_OneEntryPerRepo verifies that modules from the same
+// repository (foo/bar and foo/bar/v2) produce one takeover entry, since the
+// reports print only repository-level fields.
+func TestTakeoverCandidates_OneEntryPerRepo(t *testing.T) {
+	maintainers := map[string]*MaintainerInfo{
+		"github.com/foo/bar":         {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/foo/bar/v2":      {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/foo/bar/v3/sub":  {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/acme/widget":     {Owner: "acme", Repo: "widget", TakeoverCandidate: true},
+		"github.com/acme/widget/cmd": {Owner: "acme", Repo: "widget", TakeoverCandidate: true},
+	}
+
+	got := TakeoverCandidates(maintainers)
+
+	var repos []string
+	for _, mi := range got {
+		repos = append(repos, mi.Owner+"/"+mi.Repo)
+	}
+	want := []string{"acme/widget", "foo/bar"}
+	if strings.Join(repos, ",") != strings.Join(want, ",") {
+		t.Errorf("TakeoverCandidates repos = %v, want %v", repos, want)
 	}
 }
 

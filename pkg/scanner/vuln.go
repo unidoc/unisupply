@@ -574,9 +574,8 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 		// parsing deduplicates by module@osvID, not globally — and the second
 		// enrichment hits the cached failure and re-emits the same warning.
 		// Count and list each advisory once so repeats neither inflate the
-		// count nor consume the displayed slots. The order here is the
-		// caller's map-iteration order, so the list is sorted below before
-		// anything is truncated or displayed.
+		// count nor consume the displayed slots. The list is sorted below
+		// before anything is truncated or displayed.
 		if _, dup := seen[id]; dup {
 			continue
 		}
@@ -594,10 +593,10 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 		return slices.Insert(out, insertAt, firstMsg)
 	}
 
-	// The caller enriches by ranging over a map, so failedIDs arrives in a
-	// different order on every run. Sort before truncating so the summary —
-	// which consumers diff between runs — names the same IDs in the same
-	// order for the same scan. GO/CVE IDs sort by year, then number.
+	// failedIDs arrives in the caller's enrichment order (ScanVulns walks
+	// modules in sorted path order). Sort by ID anyway before truncating, so
+	// the summary — which consumers diff between runs — lists IDs in ID order
+	// whatever order the caller uses. GO/CVE IDs sort by year, then number.
 	sort.Strings(failedIDs)
 
 	listed := failedIDs
