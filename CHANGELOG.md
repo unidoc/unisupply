@@ -33,6 +33,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
+- **`--require-github-token` now fails (exit 3) when GitHub rejects the
+  token, and a rejected token is reported as such.** The flag used to check
+  only that a token was present. GitHub answers 401 to every request that
+  carries a bad token, so every maintainer lookup failed individually, the scan
+  exited 0, and the only signal was the same "GitHub API unauthenticated"
+  warning a run with no token produces. The token is now validated once, before
+  any scanner runs, with a single request to `api.github.com/rate_limit`. A
+  rejected token exits 3 under the flag; without it the scan warns once
+  (`GitHub token rejected (401) — continuing unauthenticated`) and drops the
+  token so the scanners genuinely run unauthenticated. Under the flag, a token
+  that cannot be validated at all (network error, 5xx) also exits 3, with a
+  different message; without the flag it only warns and keeps the token.
+  `--offline` skips the check, and the warning no longer says the requirement
+  is "satisfied". The new request is listed in the README network-contract
+  table.
 - **The same scan now produces the same report.** Several lists were built
   from Go maps, so their order changed from run to run: the takeover
   candidates in the text, JSON and PDF reports, CI/CD findings (workflow jobs

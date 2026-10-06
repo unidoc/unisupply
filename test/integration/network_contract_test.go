@@ -74,6 +74,7 @@ var rowMatchers = map[string][]rowMatcher{
 	},
 	"api.github.com": {
 		{name: "maintainer scanner (contributor list)", match: hasSuffix("/contributors")},
+		{name: "token validation", match: hasPrefix("/rate_limit")},
 		{name: "resilience scanner (governance file checks)", match: contains("/contents/")},
 		{name: "GHSA severity enrichment", match: hasPrefix("/advisories")},
 	},
@@ -189,6 +190,8 @@ func stubServer(t *testing.T) *httptest.Server {
 
 		case "api.github.com":
 			switch {
+			case strings.HasPrefix(r.URL.Path, "/rate_limit"):
+				writeJSON(w, map[string]any{"resources": map[string]any{}})
 			case strings.HasPrefix(r.URL.Path, "/advisories"):
 				// No advisory for the fixture CVE: the honest empty answer,
 				// and the last tier of the enrichment chain.
@@ -302,6 +305,12 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	// proxy.golang.org
 	if _, err := scanner.NewMaintenanceScanner(timeout).ScanAll(ctx, graph); err != nil {
 		t.Logf("maintenance scan reported %v (stub responses are minimal; hosts contacted is what matters)", err)
+	}
+
+	// api.github.com (token validation). The harness has no token of its own,
+	// so a placeholder stands in; the stub accepts it.
+	if err := scanner.ValidateGitHubToken(ctx, scanner.NewClient(scanner.ClientOptions{Timeout: timeout}), "contract-test-token"); err != nil {
+		t.Logf("token validation reported %v", err)
 	}
 
 	// api.github.com (repo, owner profile, contributors)
