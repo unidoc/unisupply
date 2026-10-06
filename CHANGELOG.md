@@ -9,6 +9,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### New Features
 
+#### Call path for every reachable vulnerability
+
+- **JSON reports now carry `call_path` on each vulnerability whose
+  reachability is `called`:** one example of how the project reaches the
+  vulnerable function, outermost frame first, condensed to the entry frame, the
+  frame where each package hands over, and the vulnerable function itself
+  (at most 8 entries). It is static-analysis evidence of reachability, not proof
+  of exploitability. Vulnerabilities that are only `imported` or
+  `required` have no call path. `pkg/runner.Result` carries the same field
+  through `scanner.Vulnerability.CallPath`.
+
 #### `pkg/runner`: the scan pipeline as an importable package
 
 - **`runner.Run(ctx, Options)` runs the full scan-and-score pipeline in

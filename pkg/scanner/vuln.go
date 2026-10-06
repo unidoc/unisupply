@@ -59,6 +59,16 @@ type Vulnerability struct {
 	// See the type-level doc comment for full semantics and caveats.
 	Reachability string `json:"reachability,omitempty"`
 
+	// CallPath is one example of how the project reaches the vulnerable
+	// function, outermost frame first, e.g. "example.com/app/cmd/app.main",
+	// "github.com/go-git/go-git/v5.Repository.Push", "golang.org/x/crypto/ssh.NewClientConn".
+	// It is condensed to the first frame of each package run plus the
+	// vulnerable function, so it stays short. Set only when Reachability is
+	// "called". It is static-analysis evidence of reachability from a main
+	// package, not proof that the vulnerability is exploitable in the
+	// application's deployment.
+	CallPath []string `json:"call_path,omitempty"`
+
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
 
 	// EnrichmentAttempted is true when the enricher ran for this vuln (i.e.
@@ -222,6 +232,39 @@ func classifyReachability(trace []traceEntry) string {
 		return "imported"
 	}
 	return "required"
+}
+
+// maxCallPathFrames bounds Vulnerability.CallPath.
+const maxCallPathFrames = 8
+
+// callPath condenses a govulncheck trace (innermost frame first) into an
+// outermost-first list of "package.Function" entries: the entry frame, the frame
+// where each run of same-package frames hands over to the next package, and the
+// vulnerable function itself. It returns nil when the trace has no function
+// frames.
+func callPath(trace []traceEntry) []string {
+	var fr []traceEntry
+	for i := len(trace) - 1; i >= 0; i-- { // outermost first
+		if trace[i].Function != "" {
+			fr = append(fr, trace[i])
+		}
+	}
+	var path []string
+	for i, t := range fr {
+		last := i == len(fr)-1
+		if i == 0 || last || fr[i+1].Package != t.Package {
+			name := t.Function
+			if t.Package != "" {
+				name = t.Package + "." + t.Function
+			}
+			path = append(path, name)
+		}
+	}
+	if len(path) > maxCallPathFrames {
+		// Keep the entry point and the tail: the last frames lead to the symbol.
+		path = append([]string{path[0]}, path[len(path)-(maxCallPathFrames-1):]...)
+	}
+	return path
 }
 
 // ScanVulns runs govulncheck on the project directory, then enriches any
@@ -469,6 +512,9 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			if reachabilityRank[reach] > reachabilityRank[results[modPath][idx].Reachability] {
 				results[modPath][idx].Reachability = reach
 			}
+			if reach == "called" && len(results[modPath][idx].CallPath) == 0 {
+				results[modPath][idx].CallPath = callPath(f.Trace)
+			}
 			continue
 		}
 
@@ -485,6 +531,9 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			Severity:     severity,
 			FixedVersion: fixedVersion,
 			Reachability: reach,
+		}
+		if reach == "called" {
+			vuln.CallPath = callPath(f.Trace)
 		}
 
 		// Capture the publication timestamp from the govulncheck OSV record.

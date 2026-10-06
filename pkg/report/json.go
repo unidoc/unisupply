@@ -158,6 +158,10 @@ type JSONVuln struct {
 	FixPublishedAt      *time.Time `json:"fix_published_at,omitempty"`
 	DaysUnpatched       int        `json:"days_unpatched,omitempty"`
 	Reachability        string     `json:"reachability,omitempty"`
+	// CallPath is one example of how the project reaches the vulnerable
+	// function (outermost frame first). Set only when Reachability is "called".
+	// Static-analysis evidence of reachability, not proof of exploitability.
+	CallPath []string `json:"call_path,omitempty"`
 	// SeveritySource is "osv", "nvd", "ghsa", or "none" (all tiers failed).
 	// Empty when enrichment was not attempted (severity was known from govulncheck).
 	SeveritySource string `json:"severity_source,omitempty"`
@@ -435,6 +439,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				FixPublishedAt:      v.FixPublishedAt,
 				DaysUnpatched:       v.DaysUnpatched,
 				Reachability:        v.Reachability,
+				CallPath:            v.CallPath,
 				SeveritySource:      v.SeveritySource,
 				SeverityScored:      scorer.ScoredSeverity(v),
 				EnrichmentErrors:    v.EnrichmentErrors,

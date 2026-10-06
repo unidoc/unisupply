@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -852,4 +853,43 @@ func moduleKeys(m map[string][]Vulnerability) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// callPath condenses a govulncheck trace (innermost frame first, as govulncheck
+// emits it) into an outermost-first path: the entry frame, the frame where each
+// package run hands over, and the vulnerable function. The trace below is the shape of a real
+// govulncheck result for an application that pushes over SSH through go-git.
+func TestCallPath_CondensesTraceOutermostFirst(t *testing.T) {
+	trace := []traceEntry{
+		{Module: "golang.org/x/crypto", Package: "golang.org/x/crypto/ssh", Function: "NewClientConn"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5/plumbing/transport/ssh", Function: "dial"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5/plumbing/transport/ssh", Function: "command.connect"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5", Function: "Repository.Push"},
+		{Module: "example.com/app", Package: "example.com/app/cmd/app", Function: "syncRun"},
+		{Module: "example.com/app", Package: "example.com/app/cmd/app", Function: "main"},
+	}
+	want := []string{
+		"example.com/app/cmd/app.main",
+		"example.com/app/cmd/app.syncRun",
+		"github.com/go-git/go-git/v5.Repository.Push",
+		"github.com/go-git/go-git/v5/plumbing/transport/ssh.dial",
+		"golang.org/x/crypto/ssh.NewClientConn",
+	}
+	got := callPath(trace)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("callPath = %v, want %v", got, want)
+	}
+	if callPath([]traceEntry{{Module: "m", Package: "m/p"}}) != nil {
+		t.Error("a trace with no function frames has no call path")
+	}
+}
+
+func TestCallPath_IsBounded(t *testing.T) {
+	var trace []traceEntry
+	for i := 0; i < 40; i++ {
+		trace = append(trace, traceEntry{Module: "m", Package: fmt.Sprintf("m/p%d", i), Function: "F"})
+	}
+	if got := callPath(trace); len(got) != maxCallPathFrames {
+		t.Errorf("len(callPath) = %d, want %d", len(got), maxCallPathFrames)
+	}
 }
