@@ -365,13 +365,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// load-bearing: severityAdjustedVulnScore iterates the resulting slice and
 	// uses a first-wins tie-breaker, so stable key order is required for
 	// reproducible WorstCVEID values.
-	depKeys := make([]string, 0, len(input.Graph.Dependencies))
-	for k := range input.Graph.Dependencies {
-		depKeys = append(depKeys, k)
-	}
-	sort.Strings(depKeys)
-
-	for _, k := range depKeys {
+	for _, k := range input.Graph.SortedPaths() {
 		dep := input.Graph.Dependencies[k]
 		ds := scoreDependency(
 			dep,

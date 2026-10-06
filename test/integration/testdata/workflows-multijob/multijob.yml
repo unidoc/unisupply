@@ -1,0 +1,40 @@
+# Fixture for output-determinism tests. Every job and every secret-bearing
+# step has several sibling entries so that ranging a Go map in iteration
+# order produces a visibly different finding sequence between runs.
+name: Multi Job
+on: [push]
+jobs:
+  alpha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: someone/thing@v1
+        env:
+          TOKEN_A: ${{ secrets.TOKEN_A }}
+          TOKEN_B: ${{ secrets.TOKEN_B }}
+          TOKEN_C: ${{ secrets.TOKEN_C }}
+  bravo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: other/thing@main
+        with:
+          key-a: ${{ secrets.KEY_A }}
+          key-b: ${{ secrets.KEY_B }}
+          key-c: ${{ secrets.KEY_C }}
+  charlie:
+    runs-on: self-hosted
+    steps:
+      - uses: third/thing@v2
+      - uses: actions/checkout@main
+  delta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: fourth/thing@v3
+        env:
+          SECRET_X: ${{ secrets.SECRET_X }}
+          SECRET_Y: ${{ secrets.SECRET_Y }}
+          SECRET_Z: ${{ secrets.SECRET_Z }}
+        with:
+          input-x: ${{ secrets.INPUT_X }}
+          input-y: ${{ secrets.INPUT_Y }}
+          input-z: ${{ secrets.INPUT_Z }}

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -151,7 +153,12 @@ func (cs *CIScanner) analyzeWorkflow(wf *parser.Workflow) *WorkflowRisk {
 		})
 	}
 
-	for _, job := range wf.Jobs {
+	// Jobs is a map, so range it in job-ID order to keep finding order stable
+	// across runs. Parsing through yaml.Node could switch this to document
+	// order later; either is deterministic.
+	for _, jobID := range slices.Sorted(maps.Keys(wf.Jobs)) {
+		job := wf.Jobs[jobID]
+
 		// Check self-hosted runners.
 		if job.IsSelfHosted {
 			wr.Findings = append(wr.Findings, CIFinding{
@@ -163,12 +170,17 @@ func (cs *CIScanner) analyzeWorkflow(wf *parser.Workflow) *WorkflowRisk {
 			})
 		}
 
-		// Check job-level permissions.
+		// Check job-level permissions. A job without a `name:` key is known
+		// only by its ID, so fall back to it rather than print "Job ''".
 		if job.Permissions.IsWriteAll {
+			jobLabel := job.Name
+			if jobLabel == "" {
+				jobLabel = jobID
+			}
 			wr.Findings = append(wr.Findings, CIFinding{
 				Category:    "excessive_permissions",
 				Severity:    CIRiskHigh,
-				Description: fmt.Sprintf("Job '%s' has write-all permissions", job.Name),
+				Description: fmt.Sprintf("Job '%s' has write-all permissions", jobLabel),
 				File:        wf.FilePath,
 				Remediation: "Restrict job permissions to minimum required",
 			})
@@ -233,38 +245,54 @@ func (cs *CIScanner) analyzeAction(step parser.WorkflowStep, filePath string, wr
 	}
 }
 
+// Patterns for the workflow and build-file checks, compiled once rather than
+// per step or per scanned line.
+var (
+	// secretPattern matches a `${{ secrets.* }}` expression in a step's env or with value.
+	secretPattern = regexp.MustCompile(`\$\{\{\s*secrets\.`)
+	// curlPipeShell and wgetPipeShell match a download piped straight into a shell.
+	curlPipeShell = regexp.MustCompile(`curl\s+.*\|\s*(ba)?sh`)
+	wgetPipeShell = regexp.MustCompile(`wget\s+.*\|\s*(ba)?sh`)
+	// downloadToFile matches curl/wget writing to a file; checksumVerify
+	// matches a later integrity check of what was downloaded.
+	downloadToFile = regexp.MustCompile(`(curl|wget)\s+.*-[oO]\s+\S+`)
+	checksumVerify = regexp.MustCompile(`(sha256sum|shasum|md5sum|gpg\s+--verify)`)
+	// eventExprInjection matches untrusted GitHub event data inlined into a run command.
+	eventExprInjection = regexp.MustCompile(`\$\{\{\s*github\.event\.(issue|pull_request|comment)`)
+)
+
 func (cs *CIScanner) checkSecretsExposure(step parser.WorkflowStep, filePath string, wr *WorkflowRisk) {
-	secretPattern := regexp.MustCompile(`\$\{\{\s*secrets\.`)
+	// Secrets are only flagged when passed to a third-party action, and that
+	// depends on the step alone, not on the key, so decide it once per step.
+	ref := parser.ParseActionRef(step.Uses)
+	if ref == nil || parser.IsOfficialAction(ref) {
+		return
+	}
 
 	// Check env vars for secrets passed to untrusted steps.
-	for key, val := range step.Env {
-		if secretPattern.MatchString(val) {
-			ref := parser.ParseActionRef(step.Uses)
-			if ref != nil && !parser.IsOfficialAction(ref) {
-				wr.Findings = append(wr.Findings, CIFinding{
-					Category:    "secrets_exposure",
-					Severity:    CIRiskCritical,
-					Description: fmt.Sprintf("Secret passed via env '%s' to third-party action '%s'", key, step.Uses),
-					File:        filePath,
-					Remediation: "Avoid passing secrets to third-party actions. Use OIDC tokens or scoped tokens instead.",
-				})
-			}
+	// Sorted key order keeps the finding order stable across runs.
+	for _, key := range slices.Sorted(maps.Keys(step.Env)) {
+		if secretPattern.MatchString(step.Env[key]) {
+			wr.Findings = append(wr.Findings, CIFinding{
+				Category:    "secrets_exposure",
+				Severity:    CIRiskCritical,
+				Description: fmt.Sprintf("Secret passed via env '%s' to third-party action '%s'", key, step.Uses),
+				File:        filePath,
+				Remediation: "Avoid passing secrets to third-party actions. Use OIDC tokens or scoped tokens instead.",
+			})
 		}
 	}
 
 	// Check 'with' inputs for secrets.
-	for key, val := range step.With {
-		if secretPattern.MatchString(val) {
-			ref := parser.ParseActionRef(step.Uses)
-			if ref != nil && !parser.IsOfficialAction(ref) {
-				wr.Findings = append(wr.Findings, CIFinding{
-					Category:    "secrets_exposure",
-					Severity:    CIRiskHigh,
-					Description: fmt.Sprintf("Secret passed via input '%s' to third-party action '%s'", key, step.Uses),
-					File:        filePath,
-					Remediation: "Audit the action to ensure secrets are handled securely",
-				})
-			}
+	for _, key := range slices.Sorted(maps.Keys(step.With)) {
+		if secretPattern.MatchString(step.With[key]) {
+			wr.Findings = append(wr.Findings, CIFinding{
+				Category:    "secrets_exposure",
+				Severity:    CIRiskHigh,
+				Description: fmt.Sprintf("Secret passed via input '%s' to third-party action '%s'", key, step.Uses),
+				File:        filePath,
+				Remediation: "Audit the action to ensure secrets are handled securely",
+			})
 		}
 	}
 }
@@ -273,8 +301,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 	run := step.Run
 
 	// Check for curl | bash pattern.
-	curlBash := regexp.MustCompile(`curl\s+.*\|\s*(ba)?sh`)
-	if curlBash.MatchString(run) {
+	if curlPipeShell.MatchString(run) {
 		wr.Findings = append(wr.Findings, CIFinding{
 			Category:    "dangerous_command",
 			Severity:    CIRiskHigh,
@@ -285,8 +312,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 	}
 
 	// Check for wget | bash.
-	wgetBash := regexp.MustCompile(`wget\s+.*\|\s*(ba)?sh`)
-	if wgetBash.MatchString(run) {
+	if wgetPipeShell.MatchString(run) {
 		wr.Findings = append(wr.Findings, CIFinding{
 			Category:    "dangerous_command",
 			Severity:    CIRiskHigh,
@@ -297,9 +323,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 	}
 
 	// Check for downloading binaries without checksum verification.
-	downloadNoVerify := regexp.MustCompile(`(curl|wget)\s+.*-[oO]\s+\S+`)
-	checksumVerify := regexp.MustCompile(`(sha256sum|shasum|md5sum|gpg\s+--verify)`)
-	if downloadNoVerify.MatchString(run) && !checksumVerify.MatchString(run) {
+	if downloadToFile.MatchString(run) && !checksumVerify.MatchString(run) {
 		wr.Findings = append(wr.Findings, CIFinding{
 			Category:    "unverified_download",
 			Severity:    CIRiskMedium,
@@ -310,8 +334,7 @@ func (cs *CIScanner) checkDangerousRun(step parser.WorkflowStep, filePath string
 	}
 
 	// Check for GitHub event context injection (expression injection).
-	exprInjection := regexp.MustCompile(`\$\{\{\s*github\.event\.(issue|pull_request|comment)`)
-	if exprInjection.MatchString(run) {
+	if eventExprInjection.MatchString(run) {
 		wr.Findings = append(wr.Findings, CIFinding{
 			Category:    "expression_injection",
 			Severity:    CIRiskCritical,
@@ -357,8 +380,7 @@ func (cs *CIScanner) scanDockerfile(path string) []CIFinding {
 
 		// Check for curl | bash in RUN commands.
 		if strings.HasPrefix(strings.ToUpper(line), "RUN ") {
-			curlBash := regexp.MustCompile(`curl\s+.*\|\s*(ba)?sh`)
-			if curlBash.MatchString(line) {
+			if curlPipeShell.MatchString(line) {
 				findings = append(findings, CIFinding{
 					Category:    "dangerous_command",
 					Severity:    CIRiskHigh,
@@ -405,8 +427,7 @@ func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 		lineNum++
 		line := scanner.Text()
 
-		curlBash := regexp.MustCompile(`curl\s+.*\|\s*(ba)?sh`)
-		if curlBash.MatchString(line) {
+		if curlPipeShell.MatchString(line) {
 			findings = append(findings, CIFinding{
 				Category:    "dangerous_command",
 				Severity:    CIRiskHigh,
@@ -417,8 +438,7 @@ func (cs *CIScanner) scanMakefile(path string) []CIFinding {
 			})
 		}
 
-		wgetBash := regexp.MustCompile(`wget\s+.*\|\s*(ba)?sh`)
-		if wgetBash.MatchString(line) {
+		if wgetPipeShell.MatchString(line) {
 			findings = append(findings, CIFinding{
 				Category:    "dangerous_command",
 				Severity:    CIRiskHigh,
@@ -449,8 +469,7 @@ func (cs *CIScanner) scanShellScript(path string) []CIFinding {
 		lineNum++
 		line := scanner.Text()
 
-		curlBash := regexp.MustCompile(`curl\s+.*\|\s*(ba)?sh`)
-		if curlBash.MatchString(line) {
+		if curlPipeShell.MatchString(line) {
 			findings = append(findings, CIFinding{
 				Category:    "dangerous_command",
 				Severity:    CIRiskHigh,

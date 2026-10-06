@@ -31,6 +31,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   summary now carry a note stating their scope, and the renderer has bats
   tests in CI.
 
+### Bug Fixes
+
+- **The same scan now produces the same report.** Several lists were built
+  from Go maps, so their order changed from run to run: the takeover
+  candidates in the text, JSON and PDF reports, CI/CD findings (workflow jobs
+  and step `env`/`with` secrets), and the CycloneDX `dependsOn` lists and SPDX
+  package list. In SPDX, each `SPDXRef-Package-N` ID could point at a
+  different module on every run. All of these are now sorted (takeovers and
+  SBOM entries by module path, CI jobs by job ID), so SPDX package IDs follow
+  module-path order. Fields that are meant to differ per run (timestamps, the
+  CycloneDX `serialNumber`, the SPDX `documentNamespace`) are unchanged.
+- **Modules from the same GitHub repository now report their own
+  sub-dependency count.** Modules such as `foo/bar` and `foo/bar/v2` shared
+  one cached maintainer record, so "Pulls in N sub-dependencies" (text) and
+  `sub_dependencies` (JSON) showed the same, last-written count for all of
+  them, and that count changed from run to run.
+- **The takeover list names each repository once**, sorted by owner/repo.
+  Several modules from one repository used to produce identical rows.
+- **The CI/CD write-all permissions finding names unnamed jobs by their job
+  ID.** A job without a `name:` key was reported as "Job '' has write-all
+  permissions".
+
 ## [0.6.0] - 2026-09-29
 
 ### New Features
