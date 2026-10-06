@@ -8,20 +8,16 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/offline"
-	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
-	"github.com/unidoc/unisupply/pkg/resolver"
-	"github.com/unidoc/unisupply/pkg/scanner"
-	"github.com/unidoc/unisupply/pkg/scorer"
+	"github.com/unidoc/unisupply/pkg/runner"
 
 	flag "github.com/spf13/pflag"
 )
@@ -210,11 +206,6 @@ func run(cfg *runConfig) error {
 		}
 	}
 
-	// Compute scan-start time once and floor it to the start of the UTC day.
-	// All scanner age/activity classifications use this value so that two runs
-	// on the same calendar day yield identical band results for the same module.
-	scanStart := time.Now().UTC().Truncate(24 * time.Hour)
-
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
@@ -249,224 +240,36 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	rep.Stage("Parsing go.mod")
-	gomodPath, err := parser.FindGoMod(cfg.path)
+	scanResult, err := runner.Run(ctx, runner.Options{
+		Path:                   cfg.path,
+		Timeout:                cfg.timeout,
+		DirectOnly:             cfg.directOnly,
+		GithubToken:            cfg.githubToken,
+		TrustIndexURL:          cfg.trustIndexURL,
+		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
+		ScanWorkflows:          cfg.scanWorkflows,
+		ScanCI:                 cfg.scanCI,
+		WorkflowPath:           cfg.workflowPath,
+		DebugScoring:           cfg.debugScoring,
+	})
 	if err != nil {
 		return err
 	}
-	gomod, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		return err
-	}
-	projectDir := filepath.Dir(gomodPath)
-	rep.Done("%s", gomodPath)
 
-	// Audit replace/exclude directives. Pure go.mod analysis (no network calls);
-	// the per-module classification feeds the scorer below, and the report is
-	// wired into the text/JSON/PDF output next to the CI/CD report.
-	rep.Stage("Auditing go.mod directives")
-	integrityScanner := scanner.NewIntegrityScanner()
-	// Offline skips `go mod verify`, reporting GoSumVerifiedOffline rather
-	// than a verification failure.
-	integrityScanner.Offline = cfg.offlineMode
-	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
-	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
-
-	rep.Stage("Resolving dependency graph")
-	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
-	if err != nil {
-		return fmt.Errorf("resolving dependencies: %w", err)
-	}
-	for _, w := range resolverWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d modules", len(graph.Dependencies))
-
-	if len(graph.Dependencies) == 0 {
+	if len(scanResult.Graph.Dependencies) == 0 {
 		fmt.Fprintln(os.Stderr, "No dependencies found.")
 		return nil
 	}
 
-	// Pseudo-version audit (offline; needs the resolved graph for Direct/
-	// IsTestOnly, so it runs here rather than alongside ScanDirectives above).
-	rep.Stage("Auditing pseudo-version pins")
-	pseudoVersionClasses := integrityScanner.ScanPseudoVersions(graph, integrityReport)
-	rep.Done("%d pseudo-version pins", integrityReport.PseudoVersionCount)
-
-	// go.sum presence/completeness (offline file logic, needs the resolved
-	// graph) and go.sum verification via `go mod verify` (local module cache
-	// against go.sum; the toolchain handles GOPRIVATE/GONOSUMDB itself).
-	rep.Stage("Verifying go.sum (go mod verify)")
-	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
-	integrityScanner.VerifyGoSum(ctx, gomodPath, integrityReport)
-	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
-
-	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
-	// The scanner reports availability directly. Deriving it here from err would
-	// miss the common case: govulncheck failures come back as a warning with a
-	// nil error, so `err != nil` reads a failed scan as a clean one and the
-	// scorer then counts the 40% vulnerability axis as measured.
-	vulnScanUnavailable := !vulnScanned
-	if err != nil {
-		rep.Warn("Vulnerability scan failed: %v", err)
-	}
-	for _, w := range vulnWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d affected modules", len(vulns))
-
-	rep.Stage("Checking maintenance health")
-	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
-	maintScanner.ScanStart = scanStart
-	maintenance, err := maintScanner.ScanAll(ctx, graph)
-	var maintWarnings []string
-	if err != nil {
-		if cfg.offlineMode {
-			// Stderr only. The scorer already emits one authoritative report
-			// warning for this — cause, affected module count, and the scoring
-			// consequence — and its count is per-dependency rather than the
-			// scanner's lookup-failure tally. Appending the scanner's message
-			// too put two near-identical lines in the SCAN LIMITATIONS block.
-			rep.Warn("%v", err)
-		} else {
-			// Same reasoning as the offline branch — a degradation that shows up
-			// only on stderr leaves the final report looking complete, and an
-			// API outage is exactly the degraded case this needs to cover.
-			//
-			// The wrapped error is deliberately NOT carried into the report:
-			// unlike the offline message, which the scanner phrases itself, this
-			// err wraps a *url.Error embedding the full proxy URL — a module
-			// path. ps.Warnings reaches the JSON and text reports, and the
-			// network-transparency docs promise disclosing hosts, not paths. The
-			// scorer already reports the affected module count (it counts every
-			// dependency whose maintenance weight was excluded), so this
-			// contributes the cause and leaves the count to it.
-			maintWarnings = append(maintWarnings,
-				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
-			rep.Warn("Some maintenance checks failed: %v", err)
-		}
-	}
-	rep.Done("")
-
-	// Offline contacts GitHub either way, so the rate-limit advice below would
-	// point the user at a token that cannot change the outcome.
-	if cfg.githubToken == "" && !cfg.offlineMode {
-		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
-		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
-		}
-	}
-
-	rep.Stage("Analyzing maintainers (GitHub API)")
-	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
-	maintainerScanner.ScanStart = scanStart
-	maintainers := maintainerScanner.ScanAll(ctx, graph)
-	rep.Done("")
-
-	rep.Stage("Detecting typosquats")
-	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquats := typosquatScanner.ScanAll(ctx, graph)
-	rep.Done("%d suspicious", len(typosquats))
-
-	rep.Stage("Scoring resilience")
-	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
-	resilienceScanner.ScanStart = scanStart
-	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
-	rep.Done("")
-
-	rep.Stage("Assessing AI-generation risk")
-	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenScanner.ScanStart = scanStart
-	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
-	for _, w := range aiGenWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d flagged", len(aiGenRisks))
-
-	var trustIndex map[string]*scanner.TrustIndexEntry
-	trustClient, err := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout, cfg.trustIndexAllowPrivate)
-	if err != nil {
-		return fmt.Errorf("trust index: %w", err)
-	}
-	if trustClient != nil {
-		rep.Stage("Querying Trust Index")
-		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
-		if tiErr != nil {
-			rep.Warn("Trust Index lookup failed: %v", tiErr)
-		}
-		rep.Done("%d entries", len(trustIndex))
-		scanner.EnrichMaintainersFromTrustIndex(maintainers, trustIndex)
-	}
-
-	rep.Stage("Computing risk scores")
-	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:         graph,
-		Vulns:         vulns,
-		Maintenance:   maintenance,
-		Maintainers:   maintainers,
-		Typosquats:    typosquats,
-		Resilience:    resilience,
-		AIGenRisks:    aiGenRisks,
-		TrustIndex:    trustIndex,
-		Integrity:     integrityClasses,
-		PseudoVersion: pseudoVersionClasses,
-		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
-
-		VulnScanUnavailable: vulnScanUnavailable,
-
-		DebugMode: cfg.debugScoring,
-		Now:       scanStart,
-	})
-	// Resolver degradations belong in the report, not just on stderr. A cold
-	// offline cache makes `go mod graph` fail, and the fallback go.mod/go.sum
-	// parse yields a flatter graph — every transitive dep collapses to depth 1,
-	// which feeds the depth axis directly — while `go list` failing leaves
-	// IsTestOnly nil for every dep, disabling the test-only discount. Both change
-	// the numbers, so both have to be visible next to them.
-	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
-	rep.Done("")
-
-	var ciReport *scanner.CIReport
-	if cfg.scanWorkflows || cfg.scanCI {
-		rep.Stage("Auditing CI/CD pipelines")
-		ciScanner := scanner.NewCIScanner()
-
-		wfPath := cfg.workflowPath
-		if !filepath.IsAbs(wfPath) {
-			wfPath = filepath.Join(projectDir, wfPath)
-		}
-
-		ciReport, err = ciScanner.ScanWorkflows(ctx, wfPath)
-		if err != nil {
-			rep.Warn("Workflow scanning failed: %v", err)
-		}
-
-		if cfg.scanCI && ciReport != nil {
-			buildFindings := ciScanner.ScanBuildFiles(ctx, projectDir)
-			ciReport.BuildFindings = buildFindings
-			ciReport.TotalFindings += len(buildFindings)
-		}
-		rep.Done("")
-	}
-
-	// Collect takeover candidates.
-	takeovers := scanner.TakeoverCandidates(maintainers)
-
-	// Separate stdlib vulns from module vulns.
-	var stdlibVulns []scanner.Vulnerability
-	if stdlibList, ok := vulns["stdlib"]; ok {
-		stdlibVulns = stdlibList
-		delete(vulns, "stdlib")
-	}
-
-	if ctx.Err() != nil {
-		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
-	}
+	gomod := scanResult.GoMod
+	graph := scanResult.Graph
+	projectScore := scanResult.ProjectScore
+	ciReport := scanResult.CIReport
+	takeovers := scanResult.Takeovers
+	stdlibVulns := scanResult.StdlibVulns
+	maintainers := scanResult.Maintainers
+	typosquats := scanResult.Typosquats
+	integrityReport := scanResult.IntegrityReport
 
 	// Generate output.
 	writer := os.Stdout
