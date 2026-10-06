@@ -26,10 +26,11 @@ import (
 var errPolicyViolation = errors.New("policy violation")
 
 // errTokenPrecondition is returned when --require-github-token is set but the
-// token is missing or invalid. Exit code 3 is reserved for this precondition
-// failure so CI pipelines can distinguish it from a runtime error (1) or a
-// policy violation (2).
-var errTokenPrecondition = errors.New("github token precondition failed")
+// token is missing, rejected, or could not be validated. Exit code 3 is
+// reserved for this precondition failure so CI pipelines can distinguish it
+// from a runtime error (1) or a policy violation (2). It is the runner's
+// sentinel, because runner.Run is where a present token is validated.
+var errTokenPrecondition = runner.ErrGithubTokenPrecondition
 
 func main() {
 	var (
@@ -171,9 +172,9 @@ type runConfig struct {
 
 func run(cfg *runConfig) error {
 	// --require-github-token: fail fast (exit 3) when no token is present.
-	// Token validation is intentionally lightweight — we only check for
-	// presence here; a 401/403 from the GitHub API during the actual scan
-	// would surface through DataAvailable==false in the results.
+	// This is the cheap, offline half of the precondition; whether a present
+	// token is accepted by GitHub is checked by runner.Run, after the
+	// dependency graph is resolved and before any scanner runs.
 	if cfg.requireGithubToken && cfg.githubToken == "" {
 		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
 	}
@@ -196,13 +197,13 @@ func run(cfg *runConfig) error {
 		if cfg.format == "pdf" {
 			return errors.New("--offline cannot be combined with --format pdf: PDF generation requires a UniDoc license check over the network; use --format text, json, or sbom-*")
 		}
-		// --require-github-token is only a precondition on the token being
-		// present, and it was already checked above. A token supplied
-		// alongside --offline is unused, not contradictory — CI configs
-		// routinely set the token and the mode flag from separate layers — so
-		// warn and continue rather than failing the run.
+		// A token supplied alongside --offline is unused, not contradictory —
+		// CI configs routinely set the token and the mode flag from separate
+		// layers — so warn and continue rather than failing the run. The
+		// wording must not claim the token is good: offline, there is no way
+		// to know, and runner.Run skips the probe.
 		if cfg.requireGithubToken {
-			fmt.Fprintln(os.Stderr, "warning: --require-github-token is satisfied but --offline means GitHub will not be contacted")
+			fmt.Fprintln(os.Stderr, "warning: --require-github-token is set and a token is present, but it was not validated because --offline means GitHub will not be contacted")
 		}
 	}
 
@@ -245,6 +246,7 @@ func run(cfg *runConfig) error {
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
 		GithubToken:            cfg.githubToken,
+		RequireGithubToken:     cfg.requireGithubToken,
 		TrustIndexURL:          cfg.trustIndexURL,
 		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
 		ScanWorkflows:          cfg.scanWorkflows,
@@ -408,7 +410,7 @@ func printUsage() {
 	fmt.Println("  unisupply --scan-ci                          # Full CI/CD pipeline scan")
 	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
 	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
-	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if no token")
+	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if token missing or invalid")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
@@ -420,7 +422,7 @@ func printUsage() {
 	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
 	fmt.Println("  2  Policy violation — one or more policy rules failed")
-	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing")
+	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

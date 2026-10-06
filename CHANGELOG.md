@@ -19,6 +19,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `VulnScanErr` is non-nil when the vulnerability scan did not complete, and
   `Interrupted` is true when the context ended before every scanner finished.
   A caller must not present either as "no vulnerabilities".
+- **`Options.RequireGithubToken` and `Result.GithubTokenRejected`.** `Run`
+  validates `Options.GithubToken` with GitHub before the scanners use it. With
+  `RequireGithubToken`, a missing, rejected or unvalidated token fails `Run`
+  with an error wrapping `runner.ErrGithubTokenPrecondition`; without it, a
+  rejected token is dropped, the scan runs unauthenticated, and
+  `GithubTokenRejected` is set.
 
 ### Improvements
 
@@ -46,6 +52,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
+- **`--require-github-token` now fails (exit 3) when GitHub rejects the
+  token, and a rejected token is reported as such.** The flag used to check
+  only that a token was present. GitHub answers 401 to every request that
+  carries a bad token, so every maintainer lookup failed individually, the scan
+  exited 0, and the only signal was the same "GitHub API unauthenticated"
+  warning a run with no token produces. The token is now validated once, after
+  the dependency graph is resolved and before any scanner runs, with a request
+  to `api.github.com/rate_limit`; a network error or 5xx is retried twice with
+  a short backoff. A rejected token exits 3 under the flag; without it the scan
+  warns (`GitHub token rejected (401) — continuing unauthenticated`), records
+  the same notice in the report's warnings (so it also shows under
+  `--progress none` and in JSON output), and drops the token so the scanners
+  really run unauthenticated. The GitHub rate-limit warnings then say the token
+  was rejected instead of asking for `GITHUB_TOKEN`. Under the flag, a token
+  that could not be validated (a network error, or any response other than 200
+  and 401, such as 403, 429 or 5xx) also exits 3, with a different message;
+  without the flag it warns and keeps the token. Ctrl-C during the check exits
+  as an interrupted run, not as a token failure. `--offline` skips the check,
+  and the warning no longer says the requirement is "satisfied". The new
+  request is listed in the README network-contract table.
 - **The same scan now produces the same report.** Several lists were built
   from Go maps, so their order changed from run to run: the takeover
   candidates in the text, JSON and PDF reports, CI/CD findings (workflow jobs

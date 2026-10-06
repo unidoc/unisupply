@@ -432,13 +432,29 @@ the same data already public in your `go.mod`.
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
 | `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*) | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
 | `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV has no data | always runs (no-op if no CVE alias) |
-| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; token affects rate limits only |
+| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; a token raises rate limits |
+| `api.github.com` | The GitHub token only; no module data | Token validation: one request to `/rate_limit` (retried up to twice on a network error or 5xx), after the dependency graph is resolved and before any scanner runs | only when a GitHub token is supplied, the project has dependencies (or `--require-github-token` is set), and `--offline` is not set; omit the token to skip |
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
 | `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
 | `api.first.org` | CVE IDs (batched) | EPSS exploitation-probability lookup for flagged CVEs | always runs (no-op if no CVE alias); 24h cache |
 | `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
+
+**GitHub token validation.** When a token is supplied, `unisupply` checks it
+once, after resolving the dependency graph and before any scanner runs, with a
+request to `api.github.com/rate_limit` (which GitHub does not count against your
+rate limit). A network error or 5xx is retried twice, with a short backoff,
+before the token is treated as not validated. GitHub answers 401 to every
+request that carries a bad token rather than serving it anonymously, so without
+this check a rejected token silently degrades every GitHub lookup. If the token
+is rejected, the scan warns (`GitHub token rejected (401) — continuing
+unauthenticated`), adds the same notice to the report's warnings, and runs
+without it. With `--require-github-token`, a rejected token exits with code 3,
+and so does one that could not be validated: a network error or any response
+other than 200 and 401 (for example 403, 429 or 5xx). Without the flag, a token
+that could not be validated is used as is, with a warning. `--offline` skips the
+check.
 
 **Not contacted directly:** `sum.golang.org` and `pkg.go.dev` are never called by unisupply itself; no analytics beacon, crash reporter, or telemetry endpoint. Note that the Integrity scanner shells out to `go mod verify`, which checks the **local module cache** against go.sum — normally a fully offline operation. On a cold cache the `go` toolchain may fetch missing module metadata through your configured `GOPROXY` and verify it against `sum.golang.org`, exactly as any `go build` would; `GOPRIVATE`/`GONOSUMDB` are honored as usual. unisupply adds no network host beyond what the `go` toolchain itself contacts.
 
@@ -511,6 +527,7 @@ What `--offline` costs you, and how each loss is reported:
 | **Headline verdict** | **`UNKNOWN — not scored`.** Three of the five headline candidates are CVE-derived, so with no vulnerability data the headline would rest on dependency-graph position and version scheme alone. The numeric score is still reported, labelled indicative |
 | Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
 | go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
+| GitHub token validation | Skipped — a supplied token is not checked; with `--require-github-token` a warning says so and the run continues |
 | AI-gen | Does not run — every indicator derives from the module's first-release date, which comes from the proxy. Reported as unexamined, with a warning naming the module count; **not** reported as "no AI-gen risk found" |
 | Typosquat, CI/CD, build files, `go.mod` integrity | Unaffected — these never used the network |
 

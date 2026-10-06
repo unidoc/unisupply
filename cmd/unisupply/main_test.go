@@ -3,14 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // buildBinary compiles the unisupply binary into a temporary directory and
@@ -68,32 +73,176 @@ func TestRequireGithubToken_NoToken(t *testing.T) {
 	}
 }
 
-// TestRequireGithubToken_WithToken verifies that --require-github-token exits
-// with code 0 (not 3) when a GitHub token is present, even a fake one. The
-// flag only checks presence, not API validity.
-func TestRequireGithubToken_WithToken(t *testing.T) {
-	bin := buildBinary(t)
+// stubGitHub replaces http.DefaultTransport with a transport that answers
+// /rate_limit with status (or transportErr when set) and fails the test on any
+// other request, so a test also proves nothing else ran before validation. It
+// returns the number of requests made. The caller's cache directories are
+// redirected so a warm developer cache cannot satisfy a request.
+func stubGitHub(t *testing.T, status int, transportErr error) *atomic.Int32 {
+	t.Helper()
 
+	// The probe runs after the dependency graph is resolved, and resolving
+	// runs the go command, whose module and build caches default to paths
+	// under HOME. Pin them first so redirecting HOME below does not send the
+	// go command to the network for modules that are already cached.
+	pinGoEnv(t)
+
+	// os.UserCacheDir reads XDG_CACHE_HOME (Linux), HOME (macOS) and
+	// LocalAppData (Windows).
+	cacheDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("LocalAppData", cacheDir)
+
+	// Atomic: if validation ever stopped blocking the scan, the concurrent
+	// scanners would reach this transport, and a plain counter would turn the
+	// real failure into a data race report under -race.
+	var requests atomic.Int32
+	original := http.DefaultTransport
+	http.DefaultTransport = stubRoundTripper(func(req *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		if req.URL.Host != "api.github.com" || req.URL.Path != "/rate_limit" {
+			t.Errorf("unexpected request %s %s: only the token probe may run before validation settles", req.Method, req.URL)
+			return nil, fmt.Errorf("unexpected request %s", req.URL)
+		}
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"canned"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+	return &requests
+}
+
+// pinGoEnv sets the go command's cache, module and config locations to their
+// current values, so they survive a later change to HOME.
+func pinGoEnv(t *testing.T) {
+	t.Helper()
+	vars := []string{"GOPATH", "GOMODCACHE", "GOCACHE", "GOENV"}
+	out, err := exec.Command("go", append([]string{"env"}, vars...)...).Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	values := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(values) != len(vars) {
+		t.Fatalf("go env returned %d values for %d variables: %q", len(values), len(vars), out)
+	}
+	for i, v := range vars {
+		t.Setenv(v, strings.TrimSpace(values[i]))
+	}
+}
+
+type stubRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// moduleRootDir returns the repository root, used as a scan target.
+func moduleRootDir(t *testing.T) string {
+	t.Helper()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
-	moduleRoot := filepath.Join(cwd, "..", "..")
+	return filepath.Join(cwd, "..", "..")
+}
 
-	cmd := exec.Command(bin, "--require-github-token", "--github-token", "fake-token-for-test", moduleRoot)
-	// Remove GITHUB_TOKEN from env so the flag value is the only source.
-	cmd.Env = filterEnv(os.Environ(), "GITHUB_TOKEN")
+// TestRequireGithubToken_RejectedToken verifies that --require-github-token
+// fails with the token precondition error when GitHub answers 401, and that it
+// does so before any scanner issues a request (stubGitHub fails the test on
+// any request other than the probe).
+func TestRequireGithubToken_RejectedToken(t *testing.T) {
+	requests := stubGitHub(t, http.StatusUnauthorized, nil)
 
-	err = cmd.Run()
-	exitCode := 0
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		exitCode = exitErr.ExitCode()
+	err := run(&runConfig{
+		path:               moduleRootDir(t),
+		format:             "json",
+		timeout:            5 * time.Second,
+		githubToken:        "invalid-token",
+		requireGithubToken: true,
+		progressMode:       "none",
+	})
+
+	if !errors.Is(err, errTokenPrecondition) {
+		t.Fatalf("err = %v, want errTokenPrecondition", err)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "rejected the token") {
+		t.Errorf("message %q should name the 401 rejection", err)
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("requests = %d, want exactly 1 (the probe)", n)
+	}
+}
+
+// TestRequireGithubToken_AcceptedToken verifies that run() gets past the
+// precondition when GitHub accepts the token. The fixture module has no
+// dependencies, so the run ends at "No dependencies found." with no error,
+// after exactly one request: the probe.
+func TestRequireGithubToken_AcceptedToken(t *testing.T) {
+	requests := stubGitHub(t, http.StatusOK, nil)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture go.mod: %v", err)
 	}
 
-	// Exit code 0 = clean scan (or policy violation 2 / runtime error 1 is
-	// acceptable here — the key invariant is that it is NOT 3).
-	if exitCode == 3 {
-		t.Errorf("--require-github-token with --github-token present: exit code = 3, want != 3 (token precondition should pass)")
+	err := run(&runConfig{
+		path:               dir,
+		format:             "json",
+		timeout:            5 * time.Second,
+		githubToken:        "good-token",
+		requireGithubToken: true,
+		progressMode:       "none",
+	})
+
+	if err != nil {
+		t.Fatalf("err = %v, want nil (errors.Is(err, errTokenPrecondition) = %v)", err, errors.Is(err, errTokenPrecondition))
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("requests = %d, want exactly 1 (the probe)", n)
+	}
+}
+
+// TestRequireGithubToken_UnvalidatableToken verifies that a probe failure that
+// is not a 401 also fails the precondition, but with a message that does not
+// claim the token was rejected.
+func TestRequireGithubToken_UnvalidatableToken(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		transportErr error
+		wantInErr    string
+	}{
+		{name: "server error", status: http.StatusInternalServerError, wantInErr: "500"},
+		{name: "transport error", transportErr: errors.New("connection refused"), wantInErr: "connection refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stubGitHub(t, tc.status, tc.transportErr)
+
+			err := run(&runConfig{
+				path:               moduleRootDir(t),
+				format:             "json",
+				timeout:            5 * time.Second,
+				githubToken:        "some-token",
+				requireGithubToken: true,
+				progressMode:       "none",
+			})
+
+			if !errors.Is(err, errTokenPrecondition) {
+				t.Fatalf("err = %v, want errTokenPrecondition", err)
+			}
+			if !strings.Contains(err.Error(), "could not be validated") || !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("message %q should say the token could not be validated and include %q", err, tc.wantInErr)
+			}
+			if strings.Contains(err.Error(), "rejected") {
+				t.Errorf("message %q claims rejection, but a probe failure does not show that", err)
+			}
+		})
 	}
 }
 

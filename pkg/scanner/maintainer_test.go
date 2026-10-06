@@ -1635,6 +1635,60 @@ func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 	}
 }
 
+// TestGitHubRateLimit_HintNamesRejectedToken verifies that the rate-limit
+// warning does not tell the user to set GITHUB_TOKEN when they did set one and
+// GitHub rejected it, which is the only reason the scan is unauthenticated.
+func TestGitHubRateLimit_HintNamesRejectedToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name          string
+		tokenRejected bool
+		want          string
+		notWant       string
+	}{
+		{name: "no token", want: "set GITHUB_TOKEN", notWant: "rejected"},
+		{name: "rejected token", tokenRejected: true, want: "token was rejected (401)", notWant: "set GITHUB_TOKEN"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var wantCount, notWantCount int64
+			ctx := progress.WithReporter(context.Background(), multiReporter{
+				&countingReporter{match: tc.want, count: &wantCount},
+				&countingReporter{match: tc.notWant, count: &notWantCount},
+			})
+
+			ms := newTestMaintainerScanner(srv.URL)
+			ms.TokenRejected = tc.tokenRejected
+			ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+			if wantCount != 1 {
+				t.Errorf("warnings containing %q = %d, want 1", tc.want, wantCount)
+			}
+			if notWantCount != 0 {
+				t.Errorf("warnings containing %q = %d, want 0", tc.notWant, notWantCount)
+			}
+		})
+	}
+}
+
+// multiReporter fans each Warn out to several reporters.
+type multiReporter []*countingReporter
+
+func (m multiReporter) Stage(string)        {}
+func (m multiReporter) Step(string, ...any) {}
+func (m multiReporter) Progress(int, int)   {}
+func (m multiReporter) Done(string, ...any) {}
+func (m multiReporter) Warn(f string, a ...any) {
+	for _, r := range m {
+		r.Warn(f, a...)
+	}
+}
+
 func TestNonRateLimitError_SetsUnavailableReason(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

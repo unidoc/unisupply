@@ -120,6 +120,11 @@ type MaintainerScanner struct {
 	// constructed. Override in tests or from the CLI entry point.
 	ScanStart time.Time
 
+	// TokenRejected records that GitHub rejected the caller's token (401) and
+	// the scanner was given an empty token in its place, so the rate-limit
+	// warning does not tell the user to set a token they did set.
+	TokenRejected bool
+
 	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
 	// per scanner instance, even when many goroutines hit the limit simultaneously.
 	rateLimitWarnOnce sync.Once
@@ -270,8 +275,12 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 		if errors.Is(err, errRateLimited) {
 			info.UnavailableReason = "rate_limited"
 			rep := progress.From(ctx)
+			hint := "set GITHUB_TOKEN for higher limits"
+			if ms.TokenRejected {
+				hint = "the GitHub token was rejected (401), so requests ran unauthenticated"
+			}
 			ms.rateLimitWarnOnce.Do(func() {
-				rep.Warn("GitHub API rate limit hit — %s; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
+				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
 		} else {
 			info.UnavailableReason = "github_api_error"
