@@ -62,11 +62,12 @@ type Vulnerability struct {
 	// CallPath is one example of how the project reaches the vulnerable
 	// function, outermost frame first, e.g. "example.com/app/cmd/app.main",
 	// "github.com/go-git/go-git/v5.Repository.Push", "golang.org/x/crypto/ssh.NewClientConn".
-	// It is condensed to the first frame of each package run plus the
-	// vulnerable function, so it stays short. Set only when Reachability is
-	// "called". It is static-analysis evidence of reachability from a main
-	// package, not proof that the vulnerability is exploitable in the
-	// application's deployment.
+	// It is condensed to the entry frame, the frame where each run of same-package
+	// frames hands over to the next package, and the vulnerable function itself
+	// (at most 8 entries), so consecutive entries are not necessarily direct
+	// callers. Set only when Reachability is "called". It is static-analysis
+	// evidence that the code is on an execution path, not proof that the
+	// vulnerability is exploitable in the application's deployment.
 	CallPath []string `json:"call_path,omitempty"`
 
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
@@ -175,6 +176,9 @@ type traceEntry struct {
 	Version  string `json:"version,omitempty"`
 	Package  string `json:"package,omitempty"`
 	Function string `json:"function,omitempty"`
+	// Receiver is the method receiver type ("*Repository", "Result"), empty for
+	// a plain function. govulncheck splits a method into Function and Receiver.
+	Receiver string `json:"receiver,omitempty"`
 	Position *struct {
 		Filename string `json:"filename"`
 		Line     int    `json:"line"`
@@ -237,6 +241,20 @@ func classifyReachability(trace []traceEntry) string {
 // maxCallPathFrames bounds Vulnerability.CallPath.
 const maxCallPathFrames = 8
 
+// frameName renders a trace frame the way govulncheck prints it: package, then
+// "Receiver.Function" for a method (a leading * trimmed from the receiver), with
+// a closure suffix ("$1") cut off the function name.
+func frameName(t traceEntry) string {
+	name, _, _ := strings.Cut(t.Function, "$")
+	if t.Receiver != "" {
+		name = strings.TrimPrefix(t.Receiver, "*") + "." + name
+	}
+	if t.Package != "" {
+		name = t.Package + "." + name
+	}
+	return name
+}
+
 // callPath condenses a govulncheck trace (innermost frame first) into an
 // outermost-first list of "package.Function" entries: the entry frame, the frame
 // where each run of same-package frames hands over to the next package, and the
@@ -253,15 +271,12 @@ func callPath(trace []traceEntry) []string {
 	for i, t := range fr {
 		last := i == len(fr)-1
 		if i == 0 || last || fr[i+1].Package != t.Package {
-			name := t.Function
-			if t.Package != "" {
-				name = t.Package + "." + t.Function
-			}
-			path = append(path, name)
+			path = append(path, frameName(t))
 		}
 	}
 	if len(path) > maxCallPathFrames {
 		// Keep the entry point and the tail: the last frames lead to the symbol.
+		// The cut drops the middle, so consecutive entries are not direct callers.
 		path = append([]string{path[0]}, path[len(path)-(maxCallPathFrames-1):]...)
 	}
 	return path
