@@ -8,18 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
-	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
-	"github.com/unidoc/unisupply/pkg/resolver"
-	"github.com/unidoc/unisupply/pkg/scanner"
-	"github.com/unidoc/unisupply/pkg/scorer"
+	"github.com/unidoc/unisupply/pkg/runner"
 
 	flag "github.com/spf13/pflag"
 )
@@ -177,11 +173,6 @@ func run(cfg *runConfig) error {
 			cfg.policyPreset, cfg.policyFile)
 	}
 
-	// Compute scan-start time once and floor it to the start of the UTC day.
-	// All scanner age/activity classifications use this value so that two runs
-	// on the same calendar day yield identical band results for the same module.
-	scanStart := time.Now().UTC().Truncate(24 * time.Hour)
-
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
 		return err
@@ -191,155 +182,35 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	rep.Stage("Parsing go.mod")
-	gomodPath, err := parser.FindGoMod(cfg.path)
+	scanResult, err := runner.Run(ctx, runner.Options{
+		Path:                   cfg.path,
+		Timeout:                cfg.timeout,
+		DirectOnly:             cfg.directOnly,
+		GithubToken:            cfg.githubToken,
+		TrustIndexURL:          cfg.trustIndexURL,
+		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
+		ScanWorkflows:          cfg.scanWorkflows,
+		ScanCI:                 cfg.scanCI,
+		WorkflowPath:           cfg.workflowPath,
+		DebugScoring:           cfg.debugScoring,
+	})
 	if err != nil {
 		return err
 	}
-	gomod, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		return err
-	}
-	projectDir := filepath.Dir(gomodPath)
-	rep.Done("%s", gomodPath)
 
-	rep.Stage("Resolving dependency graph")
-	graph, warnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
-	if err != nil {
-		return fmt.Errorf("resolving dependencies: %w", err)
-	}
-	for _, w := range warnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d modules", len(graph.Dependencies))
-
-	if len(graph.Dependencies) == 0 {
+	if len(scanResult.Graph.Dependencies) == 0 {
 		fmt.Fprintln(os.Stderr, "No dependencies found.")
 		return nil
 	}
 
-	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
-	if err != nil {
-		rep.Warn("Vulnerability scan failed: %v", err)
-	}
-	for _, w := range vulnWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d affected modules", len(vulns))
-
-	rep.Stage("Checking maintenance health")
-	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
-	maintScanner.ScanStart = scanStart
-	maintenance, err := maintScanner.ScanAll(ctx, graph)
-	if err != nil {
-		rep.Warn("Some maintenance checks failed: %v", err)
-	}
-	rep.Done("")
-
-	if cfg.githubToken == "" {
-		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
-		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
-		}
-	}
-
-	rep.Stage("Analyzing maintainers (GitHub API)")
-	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
-	maintainerScanner.ScanStart = scanStart
-	maintainers := maintainerScanner.ScanAll(ctx, graph)
-	rep.Done("")
-
-	rep.Stage("Detecting typosquats")
-	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquats := typosquatScanner.ScanAll(ctx, graph)
-	rep.Done("%d suspicious", len(typosquats))
-
-	rep.Stage("Scoring resilience")
-	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
-	resilienceScanner.ScanStart = scanStart
-	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
-	rep.Done("")
-
-	rep.Stage("Assessing AI-generation risk")
-	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenScanner.ScanStart = scanStart
-	aiGenRisks := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
-	rep.Done("%d flagged", len(aiGenRisks))
-
-	var trustIndex map[string]*scanner.TrustIndexEntry
-	trustClient, err := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout, cfg.trustIndexAllowPrivate)
-	if err != nil {
-		return fmt.Errorf("trust index: %w", err)
-	}
-	if trustClient != nil {
-		rep.Stage("Querying Trust Index")
-		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
-		if tiErr != nil {
-			rep.Warn("Trust Index lookup failed: %v", tiErr)
-		}
-		rep.Done("%d entries", len(trustIndex))
-		scanner.EnrichMaintainersFromTrustIndex(maintainers, trustIndex)
-	}
-
-	rep.Stage("Computing risk scores")
-	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:       graph,
-		Vulns:       vulns,
-		Maintenance: maintenance,
-		Maintainers: maintainers,
-		Typosquats:  typosquats,
-		Resilience:  resilience,
-		AIGenRisks:  aiGenRisks,
-		TrustIndex:  trustIndex,
-		DebugMode:   cfg.debugScoring,
-		Now:         scanStart,
-	})
-	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
-	rep.Done("")
-
-	var ciReport *scanner.CIReport
-	if cfg.scanWorkflows || cfg.scanCI {
-		rep.Stage("Auditing CI/CD pipelines")
-		ciScanner := scanner.NewCIScanner()
-
-		wfPath := cfg.workflowPath
-		if !filepath.IsAbs(wfPath) {
-			wfPath = filepath.Join(projectDir, wfPath)
-		}
-
-		ciReport, err = ciScanner.ScanWorkflows(ctx, wfPath)
-		if err != nil {
-			rep.Warn("Workflow scanning failed: %v", err)
-		}
-
-		if cfg.scanCI && ciReport != nil {
-			buildFindings := ciScanner.ScanBuildFiles(ctx, projectDir)
-			ciReport.BuildFindings = buildFindings
-			ciReport.TotalFindings += len(buildFindings)
-		}
-		rep.Done("")
-	}
-
-	// Collect takeover candidates.
-	var takeovers []*scanner.MaintainerInfo
-	for _, mi := range maintainers {
-		if mi.TakeoverCandidate {
-			takeovers = append(takeovers, mi)
-		}
-	}
-
-	// Separate stdlib vulns from module vulns.
-	var stdlibVulns []scanner.Vulnerability
-	if stdlibList, ok := vulns["stdlib"]; ok {
-		stdlibVulns = stdlibList
-		delete(vulns, "stdlib")
-	}
-
-	if ctx.Err() != nil {
-		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
-	}
+	gomod := scanResult.GoMod
+	graph := scanResult.Graph
+	projectScore := scanResult.ProjectScore
+	ciReport := scanResult.CIReport
+	takeovers := scanResult.Takeovers
+	stdlibVulns := scanResult.StdlibVulns
+	maintainers := scanResult.Maintainers
+	typosquats := scanResult.Typosquats
 
 	// Generate output.
 	writer := os.Stdout
