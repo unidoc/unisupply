@@ -142,6 +142,20 @@ An absent `reachability` field (empty string) on a finding that did not come
 from govulncheck is treated as `called` for scoring purposes — it is the most
 conservative default.
 
+For `called` findings the JSON report also carries `call_path`: one example
+path from the project's code to the vulnerable function, outermost frame first,
+for example `example.com/app/cmd/app.main`, then
+`golang.org/x/net/http2.Server.ServeConn`. It keeps the entry frame, the frame
+where each run of same-package frames hands over to the next package, and the
+vulnerable function, at most 8 entries; `"..."` marks where a longer path was
+cut, so consecutive entries are not necessarily direct callers. A path need not
+start at `main`: govulncheck also treats the exported functions of library
+packages as entry points. When a vulnerability has several vulnerable symbols
+the shortest path is kept (ties broken alphabetically), so the choice does not
+depend on govulncheck's output order. The path is evidence that the code is on
+an execution path, not proof that the vulnerability is exploitable (see the
+caveat below).
+
 #### Scoring effect
 
 Reachability adjusts the vulnerability contribution at two levels:

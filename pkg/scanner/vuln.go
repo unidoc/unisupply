@@ -65,7 +65,8 @@ type Vulnerability struct {
 	// It is condensed to the entry frame, the frame where each run of same-package
 	// frames hands over to the next package, and the vulnerable function itself
 	// (at most 8 entries), so consecutive entries are not necessarily direct
-	// callers. Set only when Reachability is "called". It is static-analysis
+	// callers. A path longer than that is cut in the middle and an entry of
+	// "..." marks the cut. Set only when Reachability is "called". It is static-analysis
 	// evidence that the code is on an execution path, not proof that the
 	// vulnerability is exploitable in the application's deployment.
 	CallPath []string `json:"call_path,omitempty"`
@@ -241,6 +242,27 @@ func classifyReachability(trace []traceEntry) string {
 // maxCallPathFrames bounds Vulnerability.CallPath.
 const maxCallPathFrames = 8
 
+// callPathElision marks, in a path that was cut to maxCallPathFrames, where the
+// middle was dropped: its neighbours are not direct callers.
+const callPathElision = "..."
+
+// preferPath reports whether candidate should replace current as a
+// vulnerability's call path: the shorter path wins (the most direct route to
+// the vulnerable code), and ties are broken on the joined string. govulncheck
+// emits one called finding per vulnerable symbol in no stable order, so the
+// choice must depend on the paths and not on arrival order.
+func preferPath(candidate, current []string) bool {
+	switch {
+	case len(candidate) == 0:
+		return false
+	case len(current) == 0:
+		return true
+	case len(candidate) != len(current):
+		return len(candidate) < len(current)
+	}
+	return strings.Join(candidate, "\x00") < strings.Join(current, "\x00")
+}
+
 // frameName renders a trace frame the way govulncheck prints it: package, then
 // "Receiver.Function" for a method (a leading * trimmed from the receiver), with
 // a closure suffix ("$1") cut off the function name.
@@ -275,9 +297,10 @@ func callPath(trace []traceEntry) []string {
 		}
 	}
 	if len(path) > maxCallPathFrames {
-		// Keep the entry point and the tail: the last frames lead to the symbol.
-		// The cut drops the middle, so consecutive entries are not direct callers.
-		path = append([]string{path[0]}, path[len(path)-(maxCallPathFrames-1):]...)
+		// Keep the entry point and the tail (the last frames lead to the symbol),
+		// and mark the cut.
+		tail := path[len(path)-(maxCallPathFrames-2):]
+		path = append([]string{path[0], callPathElision}, tail...)
 	}
 	return path
 }
@@ -527,8 +550,10 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			if reachabilityRank[reach] > reachabilityRank[results[modPath][idx].Reachability] {
 				results[modPath][idx].Reachability = reach
 			}
-			if reach == "called" && len(results[modPath][idx].CallPath) == 0 {
-				results[modPath][idx].CallPath = callPath(f.Trace)
+			if reach == "called" {
+				if p := callPath(f.Trace); preferPath(p, results[modPath][idx].CallPath) {
+					results[modPath][idx].CallPath = p
+				}
 			}
 			continue
 		}

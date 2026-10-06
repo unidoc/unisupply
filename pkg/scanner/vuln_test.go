@@ -900,15 +900,43 @@ func TestCallPath_IsBounded(t *testing.T) {
 		t.Errorf("len(callPath) = %d, want %d", len(got), maxCallPathFrames)
 	}
 	// The trace is innermost first: m/p0 is the vulnerable function, m/p39 the
-	// entry. Both ends survive the cut.
-	if got[0] != "m/p39.F" || got[len(got)-1] != "m/p0.F" {
-		t.Errorf("entry and vulnerable function must be kept: first=%q last=%q", got[0], got[len(got)-1])
+	// entry. Both ends survive the cut, and the cut is marked.
+	if got[0] != "m/p39.F" || got[1] != callPathElision || got[len(got)-1] != "m/p0.F" {
+		t.Errorf("entry, cut marker and vulnerable function must be present: %v", got)
+	}
+	if got := callPath(trace[:3]); len(got) != 3 || got[1] == callPathElision {
+		t.Errorf("a short path must not be marked as cut: %v", got)
 	}
 }
 
-// govulncheck reports one OSV at module level, then package level, then symbol
-// level. The path must come from the symbol-level finding that upgrades the
-// entry to "called", and a vulnerability that never gets one has no path.
+// govulncheck emits one called finding per vulnerable symbol of the same OSV, in
+// no stable order. The path kept must not depend on that order: the shorter one
+// wins, ties break on the joined string.
+func TestParseGovulncheckJSON_CallPathIndependentOfFindingOrder(t *testing.T) {
+	osv := `{"osv":{"id":"GO-1","summary":"s","affected":[{"package":{"name":"example.com/lib","ecosystem":"Go"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"v1.2.0"}]}],"database_specific":{"severity":"HIGH"}}]}}` + "\n"
+	direct := `{"finding":{"osv":"GO-1","trace":[` +
+		`{"module":"example.com/lib","package":"example.com/lib","function":"Serve","receiver":"*Server"},` +
+		`{"module":"example.com/app","package":"example.com/app","function":"main"}]}}` + "\n"
+	viaFmt := `{"finding":{"osv":"GO-1","trace":[` +
+		`{"module":"example.com/lib","package":"example.com/lib","function":"String","receiver":"Setting"},` +
+		`{"module":"stdlib","package":"fmt","function":"Errorf"},` +
+		`{"module":"example.com/app","package":"example.com/app","function":"main"}]}}` + "\n"
+	pathOf := func(in string) string {
+		res, err := parseGovulncheckJSON(bytes.NewBufferString(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(res["example.com/lib"][0].CallPath, " > ")
+	}
+	a, b := pathOf(osv+direct+viaFmt), pathOf(osv+viaFmt+direct)
+	if a != b {
+		t.Errorf("path depends on finding order:\n %s\n %s", a, b)
+	}
+	if want := "example.com/app.main > example.com/lib.Server.Serve"; a != want {
+		t.Errorf("path = %q, want the direct route %q", a, want)
+	}
+}
+
 func TestParseGovulncheckJSON_CallPathOnUpgradeToCalled(t *testing.T) {
 	osv := func(id string) string {
 		return `{"osv":{"id":"` + id + `","summary":"s","affected":[{"package":{"name":"example.com/lib","ecosystem":"Go"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"v1.2.0"}]}],"database_specific":{"severity":"HIGH"}}]}}` + "\n"
