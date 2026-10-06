@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -852,4 +853,119 @@ func moduleKeys(m map[string][]Vulnerability) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// callPath condenses a govulncheck trace (innermost frame first, as govulncheck
+// emits it) into an outermost-first path: the entry frame, the frame where each
+// package run hands over, and the vulnerable function. The trace below is the shape of a real
+// govulncheck result for an application that pushes over SSH through go-git.
+func TestCallPath_CondensesTraceOutermostFirst(t *testing.T) {
+	trace := []traceEntry{
+		{Module: "golang.org/x/crypto", Package: "golang.org/x/crypto/ssh", Function: "NewClientConn"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5/plumbing/transport/ssh", Function: "dial"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5/plumbing/transport/ssh", Function: "command.connect"},
+		{Module: "github.com/go-git/go-git/v5", Package: "github.com/go-git/go-git/v5", Function: "Push", Receiver: "*Repository"},
+		{Module: "example.com/app", Package: "example.com/app/cmd/app", Function: "syncRun"},
+		{Module: "example.com/app", Package: "example.com/app/cmd/app", Function: "main"},
+	}
+	want := []string{
+		"example.com/app/cmd/app.main",
+		"example.com/app/cmd/app.syncRun",
+		"github.com/go-git/go-git/v5.Repository.Push",
+		"github.com/go-git/go-git/v5/plumbing/transport/ssh.dial",
+		"golang.org/x/crypto/ssh.NewClientConn",
+	}
+	got := callPath(trace)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("callPath = %v, want %v", got, want)
+	}
+	if got := callPath([]traceEntry{{Package: "m/p", Function: "F$1"}}); len(got) != 1 || got[0] != "m/p.F" {
+		t.Errorf("a closure suffix must be cut: %v", got)
+	}
+	if got := callPath([]traceEntry{{Package: "m/p", Function: "Get", Receiver: "Result"}}); len(got) != 1 || got[0] != "m/p.Result.Get" {
+		t.Errorf("a value receiver must be kept: %v", got)
+	}
+	if callPath([]traceEntry{{Module: "m", Package: "m/p"}}) != nil {
+		t.Error("a trace with no function frames has no call path")
+	}
+}
+
+func TestCallPath_IsBounded(t *testing.T) {
+	var trace []traceEntry
+	for i := 0; i < 40; i++ {
+		trace = append(trace, traceEntry{Module: "m", Package: fmt.Sprintf("m/p%d", i), Function: "F"})
+	}
+	got := callPath(trace)
+	if len(got) != maxCallPathFrames {
+		t.Errorf("len(callPath) = %d, want %d", len(got), maxCallPathFrames)
+	}
+	// The trace is innermost first: m/p0 is the vulnerable function, m/p39 the
+	// entry. Both ends survive the cut, and the cut is marked.
+	if got[0] != "m/p39.F" || got[1] != callPathElision || got[len(got)-1] != "m/p0.F" {
+		t.Errorf("entry, cut marker and vulnerable function must be present: %v", got)
+	}
+	if got := callPath(trace[:3]); len(got) != 3 || got[1] == callPathElision {
+		t.Errorf("a short path must not be marked as cut: %v", got)
+	}
+}
+
+// govulncheck emits one called finding per vulnerable symbol of the same OSV, in
+// no stable order. The path kept must not depend on that order: the shorter one
+// wins, ties break on the joined string.
+func TestParseGovulncheckJSON_CallPathIndependentOfFindingOrder(t *testing.T) {
+	osv := `{"osv":{"id":"GO-1","summary":"s","affected":[{"package":{"name":"example.com/lib","ecosystem":"Go"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"v1.2.0"}]}],"database_specific":{"severity":"HIGH"}}]}}` + "\n"
+	direct := `{"finding":{"osv":"GO-1","trace":[` +
+		`{"module":"example.com/lib","package":"example.com/lib","function":"Serve","receiver":"*Server"},` +
+		`{"module":"example.com/app","package":"example.com/app","function":"main"}]}}` + "\n"
+	viaFmt := `{"finding":{"osv":"GO-1","trace":[` +
+		`{"module":"example.com/lib","package":"example.com/lib","function":"String","receiver":"Setting"},` +
+		`{"module":"stdlib","package":"fmt","function":"Errorf"},` +
+		`{"module":"example.com/app","package":"example.com/app","function":"main"}]}}` + "\n"
+	pathOf := func(in string) string {
+		res, err := parseGovulncheckJSON(bytes.NewBufferString(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(res["example.com/lib"][0].CallPath, " > ")
+	}
+	a, b := pathOf(osv+direct+viaFmt), pathOf(osv+viaFmt+direct)
+	if a != b {
+		t.Errorf("path depends on finding order:\n %s\n %s", a, b)
+	}
+	if want := "example.com/app.main > example.com/lib.Server.Serve"; a != want {
+		t.Errorf("path = %q, want the direct route %q", a, want)
+	}
+}
+
+func TestParseGovulncheckJSON_CallPathOnUpgradeToCalled(t *testing.T) {
+	osv := func(id string) string {
+		return `{"osv":{"id":"` + id + `","summary":"s","affected":[{"package":{"name":"example.com/lib","ecosystem":"Go"},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"v1.2.0"}]}],"database_specific":{"severity":"HIGH"}}]}}` + "\n"
+	}
+	finding := func(id, trace string) string {
+		return `{"finding":{"osv":"` + id + `","trace":` + trace + `}}` + "\n"
+	}
+	in := osv("GO-1") + osv("GO-2") +
+		// GO-1: module, then package, then symbol level (called).
+		finding("GO-1", `[{"module":"example.com/lib","version":"v1.1.0"}]`) +
+		finding("GO-1", `[{"module":"example.com/lib","version":"v1.1.0","package":"example.com/lib/p"}]`) +
+		finding("GO-1", `[{"module":"example.com/lib","version":"v1.1.0","package":"example.com/lib/p","function":"Get","receiver":"*Client","position":{"filename":"p.go","line":1,"column":1}},`+
+			`{"module":"example.com/app","package":"example.com/app","function":"main","position":{"filename":"main.go","line":9,"column":2}}]`) +
+		// GO-2: never gets past package level.
+		finding("GO-2", `[{"module":"example.com/lib","version":"v1.1.0"}]`) +
+		finding("GO-2", `[{"module":"example.com/lib","version":"v1.1.0","package":"example.com/lib/p"}]`)
+
+	res, err := parseGovulncheckJSON(bytes.NewBufferString(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Vulnerability{}
+	for _, v := range res["example.com/lib"] {
+		byID[v.ID] = v
+	}
+	if v := byID["GO-1"]; v.Reachability != "called" || strings.Join(v.CallPath, "|") != "example.com/app.main|example.com/lib/p.Client.Get" {
+		t.Errorf("GO-1 = %q %v, want called with the receiver-qualified path", v.Reachability, v.CallPath)
+	}
+	if v := byID["GO-2"]; v.Reachability != "imported" || v.CallPath != nil {
+		t.Errorf("GO-2 = %q %v, want imported with no call path", v.Reachability, v.CallPath)
+	}
 }

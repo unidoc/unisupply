@@ -190,6 +190,10 @@ feed the risk score — see
       "severity": "HIGH",
       "fixed_version": "v0.36.0",
       "reachability": "called",
+      "call_path": [
+        "example.com/app/cmd/app.main",
+        "golang.org/x/net/http2.Server.ServeConn"
+      ],
       "epss_score": 0.89,
       "epss_percentile": 0.994,
       "epss_date": "2026-07-10",
@@ -214,6 +218,8 @@ feed the risk score — see
 ```
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
+
+`call_path` is present only when `reachability` is `"called"`: one example of how the project reaches the vulnerable function, outermost frame first, condensed to the entry frame, the frame where each package hands over to the next, and the vulnerable function (at most 8 entries; `"..."` marks a cut). Consecutive entries are not necessarily direct callers. It is evidence that the code is on an execution path, not proof that the vulnerability is exploitable.
 Absent `epss_score` means EPSS has no score for that CVE (expected — EPSS does
 not score every CVE), the lookup failed, or the vuln has no CVE alias;
 absent `in_kev` means the KEV catalog was not consulted (`false` means
