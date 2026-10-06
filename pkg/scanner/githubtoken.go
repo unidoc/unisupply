@@ -40,7 +40,11 @@ func ValidateGitHubToken(ctx context.Context, client *Client, token string) erro
 		Accept:     "application/vnd.github.v3+json",
 		Purpose:    "github:token-validation",
 	})
-	if err != nil {
+	// Get returns the response alongside the error when only the body read
+	// failed. The status line alone answers whether the token was accepted,
+	// and the body is never used, so decide on the status whenever there is
+	// one: a 401 with a truncated body is still a rejection.
+	if resp == nil {
 		return fmt.Errorf("probing GitHub rate limit: %w", err)
 	}
 
