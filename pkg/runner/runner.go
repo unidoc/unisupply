@@ -42,6 +42,15 @@ type Options struct {
 
 	GithubToken string
 
+	// RequireGithubToken makes Run fail with an error wrapping
+	// ErrGithubTokenPrecondition when GithubToken is empty, rejected by GitHub
+	// (401), or cannot be validated (network error, or any status other than
+	// 200 and 401). Without it, a rejected token is dropped and the scan runs
+	// unauthenticated (see Result.GithubTokenRejected), and a token that
+	// cannot be validated is used as is; both add a report warning. Offline,
+	// the token is never probed.
+	RequireGithubToken bool
+
 	TrustIndexURL          string
 	TrustIndexAllowPrivate bool
 
@@ -97,6 +106,11 @@ type Result struct {
 	// so the report may be incomplete.
 	Interrupted bool
 
+	// GithubTokenRejected is true when GitHub answered 401 to
+	// Options.GithubToken and the scanners ran without a token. The report
+	// warnings say so too.
+	GithubTokenRejected bool
+
 	// Maintainers and Typosquats are the raw per-module scanner outputs
 	// (keyed by module path) — ProjectScore folds their signal into each
 	// DependencyScore, but callers doing their own policy evaluation (see
@@ -134,6 +148,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// A caller that wants an offline scan calls offline.Enable() before Run.
 	offlineMode := offline.Enabled()
 
+	if opts.RequireGithubToken && opts.GithubToken == "" {
+		return nil, fmt.Errorf("%w: no GitHub token was provided", ErrGithubTokenPrecondition)
+	}
+
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(opts.Path)
 	if err != nil {
@@ -163,6 +181,20 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	rep.Done("%d modules", len(graph.Dependencies))
 
+	// Validate the token after Resolve, so a bad path or an empty project
+	// reports its own error first, and before any scanner is constructed,
+	// since a rejected token is cleared and the scanners below must get the
+	// cleared value. An empty graph uses no token, so it is only probed when
+	// the caller made a valid token a precondition.
+	tokenStatus := tokenCheck{token: opts.GithubToken}
+	if len(graph.Dependencies) > 0 || opts.RequireGithubToken {
+		tokenStatus, err = checkGitHubToken(ctx, opts.GithubToken, opts.RequireGithubToken, offlineMode, timeout)
+		if err != nil {
+			return nil, err
+		}
+	}
+	githubToken := tokenStatus.token
+
 	if len(graph.Dependencies) == 0 {
 		// Same shortcut as the original CLI code: nothing to scan, so skip
 		// every scanner's outbound calls entirely rather than running them
@@ -188,7 +220,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, opts.GithubToken)
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, githubToken)
 	// The scanner reports availability directly: govulncheck failures come back
 	// as a warning with a nil error, so err alone reads a failed scan as clean.
 	vulnScanUnavailable := !vulnScanned
@@ -220,16 +252,23 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	rep.Done("")
 
-	if opts.GithubToken == "" && !offlineMode {
+	if githubToken == "" && !offlineMode {
 		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
 		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
+			// A rejected token was cleared above, so the token is empty here
+			// too; "unset" would tell that user to set a token they did set.
+			reason := "GITHUB_TOKEN is unset"
+			if tokenStatus.rejected {
+				reason = "the GitHub token was rejected (401)"
+			}
+			rep.Warn("found %d GitHub-hosted deps but %s — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n, reason)
 		}
 	}
 
 	rep.Stage("Analyzing maintainers (GitHub API)")
-	maintainerScanner := scanner.NewMaintainerScanner(timeout, opts.GithubToken)
+	maintainerScanner := scanner.NewMaintainerScanner(timeout, githubToken)
 	maintainerScanner.ScanStart = scanStart
+	maintainerScanner.TokenRejected = tokenStatus.rejected
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
@@ -289,6 +328,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Now:       scanStart,
 	})
 	// Resolver degradations change the numbers, so they belong in the report.
+	// So does the token outcome: under --progress none, or for a library
+	// caller with no reporter, the report is the only place it shows.
+	if tokenStatus.warning != "" {
+		projectScore.Warnings = append(projectScore.Warnings, tokenStatus.warning)
+	}
 	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
@@ -346,8 +390,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		IntegrityReport: integrityReport,
 		VulnScanErr:     vulnScanErr,
 		Interrupted:     interrupted,
-		Maintainers:     maintainers,
-		Typosquats:      typosquats,
+
+		GithubTokenRejected: tokenStatus.rejected,
+		Maintainers:         maintainers,
+		Typosquats:          typosquats,
 	}, nil
 }
 

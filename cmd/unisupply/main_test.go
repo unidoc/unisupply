@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -74,36 +73,34 @@ func TestRequireGithubToken_NoToken(t *testing.T) {
 	}
 }
 
-// recordingReporter captures warnings so tests can assert on what the user
-// would have seen on stderr. Only Warn is of interest; the rest are no-ops.
-type recordingReporter struct {
-	warnings []string
-}
-
-func (r *recordingReporter) Stage(string)        {}
-func (r *recordingReporter) Step(string, ...any) {}
-func (r *recordingReporter) Progress(int, int)   {}
-func (r *recordingReporter) Done(string, ...any) {}
-func (r *recordingReporter) Warn(format string, args ...any) {
-	r.warnings = append(r.warnings, fmt.Sprintf(format, args...))
-}
-
 // stubGitHub replaces http.DefaultTransport with a transport that answers
 // /rate_limit with status (or transportErr when set) and fails the test on any
 // other request, so a test also proves nothing else ran before validation. It
-// returns a pointer to the number of requests made. The caller's cache
-// directories are redirected so a warm developer cache cannot satisfy a request.
-func stubGitHub(t *testing.T, status int, transportErr error) *int {
+// returns the number of requests made. The caller's cache directories are
+// redirected so a warm developer cache cannot satisfy a request.
+func stubGitHub(t *testing.T, status int, transportErr error) *atomic.Int32 {
 	t.Helper()
 
+	// The probe runs after the dependency graph is resolved, and resolving
+	// runs the go command, whose module and build caches default to paths
+	// under HOME. Pin them first so redirecting HOME below does not send the
+	// go command to the network for modules that are already cached.
+	pinGoEnv(t)
+
+	// os.UserCacheDir reads XDG_CACHE_HOME (Linux), HOME (macOS) and
+	// LocalAppData (Windows).
 	cacheDir := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
 	t.Setenv("HOME", cacheDir)
+	t.Setenv("LocalAppData", cacheDir)
 
-	requests := new(int)
+	// Atomic: if validation ever stopped blocking the scan, the concurrent
+	// scanners would reach this transport, and a plain counter would turn the
+	// real failure into a data race report under -race.
+	var requests atomic.Int32
 	original := http.DefaultTransport
 	http.DefaultTransport = stubRoundTripper(func(req *http.Request) (*http.Response, error) {
-		*requests++
+		requests.Add(1)
 		if req.URL.Host != "api.github.com" || req.URL.Path != "/rate_limit" {
 			t.Errorf("unexpected request %s %s: only the token probe may run before validation settles", req.Method, req.URL)
 			return nil, fmt.Errorf("unexpected request %s", req.URL)
@@ -119,7 +116,25 @@ func stubGitHub(t *testing.T, status int, transportErr error) *int {
 		}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = original })
-	return requests
+	return &requests
+}
+
+// pinGoEnv sets the go command's cache, module and config locations to their
+// current values, so they survive a later change to HOME.
+func pinGoEnv(t *testing.T) {
+	t.Helper()
+	vars := []string{"GOPATH", "GOMODCACHE", "GOCACHE", "GOENV"}
+	out, err := exec.Command("go", append([]string{"env"}, vars...)...).Output()
+	if err != nil {
+		t.Fatalf("go env: %v", err)
+	}
+	values := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(values) != len(vars) {
+		t.Fatalf("go env returned %d values for %d variables: %q", len(values), len(vars), out)
+	}
+	for i, v := range vars {
+		t.Setenv(v, strings.TrimSpace(values[i]))
+	}
 }
 
 type stubRoundTripper func(*http.Request) (*http.Response, error)
@@ -158,8 +173,37 @@ func TestRequireGithubToken_RejectedToken(t *testing.T) {
 	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "rejected the token") {
 		t.Errorf("message %q should name the 401 rejection", err)
 	}
-	if *requests != 1 {
-		t.Errorf("requests = %d, want exactly 1 (the probe)", *requests)
+	if n := requests.Load(); n != 1 {
+		t.Errorf("requests = %d, want exactly 1 (the probe)", n)
+	}
+}
+
+// TestRequireGithubToken_AcceptedToken verifies that run() gets past the
+// precondition when GitHub accepts the token. The fixture module has no
+// dependencies, so the run ends at "No dependencies found." with no error,
+// after exactly one request: the probe.
+func TestRequireGithubToken_AcceptedToken(t *testing.T) {
+	requests := stubGitHub(t, http.StatusOK, nil)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture go.mod: %v", err)
+	}
+
+	err := run(&runConfig{
+		path:               dir,
+		format:             "json",
+		timeout:            5 * time.Second,
+		githubToken:        "good-token",
+		requireGithubToken: true,
+		progressMode:       "none",
+	})
+
+	if err != nil {
+		t.Fatalf("err = %v, want nil (errors.Is(err, errTokenPrecondition) = %v)", err, errors.Is(err, errTokenPrecondition))
+	}
+	if n := requests.Load(); n != 1 {
+		t.Errorf("requests = %d, want exactly 1 (the probe)", n)
 	}
 }
 
@@ -197,83 +241,6 @@ func TestRequireGithubToken_UnvalidatableToken(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "rejected") {
 				t.Errorf("message %q claims rejection, but a probe failure does not show that", err)
-			}
-		})
-	}
-}
-
-// TestValidateGitHubToken covers the outcomes that do not abort the run, which
-// run() cannot show without performing a full scan.
-func TestValidateGitHubToken(t *testing.T) {
-	tests := []struct {
-		name         string
-		cfg          runConfig
-		status       int
-		transportErr error
-		wantErr      bool
-		wantToken    string
-		wantRejected bool
-		wantWarnings []string
-		wantRequests int
-	}{
-		{
-			name:         "accepted token proceeds untouched",
-			cfg:          runConfig{githubToken: "good", requireGithubToken: true},
-			status:       http.StatusOK,
-			wantToken:    "good",
-			wantRequests: 1,
-		},
-		{
-			name:         "rejected without flag warns once and clears the token",
-			cfg:          runConfig{githubToken: "bad"},
-			status:       http.StatusUnauthorized,
-			wantToken:    "",
-			wantRejected: true,
-			wantWarnings: []string{"GitHub token rejected (401) \u2014 continuing unauthenticated"},
-			wantRequests: 1,
-		},
-		{
-			name:         "undecidable without flag warns once and keeps the token",
-			cfg:          runConfig{githubToken: "maybe"},
-			status:       http.StatusServiceUnavailable,
-			wantToken:    "maybe",
-			wantWarnings: []string{"could not validate GitHub token: GitHub rate limit probe returned 503 \u2014 continuing with the token"},
-			wantRequests: 1,
-		},
-		{
-			name:      "no token makes no request",
-			cfg:       runConfig{requireGithubToken: false},
-			wantToken: "",
-		},
-		{
-			name:      "offline with flag makes no request and does not fail",
-			cfg:       runConfig{githubToken: "tok", requireGithubToken: true, offlineMode: true},
-			wantToken: "tok",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			requests := stubGitHub(t, tc.status, tc.transportErr)
-			cfg := tc.cfg
-			cfg.timeout = 5 * time.Second
-			rep := &recordingReporter{}
-
-			err := validateGitHubToken(context.Background(), &cfg, rep)
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if cfg.githubToken != tc.wantToken {
-				t.Errorf("githubToken = %q, want %q", cfg.githubToken, tc.wantToken)
-			}
-			if cfg.githubTokenRejected != tc.wantRejected {
-				t.Errorf("githubTokenRejected = %v, want %v", cfg.githubTokenRejected, tc.wantRejected)
-			}
-			if !reflect.DeepEqual(rep.warnings, tc.wantWarnings) {
-				t.Errorf("warnings = %q, want %q", rep.warnings, tc.wantWarnings)
-			}
-			if *requests != tc.wantRequests {
-				t.Errorf("requests = %d, want %d", *requests, tc.wantRequests)
 			}
 		})
 	}

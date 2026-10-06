@@ -18,7 +18,6 @@ import (
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
 	"github.com/unidoc/unisupply/pkg/runner"
-	"github.com/unidoc/unisupply/pkg/scanner"
 
 	flag "github.com/spf13/pflag"
 )
@@ -27,10 +26,11 @@ import (
 var errPolicyViolation = errors.New("policy violation")
 
 // errTokenPrecondition is returned when --require-github-token is set but the
-// token is missing or invalid. Exit code 3 is reserved for this precondition
-// failure so CI pipelines can distinguish it from a runtime error (1) or a
-// policy violation (2).
-var errTokenPrecondition = errors.New("github token precondition failed")
+// token is missing, rejected, or could not be validated. Exit code 3 is
+// reserved for this precondition failure so CI pipelines can distinguish it
+// from a runtime error (1) or a policy violation (2). It is the runner's
+// sentinel, because runner.Run is where a present token is validated.
+var errTokenPrecondition = runner.ErrGithubTokenPrecondition
 
 func main() {
 	var (
@@ -168,65 +168,13 @@ type runConfig struct {
 	debugScoring           bool
 	networkLog             bool
 	offlineMode            bool
-
-	// githubTokenRejected is set by validateGitHubToken when GitHub answered
-	// 401 and the token was cleared, so later messages can say the token was
-	// rejected rather than claim the user never set one.
-	githubTokenRejected bool
-}
-
-// validateGitHubToken probes GitHub once with the configured token, before any
-// scanner runs.
-//
-// GitHub answers 401 to every request carrying a bad token instead of serving
-// it anonymously, so an unchecked bad token turns every maintainer lookup and
-// GHSA enrichment into a generic API error while the scan still exits 0. The
-// probe turns that into one explicit outcome:
-//
-//   - accepted: nothing changes.
-//   - rejected (401): with --require-github-token the run fails (exit 3);
-//     without it the token is cleared so the scanners genuinely run
-//     unauthenticated, which is what the warning says they are doing.
-//   - undecidable (network error, 403, 5xx): with the flag the run fails,
-//     since the flag exists so CI never passes a degraded scan; without it
-//     the token is kept, because nothing shows it is bad.
-//
-// It does nothing offline (the offline transport would refuse the request) or
-// when no token is set.
-func validateGitHubToken(ctx context.Context, cfg *runConfig, rep progress.Reporter) error {
-	if cfg.githubToken == "" || cfg.offlineMode {
-		return nil
-	}
-
-	client := scanner.NewClient(scanner.ClientOptions{Timeout: cfg.timeout})
-	err := scanner.ValidateGitHubToken(ctx, client, cfg.githubToken)
-	switch {
-	case err == nil:
-		return nil
-
-	case errors.Is(err, scanner.ErrGitHubTokenRejected):
-		if cfg.requireGithubToken {
-			return fmt.Errorf("%w: --require-github-token is set but GitHub rejected the token (401 Bad credentials)", errTokenPrecondition)
-		}
-		rep.Warn("GitHub token rejected (401) — continuing unauthenticated")
-		cfg.githubToken = ""
-		cfg.githubTokenRejected = true
-		return nil
-
-	default:
-		if cfg.requireGithubToken {
-			return fmt.Errorf("%w: --require-github-token is set but the token could not be validated: %v", errTokenPrecondition, err)
-		}
-		rep.Warn("could not validate GitHub token: %v — continuing with the token", err)
-		return nil
-	}
 }
 
 func run(cfg *runConfig) error {
 	// --require-github-token: fail fast (exit 3) when no token is present.
 	// This is the cheap, offline half of the precondition; whether a present
-	// token is accepted by GitHub is checked by validateGitHubToken once the
-	// progress reporter and network interceptors are installed.
+	// token is accepted by GitHub is checked by runner.Run, after the
+	// dependency graph is resolved and before any scanner runs.
 	if cfg.requireGithubToken && cfg.githubToken == "" {
 		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
 	}
@@ -253,7 +201,7 @@ func run(cfg *runConfig) error {
 		// CI configs routinely set the token and the mode flag from separate
 		// layers — so warn and continue rather than failing the run. The
 		// wording must not claim the token is good: offline, there is no way
-		// to know, and validateGitHubToken skips the probe.
+		// to know, and runner.Run skips the probe.
 		if cfg.requireGithubToken {
 			fmt.Fprintln(os.Stderr, "warning: --require-github-token is set and a token is present, but it was not validated because --offline means GitHub will not be contacted")
 		}
@@ -293,17 +241,12 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	// Validate before any scanner is constructed: on a rejected token this
-	// clears cfg.githubToken, and every scanner below reads it from cfg.
-	if err := validateGitHubToken(ctx, cfg, rep); err != nil {
-		return err
-	}
-
 	scanResult, err := runner.Run(ctx, runner.Options{
 		Path:                   cfg.path,
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
 		GithubToken:            cfg.githubToken,
+		RequireGithubToken:     cfg.requireGithubToken,
 		TrustIndexURL:          cfg.trustIndexURL,
 		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
 		ScanWorkflows:          cfg.scanWorkflows,
