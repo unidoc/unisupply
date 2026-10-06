@@ -5,9 +5,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -46,6 +48,13 @@ type Graph struct {
 	Root         string
 	Dependencies map[string]*Dependency // keyed by module path
 	EdgeCount    int                    // total edges in the dependency graph
+}
+
+// SortedPaths returns the module paths in Dependencies in ascending order.
+// Dependencies is a map, so reports that range it directly would emit
+// components in a different order on every run.
+func (g *Graph) SortedPaths() []string {
+	return slices.Sorted(maps.Keys(g.Dependencies))
 }
 
 // Resolve resolves the full dependency graph. It tries `go mod graph` first,

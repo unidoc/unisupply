@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +76,32 @@ func EnrichMaintainersFromTrustIndex(maintainers map[string]*MaintainerInfo, tru
 			mi.OwnerVerified = entry.MaintainerVerified
 		}
 	}
+}
+
+// TakeoverCandidates returns one entry per repository flagged as a takeover
+// candidate, sorted by owner/repo. maintainers is keyed by module path, so
+// ranging it directly would reorder the report's takeover list on every run,
+// and several modules can come from one repository (foo/bar and foo/bar/v2).
+// The reports print only repository-level fields, so one entry per repository
+// is kept.
+func TakeoverCandidates(maintainers map[string]*MaintainerInfo) []*MaintainerInfo {
+	byRepo := make(map[string]*MaintainerInfo)
+	for _, mod := range slices.Sorted(maps.Keys(maintainers)) {
+		mi := maintainers[mod]
+		if !mi.TakeoverCandidate {
+			continue
+		}
+		key := mi.Owner + "/" + mi.Repo
+		if _, seen := byRepo[key]; !seen {
+			byRepo[key] = mi
+		}
+	}
+
+	var candidates []*MaintainerInfo
+	for _, key := range slices.Sorted(maps.Keys(byRepo)) {
+		candidates = append(candidates, byRepo[key])
+	}
+	return candidates
 }
 
 // MaintainerScanner analyzes module maintainership via the GitHub API.
@@ -204,9 +232,14 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
-				info.SubDependencies = d.TransitiveDeps
+				// analyzeRepo caches one *MaintainerInfo per owner/repo, shared
+				// by every module from that repo. Copy it before setting
+				// per-module fields, or those modules race on the shared value
+				// and all report whichever one wrote last.
+				mi := *info
+				mi.SubDependencies = d.TransitiveDeps
 				mu.Lock()
-				results[d.Module.Path] = info
+				results[d.Module.Path] = &mi
 				mu.Unlock()
 			}
 		}(dep, or.owner, or.repo)

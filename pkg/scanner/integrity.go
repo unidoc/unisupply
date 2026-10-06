@@ -160,13 +160,7 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 func (is *IntegrityScanner) ScanPseudoVersions(graph *resolver.Graph, report *IntegrityReport) map[string]IntegrityRiskLevel {
 	classes := make(map[string]IntegrityRiskLevel)
 
-	paths := make([]string, 0, len(graph.Dependencies))
-	for path := range graph.Dependencies {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	for _, path := range paths {
+	for _, path := range graph.SortedPaths() {
 		dep := graph.Dependencies[path]
 		if !module.IsPseudoVersion(dep.Module.Version) {
 			continue

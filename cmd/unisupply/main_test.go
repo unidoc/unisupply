@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -138,6 +141,129 @@ func TestPolicyFlagConflict_NoSpuriousWarning(t *testing.T) {
 		if strings.Contains(stderr.String(), "ignored") {
 			t.Errorf("unexpected conflict warning with args %v:\n%s", args, stderr.String())
 		}
+	}
+}
+
+// removeJSONKeys deletes every object member named in keys, at any depth. The
+// generic any tree is warranted here: the test compares the shape of four
+// different report schemas without modeling any of them.
+func removeJSONKeys(v any, keys map[string]struct{}) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, child := range x {
+			if _, drop := keys[k]; drop {
+				delete(x, k)
+				continue
+			}
+			removeJSONKeys(child, keys)
+		}
+	case []any:
+		for _, child := range x {
+			removeJSONKeys(child, keys)
+		}
+	}
+}
+
+// normalizeJSONReport drops the intentionally per-run fields from a JSON
+// report and re-encodes it. Array order is preserved, so an ordering
+// difference still shows up in the result.
+func normalizeJSONReport(volatile ...string) func([]byte) ([]byte, error) {
+	keys := make(map[string]struct{}, len(volatile))
+	for _, k := range volatile {
+		keys[k] = struct{}{}
+	}
+	return func(raw []byte) ([]byte, error) {
+		var doc any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return nil, fmt.Errorf("decoding report: %w", err)
+		}
+		removeJSONKeys(doc, keys)
+		return json.MarshalIndent(doc, "", "  ")
+	}
+}
+
+var textGeneratedLine = regexp.MustCompile(`(?m)^Report generated:.*$`)
+
+// normalizeTextReport blanks the per-run timestamp line in the text report.
+func normalizeTextReport(raw []byte) ([]byte, error) {
+	return textGeneratedLine.ReplaceAll(raw, []byte("Report generated:")), nil
+}
+
+// TestReportOutputDeterministic runs the binary repeatedly on the same target
+// and asserts that every output format is identical across runs once the
+// intentionally per-run fields are normalized. Several runs are needed: two
+// runs can match by luck when a map holds only a few entries.
+//
+// Offline runs have no maintainer data, so takeover ordering is covered by a
+// unit test in pkg/scanner instead.
+func TestReportOutputDeterministic(t *testing.T) {
+	bin := buildBinary(t)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	moduleRoot := filepath.Join(cwd, "..", "..")
+
+	// The repo's own workflows yield too few CI findings to expose job-order
+	// bugs, so point the CI scan at a multi-job fixture.
+	workflowDir, err := filepath.Abs(filepath.Join(moduleRoot, "test", "integration", "testdata", "workflows-multijob"))
+	if err != nil {
+		t.Fatalf("resolving workflow fixture: %v", err)
+	}
+
+	const runs = 5
+
+	// Add a row here to cover a new output format.
+	tests := []struct {
+		name      string
+		format    string
+		normalize func([]byte) ([]byte, error)
+	}{
+		{"json", "json", normalizeJSONReport("generated_at")},
+		{"text", "text", normalizeTextReport},
+		{"sbom-cyclonedx", "sbom-cyclonedx", normalizeJSONReport("serialNumber", "timestamp")},
+		{"sbom-spdx", "sbom-spdx", normalizeJSONReport("documentNamespace", "created", "annotationDate")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			var first []byte
+			for i := 0; i < runs; i++ {
+				outFile := filepath.Join(outDir, fmt.Sprintf("run-%d.out", i))
+				cmd := exec.Command(bin,
+					"--offline", "--scan-ci", "--progress", "none", "--no-color", "-v",
+					"--workflow-path", workflowDir,
+					"-f", tt.format, "-o", outFile, moduleRoot)
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("run %d: %v\n%s", i+1, err, stderr.String())
+				}
+
+				raw, err := os.ReadFile(outFile)
+				if err != nil {
+					t.Fatalf("run %d: reading output: %v", i+1, err)
+				}
+				got, err := tt.normalize(raw)
+				if err != nil {
+					t.Fatalf("run %d: normalizing output: %v", i+1, err)
+				}
+				if i == 0 {
+					first = got
+					continue
+				}
+				if !bytes.Equal(first, got) {
+					// Keep both normalized outputs so the difference can be inspected.
+					a := filepath.Join(outDir, "run-1.normalized")
+					b := filepath.Join(outDir, fmt.Sprintf("run-%d.normalized", i+1))
+					_ = os.WriteFile(a, first, 0o644)
+					_ = os.WriteFile(b, got, 0o644)
+					t.Fatalf("%s output of run %d differs from run 1 (normalized copies: %s, %s)", tt.format, i+1, a, b)
+				}
+			}
+		})
 	}
 }
 
