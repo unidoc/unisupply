@@ -761,7 +761,7 @@ func TestWriteText_TimeBombScopeNote(t *testing.T) {
 	out := opts.Writer.(*bytes.Buffer).String()
 
 	for _, want := range []string{
-		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only,",
+		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only",
 		"github.com/google/go-cmdtest — archived 53 months",
 	} {
 		if !strings.Contains(out, want) {
@@ -814,5 +814,36 @@ func TestWrapWords(t *testing.T) {
 	}
 	if got := wrapWords("", 10); len(got) != 0 {
 		t.Errorf("wrapWords(\"\") = %q, want no lines", got)
+	}
+}
+
+// TestWriteDependencyDetail_OutsideBuildLabel verifies that the "outside
+// build" label is shown only for a confirmed InBuild == &false, never for nil
+// or &true.
+func TestWriteDependencyDetail_OutsideBuildLabel(t *testing.T) {
+	trueVal, falseVal := true, false
+	noColor := func(_, s string) string { return s }
+
+	tests := []struct {
+		name    string
+		inBuild *bool
+		want    bool
+	}{
+		{"confirmed outside the build", &falseVal, true},
+		{"in build", &trueVal, false},
+		{"unknown", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := &scorer.DependencyScore{
+				Module: "github.com/charmbracelet/harmonica", Version: "v0.2.0",
+				RiskScore: 32, RiskLevel: scorer.RiskMedium, InBuild: tt.inBuild,
+			}
+			var buf bytes.Buffer
+			writeDependencyDetail(&buf, ds, noColor, false)
+			if got := strings.Contains(buf.String(), "outside build"); got != tt.want {
+				t.Errorf("label present = %v, want %v:\n%s", got, tt.want, buf.String())
+			}
+		})
 	}
 }

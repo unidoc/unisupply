@@ -35,7 +35,8 @@ type Policy struct {
 	// NoSingleMaintainer fails if any direct dependency has bus factor <= 1.
 	NoSingleMaintainer bool `json:"no_single_maintainer,omitempty"`
 
-	// NoUnmaintained fails if any dependency hasn't been released in this many months.
+	// NoUnmaintained fails if any dependency has had neither a release nor a push
+	// (GitHub pushed_at, when known) in this many months.
 	NoUnmaintainedMonths *int `json:"no_unmaintained_months,omitempty"`
 
 	// NoArchived fails if any dependency is archived.
@@ -76,15 +77,18 @@ type Policy struct {
 	// fail — this rule rejects confirmed tampering, not missing data.
 	RequireGoSumVerified bool `json:"require_gosum_verified,omitempty"`
 
-	// ForbidPseudoVersions fails if any non-test-only dependency is pinned to
-	// a pseudo-version (scorer.DependencyScore.PseudoVersion).
+	// ForbidPseudoVersions fails if any non-test-only dependency that is in the
+	// build is pinned to a pseudo-version (scorer.DependencyScore.PseudoVersion).
 	//
 	// Deliberate asymmetry with ForbidReplaceRedirect (which fires even on
 	// test-only deps because test code still runs in CI with access to
 	// secrets): a pseudo-version pin is a provenance/pinning-hygiene signal,
-	// not a hijack vector, so this rule exempts confirmed test-only deps.
-	// A nil (unknown) IsTestOnly is treated as not-test-only — deny — matching
-	// the scorer convention of under-discounting unverified classifications.
+	// not a hijack vector, so this rule exempts confirmed test-only deps and
+	// confirmed outside-the-build deps (InBuild == &false, in the module graph
+	// only), since neither is on the import path.
+	// A nil (unknown) IsTestOnly or InBuild is treated as not exempt — deny —
+	// matching the scorer convention of under-discounting unverified
+	// classifications.
 	ForbidPseudoVersions bool `json:"forbid_pseudo_versions,omitempty"`
 }
 
@@ -180,11 +184,13 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 
 		// Forbid pseudo-versions on the import path. Confirmed test-only deps
-		// (IsTestOnly == &true) are exempted; nil (unknown) is treated as
-		// not-test-only and denied.
+		// (IsTestOnly == &true) and confirmed outside-the-build deps
+		// (InBuild == &false) are exempted; nil (unknown) is treated as
+		// not exempt and denied.
 		if p.ForbidPseudoVersions && ds.PseudoVersion {
 			testOnly := ds.IsTestOnly != nil && *ds.IsTestOnly
-			if !testOnly {
+			outsideBuild := ds.InBuild != nil && !*ds.InBuild
+			if !testOnly && !outsideBuild {
 				result.addError("forbid_pseudo_versions", ds.Module,
 					fmt.Sprintf("pinned to pseudo-version %s", ds.Version))
 			}
@@ -192,9 +198,16 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// No unmaintained.
 		if p.NoUnmaintainedMonths != nil && ds.Maintenance != nil {
-			if ds.Maintenance.MonthsSinceRelease > *p.NoUnmaintainedMonths {
-				result.addError("no_unmaintained", ds.Module,
-					fmt.Sprintf("last release %d months ago (max: %d)", ds.Maintenance.MonthsSinceRelease, *p.NoUnmaintainedMonths))
+			// A module counts as maintained when it was either released or pushed
+			// to within the limit, so a repo that is active but rarely tagged
+			// passes. Without activity data this is the release age alone.
+			if ds.Maintenance.MonthsInactive() > *p.NoUnmaintainedMonths {
+				msg := fmt.Sprintf("last release %d months ago (max: %d)", ds.Maintenance.MonthsSinceRelease, *p.NoUnmaintainedMonths)
+				if ds.Maintenance.HasActivity() {
+					msg = fmt.Sprintf("last release %d months ago and last push %d months ago (max: %d)",
+						ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity, *p.NoUnmaintainedMonths)
+				}
+				result.addError("no_unmaintained", ds.Module, msg)
 			}
 		}
 

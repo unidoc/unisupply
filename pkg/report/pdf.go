@@ -814,6 +814,10 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	if ds.IsTestOnly != nil && *ds.IsTestOnly {
 		classLabel += ", test-only"
 	}
+	// Same rule for [outside build]: only when InBuild is confirmed false.
+	if ds.InBuild != nil && !*ds.InBuild {
+		classLabel += ", outside build"
+	}
 
 	// Module header.
 	header := c.NewStyledParagraph()
@@ -866,6 +870,9 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	if ds.Maintenance != nil {
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			addBullet(details, fmt.Sprintf("Last release: %d months ago", ds.Maintenance.MonthsSinceRelease), regular)
+		}
+		if ds.Maintenance.HasActivity() {
+			addBullet(details, fmt.Sprintf("Last push: %d months ago", ds.Maintenance.MonthsSinceActivity), regular)
 		}
 		if ds.Maintenance.Archived {
 			addBullet(details, "Repository archived", regular)

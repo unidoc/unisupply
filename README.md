@@ -99,7 +99,7 @@ path that pulled the module in.
 | Scanner          | What it checks                                          | Data source                |
 | ---------------- | ------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs in dependencies                              | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, archive status, deprecation               | Go Module Proxy            |
+| Maintenance      | Last release, last GitHub push, archive status, deprecation | Go Module Proxy (push date from the GitHub scan) |
 | Maintainer       | Contributors, bus factor, activity, org verification    | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules        | Built-in list              |
 | Resilience       | Release cadence, governance files, version scheme       | GitHub API                 |
@@ -133,8 +133,8 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integ
 | Candidate | Description |
 | ------------------- | ----------------------------------------------------------------- |
 | `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
-| `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
-| `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
+| `p95_dep_risk` | 95th-percentile (nearest-rank) of per-dep risk scores over the modules that are built: confirmed test-only and confirmed outside-the-build modules are excluded, and ties are broken by module path so the named module is stable (`tied_with` reports how many others share the score) |
+| `archived_floor` | HIGH floor (51) when any built transitive dep is archived; 60 for a direct archived dep. Modules confirmed test-only or outside the build do not count |
 | `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
 | `integrity_floor` | HIGH floor (51) when any transitive dep has a `replace` directive redirecting to a different module; 60 for a direct dep |
 
@@ -148,6 +148,19 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integ
 | `cve_floor` | 40 |
 
 Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
+
+**Build membership.** A module can be in your dependency graph without being
+compiled into your binary (it is required by a dependency's `go.mod` but none
+of its packages is imported). `unisupply` classifies each module against the
+main module's own `go list -deps ./...` and `go list -deps -test ./...` for
+linux, darwin and windows, and reports `in_build` (`false`: graph only),
+`test_only` and `platforms` (the GOOS values of a platform-specific module) in
+the JSON output; the text and PDF reports label such modules `outside build` or
+`test-only`. An unknown classification is omitted and never discounts. When the
+vulnerability scan found nothing reachable and the grade is decided by
+dependency health alone, the headline reason says so. See
+[docs/scanners.md](docs/scanners.md#build-membership) for the rules, limits and
+which signals honour build membership.
 
 `MeanDepRiskScore` is still available as the top-level JSON field `mean_dep_risk_score` for trend lines, but is not the headline.
 
@@ -272,6 +285,12 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
+- `no_unmaintained_months` — fail a dependency that has had neither a release
+  nor a GitHub push within that many months. A repository pushed to recently
+  passes even if its last tag is old; without push data (no token, non-GitHub
+  module) the release age alone decides.
+- `forbid_pseudo_versions` — fail on a pseudo-version pin, except for modules
+  confirmed test-only or outside the build.
 - `require_gosum_verified` — fail when `go mod verify` reported a checksum
   mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
   (offline, no go.sum, toolchain unavailable) do not fail this rule.
@@ -446,6 +465,15 @@ the same data already public in your `go.mod`.
 | `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
+
+**Vanity import paths.** A module whose path is not on `github.com` (for
+example `gopkg.in/yaml.v3` or `go.yaml.in/yaml/v3`) is mapped to its GitHub
+repository so the maintainer scanner can report archived status and activity
+for it. The mapping uses the `Origin` field of the `proxy.golang.org` responses
+the maintenance scanner already fetches, when it names a `github.com`
+repository, and a static `gopkg.in` rule that needs no request. No other host
+is contacted to resolve it, and the maintainer scanner still sends only the
+repository owner and name to `api.github.com`.
 
 **GitHub token validation.** When a token is supplied, `unisupply` checks it
 once, after resolving the dependency graph and before any scanner runs, with a

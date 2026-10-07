@@ -10,7 +10,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Scanner          | What it checks                                             | Data source                |
 | ---------------- | ---------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs (call-graph-aware via `govulncheck`)            | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, archive status, deprecation                  | Go Module Proxy            |
+| Maintenance      | Last release, last GitHub push, archive status, deprecation | Go Module Proxy (push date from the GitHub scan) |
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
@@ -19,6 +19,26 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
 | Integrity        | `go.mod` `replace`/`exclude` directive audit, `go.sum` verification, pseudo-version pin audit | `go.mod`/`go.sum` (offline) |
+
+The Maintainer scanner finds a module's GitHub repository in this order: a
+`github.com/` module path; the `Origin.URL` the module proxy reports in the
+`.info` responses the Maintenance scanner already fetches, when it points at
+`github.com`; then a static `gopkg.in` rule (`gopkg.in/pkg.vN` is
+`github.com/go-pkg/pkg`, `gopkg.in/user/pkg.vN` is `github.com/user/pkg`). This
+lets vanity paths such as `gopkg.in/yaml.v3` (archived upstream) report archive
+status, activity and maintainer data. Mapped modules carry `source_repo` and
+`source_repo_via` (`proxy_origin` or `gopkg_in_rule`) in the JSON
+`maintainer` object and a "Source repository" line in the text report. No
+extra host is contacted. Limits: modules whose proxy `Origin` is not on GitHub
+(for example `golang.org/x/*`, served from `go.googlesource.com`) and modules
+with no `Origin` outside `gopkg.in` are not covered, and the Resilience
+scanner's governance-file checks still read only `github.com/` paths.
+
+A repository that GitHub has renamed or transferred answers with a redirect.
+The Maintainer scanner follows one hop, on `api.github.com` only, and reports
+the repository under its canonical name; any other redirect target is treated
+as an error. When maintainer data cannot be collected, the scan warning names
+the cause: an unauthenticated or rate-limited GitHub API, or an API error.
 
 The CI/CD and Build-files scanners are off by default; enable them with
 `--scan-workflows` (workflow files `*.yml` and `*.yaml` only) or `--scan-ci`
@@ -269,7 +289,9 @@ Order of operations inside the project-level headline
 
 1. Normalise severity (`effectiveTier`; UNKNOWN + confirmed-called → HIGH).
 2. Reachability downgrade (`imported` −1 tier, `required` −2 tiers).
-3. Test-only downgrade (−1 tier when the dep is confirmed test-only).
+3. Test-only downgrade (−1 tier when the dep is confirmed test-only). Outside-the-build
+   status adds nothing here: the reachability tier in step 2 already encodes
+   "not linked in" (see [Build membership](#build-membership)).
 4. **EPSS amplifier** — `epss_score ≥ 0.5` and tier below CRITICAL: promote
    one tier (LOW → MEDIUM, MEDIUM → HIGH, HIGH → CRITICAL).
 5. **KEV override** — `in_kev` true: force CRITICAL.
@@ -326,7 +348,7 @@ but no package from it is compiled into your binary.
 | Component        | Range  | Notes                                                          |
 | ---------------- | ------ | -------------------------------------------------------------- |
 | Vulnerabilities  | 0–100  | CRITICAL = 100, HIGH = 80, MEDIUM = 50, LOW = 25; capped at 100 |
-| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo); 100 if archived; 30 if unknown |
+| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo), on the newer of the last release and the last GitHub push when the push date is known; 100 if archived; 30 if unknown |
 | Depth            | 0–100  | 0 (direct), 20 (depth 1), 40 (deeper)                          |
 | Maintainer       | 0–100  | 0 for trusted namespaces / multi-maintainer; 50 for bus factor 1; 30 if unknown |
 | Maturity         | 0–100  | 0 for trusted namespaces or v1+; 30 for v0.x; 50 if untagged   |
@@ -336,6 +358,32 @@ namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,
 `go.opentelemetry.io/`, `github.com/golang/`, `github.com/google/`,
 `github.com/googleapis/`, etc.) — these projects use v0.x and centralized
 maintainership by design, not neglect.
+
+### Maintenance activity
+
+The Maintenance axis does not rest on release tags alone. The module proxy
+reports the last release; the Maintainer scanner reports the repository's
+GitHub `pushed_at` date. When the push date is known the report carries it as
+`maintenance.last_activity` and `maintenance.months_since_activity`, and the
+axis bands on `min(months since release, months since push)`. The
+`unmaintained` risk factor, the `unmaintained_1yr` / `unmaintained_2yr`
+summary counts, the "no release in N months" wording in the text report and the
+`no_unmaintained_months` policy rule all use the same combined value, so the
+report, the score and the policy agree. A repository that is pushed to but
+rarely tagged (for example a module pinned to a commit newer than its last
+tag) is therefore not scored like an abandoned one. `months_since_release`
+still reports the release age on its own.
+
+Without push data (no GitHub token, a non-GitHub module, an API failure) the
+axis falls back to the release age alone, exactly as before. Archived
+repositories stay at 100 whatever their activity.
+
+Known limit: `pushed_at` counts a push to **any** branch, including bot and
+CI-maintenance pushes, so a repository that only receives automated pushes can
+look active. A stricter signal is the latest commit on the default branch
+(`GET /repos/{owner}/{repo}/commits?per_page=1`, one extra API call per
+module). It is a possible follow-up, to be revisited if bot pushes are seen
+masking abandoned repositories.
 
 ## Integrity
 
@@ -371,6 +419,12 @@ asymmetry with the headline: the `integrity_floor` headline candidate skips
 test-only dependencies, but the `forbid_replace_redirect` policy rule does
 not — test-time code still executes in CI (with access to CI secrets), so a
 hijacked test-only dependency is not a safe blind spot for policy purposes.
+
+Neither `integrity_floor` nor `forbid_replace_redirect` looks at `in_build`.
+A `replace` directive is a `go.mod`-level statement about how the module graph
+is resolved, and it applies whether or not any package of the replaced module
+is currently imported; a redirect that is dormant today becomes live the
+moment an import is added.
 
 ### go.sum verification
 
@@ -423,14 +477,15 @@ including the "pseudo-version on top of a tag" form
 
 | Condition                                     | Severity | Score effect                    |
 | ---------------------------------------------- | -------- | -------------------------------- |
-| Direct dependency, not test-only               | MEDIUM   | +4 per-dependency penalty         |
-| Transitive dependency, not test-only           | LOW      | +2 per-dependency penalty         |
 | Confirmed test-only (`IsTestOnly == &true`)     | INFO     | None — surfaced for transparency  |
+| Confirmed outside the build (`InBuild == &false`) | INFO   | None — surfaced for transparency  |
+| Direct dependency, otherwise                    | MEDIUM   | +4 per-dependency penalty         |
+| Transitive dependency, otherwise                | LOW      | +2 per-dependency penalty         |
 
-An unknown test-only classification (`IsTestOnly == nil`) is treated as
-**not** test-only, consistent with the scorer's general convention of
-under-discounting rather than silently applying a discount on unverified
-data.
+An unknown classification (`IsTestOnly == nil` or `InBuild == nil`) is treated
+as neither test-only nor outside the build, consistent with the scorer's
+general convention of under-discounting rather than silently applying a
+discount on unverified data.
 
 This is a **distinct signal** from the AI-generated-code scanner's
 `pseudo_version_only` indicator (see above): that indicator fires when a
@@ -454,11 +509,114 @@ pins such as `golang.org/x/telemetry` (which has no tagged releases) are
 common in the Go ecosystem and must not push projects to HIGH.
 
 Enable the `forbid_pseudo_versions` policy rule (on by default in the strict
-preset) to fail CI on any non-test-only pseudo-version pin. Unlike
-`forbid_replace_redirect`, this rule **does** exempt confirmed test-only
-dependencies — a pseudo-version pin is a provenance/pinning-hygiene signal,
-not a hijack vector, so test-time exposure to CI secrets is not the relevant
-threat model here.
+preset) to fail CI on any pseudo-version pin that is not test-only and not
+outside the build. Unlike `forbid_replace_redirect`, this rule **does** exempt
+confirmed test-only dependencies and confirmed outside-the-build dependencies
+— a pseudo-version pin is a provenance/pinning-hygiene signal about code on
+the import path, not a hijack vector, so test-time exposure to CI secrets is
+not the relevant threat model here.
+
+## Build membership
+
+A module can be in the dependency graph without being part of what you ship:
+`go.mod` requires it (often through a dependency's own `go.mod`), but no package
+of it is imported by your code. Scoring such a module as if it were compiled in
+makes it drive the headline for a risk it cannot cause. After the graph is
+resolved, `unisupply` therefore classifies every module against the main
+module's own package graph and records three facts per dependency in the JSON
+report.
+
+### How it is classified
+
+For each of `linux`, `darwin` and `windows`, with `CGO_ENABLED=0` and
+`CGO_ENABLED=1`, it runs two lists in the main module's directory:
+
+1. **Production:** `go list -e -deps ./...`, the modules whose packages the main
+   module's non-test code imports, directly or transitively.
+2. **Production plus tests:** `go list -e -deps -test ./...`, which adds only
+   the packages the main module's own tests import.
+
+That is 12 `go list` runs (four at a time); a module counts as present when any
+GOOS lists it. In offline mode the lists read only the local module cache and
+classification is unavailable on a cold cache. They also run with
+`-mod=readonly`, so a scan never rewrites the scanned project's `go.mod` or
+`go.sum`; if either needs updating (`go mod tidy`), classification is
+unavailable and the warning says so instead of blaming the cache.
+
+`go list all` is deliberately **not** used. For a `go.mod` that declares go 1.16
+or newer, `all` and `all -test` contain the same modules, so comparing them can
+never report a test-only module. Below go 1.16, `all` additionally contains the
+packages needed by the *dependencies'* own tests, so a module such as
+`gopkg.in/check.v1`, used only by a dependency's tests, would be classified as
+production (this is what put it at the top of the `spf13/cobra` headline). The
+`-deps ./...` lists do not have either problem, whatever `go` version `go.mod`
+declares.
+
+`-e` keeps a per-package error from failing the whole listing. A package error
+whose module is known (for example a `//go:embed` pattern that matches nothing
+because the build output is gitignored and absent from a fresh clone) is
+tolerated and named in the warning. A package that no module provides, a
+missing `go.sum` entry or a failed lookup is not tolerated: with `-e` the
+package would be listed without a module and its module would silently look
+absent, so that platform is treated as failed instead.
+
+### What it records
+
+| JSON field | Value | Meaning |
+|------------|-------|---------|
+| `test_only` | `true` | Imported only by the main module's tests: in the test list on at least one platform, in no production list |
+| | `false` | In a production list on at least one platform |
+| | absent | Unknown |
+| `in_build` | `true` | In a production or test list: some package of the module is compiled into the main module or its tests |
+| | `false` | In the module graph only: no list contains it |
+| | absent | Unknown |
+| `platforms` | `["windows"]` | A production module listed on a strict subset of the three GOOS values, for example a module imported only from a `_windows.go` file |
+| | absent | Built on all three, or unknown; not an assertion about other GOOS values |
+
+`in_build` is three-state and a consumer must never read absence as `false`:
+only an explicit `false` is a confirmed graph-only module. Every consumer
+below applies a discount only for a confirmed `false` (or a confirmed
+`test_only: true`); an unknown value never discounts. The text and PDF reports
+show an `outside build` label next to `test-only` under the same rule.
+
+### Limits and guards
+
+- **Build tags.** A package behind a custom tag (`//go:build integration`) is in
+  no list, so a module imported only there looks graph-only. Guard: a module
+  that `go.mod` requires **directly** (no `// indirect`) but that no list
+  contains gets `in_build` absent, not `false`. The guard covers direct
+  requirements only; an indirect module cannot be imported by the main module
+  itself, so graph-only is the likely reason it was not found.
+- **Platforms.** Only `linux`, `darwin` and `windows` are listed, and GOARCH is
+  not varied. A module imported only on another GOOS, or only on a particular
+  architecture, is not seen.
+- **Per-platform failure.** A GOOS whose lists fail (for example a package that
+  does not build on Windows) does not discard the others. Everything the failed
+  runs did resolve still counts as evidence that a module is built; the
+  platforms that succeeded classify the rest. A failed platform cannot prove
+  that a module is absent, so while any platform has failed, a module found on
+  no list gets `in_build` absent rather than `false`, a `test_only: true`
+  verdict is withheld (the module may be production on the failed platform) and
+  `platforms` is left unset. The warning names the failing GOOS. Only when
+  every platform fails is classification unavailable: every field stays absent
+  and a warning says so.
+
+### What honours it
+
+| Consumer | Test-only | Outside the build | Notes |
+|----------|-----------|-------------------|-------|
+| `p95_dep_risk` population | excluded | excluded | See [Headline candidates](#headline-candidates) |
+| `archived_floor` | skipped | skipped | An archived module that is never compiled in cannot be an unpatchable risk to the build |
+| Time bombs (archived, KEV, CRITICAL CVE) | skipped | skipped | Nothing that is not compiled in can detonate in the shipped code |
+| Pseudo-version pin severity and penalty | INFO, no penalty | INFO, no penalty | See [Pseudo-version pins](#pseudo-version-pins) |
+| `forbid_pseudo_versions` policy rule | exempt | exempt | Same reason |
+| CVE severity downgrade (`severity_adjusted`) | −1 tier | not applied | Reachability already downgrades a CVE in a module that is not linked in (`required` tier); a second discount would count the same fact twice |
+| `cve_floor` | skipped | not applied | Same reason |
+| `integrity_floor`, `forbid_replace_redirect` | `integrity_floor` skips; policy rule does not | not applied | A `replace` directive is a `go.mod`-level signal; see [Integrity](#integrity) |
+
+Because test-only classification now works, every test-only discount above
+applies to real scans for the first time, so scores and policy results can
+change for repositories with test-only dependencies.
 
 ## Risk bands
 
@@ -471,6 +629,48 @@ threat model here.
 
 ## Overall project score
 
-The project-level score in the report header is computed in
-`computeOverallScore` from the per-dependency scores. See
-`pkg/scorer/risk.go` for the exact aggregation.
+The project-level score in the report header is the highest of five
+candidates; see `pkg/scorer/risk.go` for the exact aggregation. A tie between
+candidates is resolved in this order: `severity_adjusted`, `p95_dep_risk`,
+`archived_floor`, `cve_floor`, `integrity_floor`.
+
+### Headline candidates
+
+| Candidate | What it measures |
+|-----------|------------------|
+| `severity_adjusted` | Step function over the reachability- and test-only-downgraded CVE counts |
+| `p95_dep_risk` | 95th percentile (nearest rank) of per-dependency risk scores over the modules that are built |
+| `archived_floor` | 51 (HIGH) for an archived built module, 60 for a direct one |
+| `cve_floor` | Floor from the post-reachability tier of the worst CVE |
+| `integrity_floor` | 51 or 60 for a redirect `replace`; CRITICAL on a `go.sum` mismatch |
+
+**`p95_dep_risk` population.** Confirmed test-only modules and confirmed
+outside-the-build modules (`in_build: false`) are not in the population. A
+module whose classification is unknown (`nil`) is counted: unavailable
+classification means "assume built", which under-discounts rather than hiding a
+module. If every dependency is filtered out the candidate is 0, as for an empty
+graph. The non-normative `mean_dep_risk_score` and
+`diagnostics.max_dep_risk_score` still cover the whole graph, while
+`diagnostics.p95_dep_risk_score` mirrors this candidate.
+
+**Deterministic driver, `tied_with`.** Scores tie often (a 4-way tie at the p95
+index is common), and which tied module is named used to depend on map order.
+Modules are now ordered by score and then by module path, so the same inputs
+always name the same module. When other built modules share the p95 score the
+headline candidate carries `tied_with` (the number of *other* modules at that
+score) and its reason reads "one of N modules at S"; the `driving_item` is then
+one of N equally scored modules, not the sole cause.
+
+**Archived floor.** Only built modules can set it, with the same
+unknown-counts rule as the p95 population.
+
+**Health-only headline.** When the vulnerability scan ran and
+`severity_adjusted`, `cve_floor` and `integrity_floor` are all 0, the grade is
+decided by dependency health alone. The headline reason then starts with "no
+reachable vulnerabilities; grade reflects dependency health (maintenance,
+maturity) of built modules", so a reader does not take the driving module for a
+vulnerability finding. This is an explanation only; the score and level are
+unchanged. When no dependency has an `in_build` verdict the reason says "of all
+modules in the dependency graph (build classification unavailable)" instead.
+The separate case where the vulnerability scan did not run is the
+[unscored headline](#unscored-headline).

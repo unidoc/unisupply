@@ -121,10 +121,21 @@ type JSONDependency struct {
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
-	// failed or was not run). When present it reflects the authoritative
-	// go list -m -json -test result: true = confirmed test-only,
-	// false = confirmed production. Never infer "false" from absence.
-	TestOnly       *bool               `json:"test_only,omitempty"`
+	// failed or was not run). When present it reflects the main module's own
+	// go list -deps ./... and go list -deps -test ./... results: true =
+	// confirmed test-only, false = confirmed production. Never infer "false"
+	// from absence.
+	TestOnly *bool `json:"test_only,omitempty"`
+	// InBuild is omitted when nil (classification unavailable or not safe to
+	// give). false = confirmed in the module graph only: no package of the
+	// module is imported by the main module's code or tests. Never infer
+	// "true" from absence.
+	InBuild *bool `json:"in_build,omitempty"`
+	// Platforms lists the GOOS values on which a production module is built,
+	// and is present only when that is a strict subset of the platforms
+	// listed (for example a Windows-only import). Absent means all platforms
+	// or unknown.
+	Platforms      []string            `json:"platforms,omitempty"`
 	RiskScore      int                 `json:"risk_score"`
 	RiskLevel      string              `json:"risk_level"`
 	ScoreBreakdown *JSONScoreBreakdown `json:"score_breakdown"`
@@ -190,8 +201,15 @@ type JSONVuln struct {
 type JSONMaintenance struct {
 	LastRelease        string `json:"last_release"`
 	MonthsSinceRelease int    `json:"months_since_release"`
-	Archived           bool   `json:"archived"`
-	Deprecated         bool   `json:"deprecated"`
+	// LastActivity is the GitHub pushed_at date (any branch, bots included),
+	// RFC3339. Absent when repository activity is unknown (no token, non-GitHub
+	// module, API failure); consumers must not read absence as "never pushed".
+	LastActivity string `json:"last_activity,omitempty"`
+	// MonthsSinceActivity is omitted together with LastActivity. It is a
+	// pointer so a push this month (0) is still reported.
+	MonthsSinceActivity *int `json:"months_since_activity,omitempty"`
+	Archived            bool `json:"archived"`
+	Deprecated          bool `json:"deprecated"`
 }
 
 // JSONMaintainer holds maintainer analysis info.
@@ -199,24 +217,31 @@ type JSONMaintainer struct {
 	// DataAvailable is false when the GitHub API was unreachable or rate-limited.
 	// When false, numeric fields (Stars, BusFactor, etc.) are zero and must not
 	// be interpreted as real measurements.
-	DataAvailable     bool     `json:"data_available"`
-	UnavailableReason string   `json:"unavailable_reason,omitempty"`
-	OwnerName         string   `json:"owner_name,omitempty"`
-	OwnerLocation     string   `json:"owner_location,omitempty"`
-	OwnerCompany      string   `json:"owner_company,omitempty"`
-	OwnerURL          string   `json:"owner_url,omitempty"`
-	IsOrg             bool     `json:"is_org,omitempty"`
-	BusinessModel     string   `json:"business_model,omitempty"`
-	License           string   `json:"license,omitempty"`
-	ContributorCount  int      `json:"contributor_count,omitempty"`
-	TopContributors   []string `json:"top_contributors,omitempty"`
-	BusFactor         int      `json:"bus_factor,omitempty"`
-	ActivityPattern   string   `json:"activity_pattern,omitempty"`
-	LastCommitDate    string   `json:"last_commit_date,omitempty"`
-	Stars             *int     `json:"stars,omitempty"`
-	Forks             *int     `json:"forks,omitempty"`
-	OpenIssues        *int     `json:"open_issues,omitempty"`
-	SubDependencies   int      `json:"sub_dependencies,omitempty"`
+	DataAvailable     bool   `json:"data_available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	// SourceRepo and SourceRepoVia name the GitHub repository a non-github.com
+	// module was mapped to ("github.com/go-yaml/yaml", "gopkg_in_rule" or
+	// "proxy_origin"). They are omitted when the module path is a github.com
+	// path, and are kept when DataAvailable is false: they describe where the
+	// scanner looked, not what it measured.
+	SourceRepo       string   `json:"source_repo,omitempty"`
+	SourceRepoVia    string   `json:"source_repo_via,omitempty"`
+	OwnerName        string   `json:"owner_name,omitempty"`
+	OwnerLocation    string   `json:"owner_location,omitempty"`
+	OwnerCompany     string   `json:"owner_company,omitempty"`
+	OwnerURL         string   `json:"owner_url,omitempty"`
+	IsOrg            bool     `json:"is_org,omitempty"`
+	BusinessModel    string   `json:"business_model,omitempty"`
+	License          string   `json:"license,omitempty"`
+	ContributorCount int      `json:"contributor_count,omitempty"`
+	TopContributors  []string `json:"top_contributors,omitempty"`
+	BusFactor        int      `json:"bus_factor,omitempty"`
+	ActivityPattern  string   `json:"activity_pattern,omitempty"`
+	LastCommitDate   string   `json:"last_commit_date,omitempty"`
+	Stars            *int     `json:"stars,omitempty"`
+	Forks            *int     `json:"forks,omitempty"`
+	OpenIssues       *int     `json:"open_issues,omitempty"`
+	SubDependencies  int      `json:"sub_dependencies,omitempty"`
 }
 
 // JSONScoreBreakdown shows how the risk score was computed.
@@ -332,6 +357,9 @@ type JSONCandidate struct {
 	Score      float64 `json:"score"`
 	DrivingDep string  `json:"driving_dep,omitempty"`
 	Reason     string  `json:"reason,omitempty"`
+	// TiedWith is the number of other modules sharing the p95_dep_risk
+	// candidate's score; omitted when zero. See scorer.HeadlineCandidate.
+	TiedWith int `json:"tied_with,omitempty"`
 }
 
 // JSONTimeBomb represents a dependency with an immediate, undeniable risk
@@ -416,6 +444,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
 			TestOnly:       ds.IsTestOnly,
+			InBuild:        ds.InBuild,
+			Platforms:      ds.Platforms,
 			RiskScore:      ds.RiskScore,
 			RiskLevel:      string(ds.RiskLevel),
 			ScoreBreakdown: buildScoreBreakdown(ds),
@@ -469,6 +499,11 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				Archived:           ds.Maintenance.Archived,
 				Deprecated:         ds.Maintenance.Deprecated,
 			}
+			if ds.Maintenance.HasActivity() {
+				monthsSinceActivity := ds.Maintenance.MonthsSinceActivity
+				jd.Maintenance.LastActivity = ds.Maintenance.LastActivity.Format(time.RFC3339)
+				jd.Maintenance.MonthsSinceActivity = &monthsSinceActivity
+			}
 		}
 
 		if ds.MaintainerInfo != nil {
@@ -476,6 +511,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			jm := &JSONMaintainer{
 				DataAvailable:     mi.DataAvailable,
 				UnavailableReason: mi.UnavailableReason,
+				SourceRepo:        mi.SourceRepo,
+				SourceRepoVia:     mi.SourceRepoVia,
 			}
 			// Only populate measurement fields when the API call succeeded.
 			// When DataAvailable is false the GitHub API was unreachable or
@@ -708,6 +745,7 @@ func jsonHeadline(ps *scorer.ProjectScore) JSONHeadline {
 			Score:      hc.Score,
 			DrivingDep: hc.DrivingDep,
 			Reason:     hc.Reason,
+			TiedWith:   hc.TiedWith,
 		}}
 	}
 	return h

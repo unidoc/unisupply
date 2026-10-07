@@ -1456,3 +1456,35 @@ func TestEvaluate_NilMaintainerInfo(t *testing.T) {
 		t.Errorf("expected no violations for nil maintainer info, got %d", len(result.Violations))
 	}
 }
+
+// TestEvaluate_ForbidPseudoVersions_InBuild verifies that a confirmed
+// outside-the-build (InBuild == &false) pseudo-version pin is exempted, while a
+// nil (unknown) or &true InBuild is still denied.
+func TestEvaluate_ForbidPseudoVersions_InBuild(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+	inBuild, outside := true, false
+
+	tests := []struct {
+		name     string
+		inBuild  *bool
+		wantPass bool
+	}{
+		{"outside the build is exempt", &outside, true},
+		{"in build is denied", &inBuild, false},
+		{"unknown InBuild is denied", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := []*scorer.DependencyScore{{
+				Module:        "github.com/kr/pty",
+				Version:       "v0.0.0-20220101000000-abc123def456",
+				PseudoVersion: true,
+				InBuild:       tt.inBuild,
+			}}
+			result := p.Evaluate(makeEvalInput(deps, 30))
+			if result.Pass != tt.wantPass {
+				t.Errorf("Pass = %v, want %v: %+v", result.Pass, tt.wantPass, result.Violations)
+			}
+		})
+	}
+}

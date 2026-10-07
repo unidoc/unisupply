@@ -792,3 +792,104 @@ func TestWriteJSON_TimeBombReachability(t *testing.T) {
 		t.Errorf("archived time_bomb reachability key must be absent, got %v", v)
 	}
 }
+
+// TestWriteJSON_InBuildAndPlatforms verifies that in_build is emitted for both
+// true and false, omitted for nil, and that platforms is emitted when set.
+func TestWriteJSON_InBuildAndPlatforms(t *testing.T) {
+	trueVal, falseVal := true, false
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/a/outside", Version: "v1.0.0", Depth: 1, InBuild: &falseVal},
+		testutil.DepSpec{Path: "github.com/b/built", Version: "v1.0.0", Depth: 1, InBuild: &trueVal},
+		testutil.DepSpec{Path: "github.com/c/unknown", Version: "v1.0.0", Depth: 1},
+	)
+	ps := &scorer.ProjectScore{
+		OverallScore: 10,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/a/outside", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow, InBuild: &falseVal},
+			{Module: "github.com/b/built", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow, InBuild: &trueVal, Platforms: []string{"windows"}},
+			{Module: "github.com/c/unknown", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow},
+		},
+		LowRiskCount: 3,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	// Decode into maps to check key presence, not just value.
+	var raw struct {
+		Deps []map[string]interface{} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	byModule := map[string]map[string]interface{}{}
+	for _, d := range raw.Deps {
+		byModule[d["module"].(string)] = d
+	}
+
+	if v, ok := byModule["github.com/a/outside"]["in_build"]; !ok || v != false {
+		t.Errorf("outside: in_build = %v (present=%v), want false emitted", v, ok)
+	}
+	if _, ok := byModule["github.com/a/outside"]["platforms"]; ok {
+		t.Errorf("outside: platforms present, want omitted when empty")
+	}
+	if v, ok := byModule["github.com/b/built"]["in_build"]; !ok || v != true {
+		t.Errorf("built: in_build = %v (present=%v), want true", v, ok)
+	}
+	if p, _ := byModule["github.com/b/built"]["platforms"].([]interface{}); len(p) != 1 || p[0] != "windows" {
+		t.Errorf("built: platforms = %v, want [windows]", byModule["github.com/b/built"]["platforms"])
+	}
+	for _, key := range []string{"in_build", "platforms"} {
+		if _, ok := byModule["github.com/c/unknown"][key]; ok {
+			t.Errorf("unknown: %s present for nil, want omitted", key)
+		}
+	}
+}
+
+// TestWriteJSON_HeadlineTiedWith verifies that tied_with reaches the JSON
+// headline candidate when set and is omitted otherwise, and that headline.reason
+// and the candidate reason agree.
+func TestWriteJSON_HeadlineTiedWith(t *testing.T) {
+	render := func(tiedWith int, reason string) map[string]interface{} {
+		ps := &scorer.ProjectScore{
+			OverallScore:      32,
+			OverallLevel:      scorer.RiskMedium,
+			HeadlineDriver:    "p95_dep_risk",
+			HeadlineCandidate: &scorer.HeadlineCandidate{Name: "p95_dep_risk", Score: 32, DrivingDep: "github.com/x/y", Reason: reason, TiedWith: tiedWith},
+			Dependencies: []*scorer.DependencyScore{
+				{Module: "github.com/x/y", Version: "v1.0.0", RiskScore: 32, RiskLevel: scorer.RiskMedium},
+			},
+		}
+		graph := testutil.MakeGraph(testutil.DepSpec{Path: "github.com/x/y", Version: "v1.0.0"})
+		var buf bytes.Buffer
+		if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+			t.Fatalf("WriteJSON() failed: %v", err)
+		}
+		var raw struct {
+			Headline map[string]interface{} `json:"headline"`
+		}
+		if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+			t.Fatalf("failed to unmarshal JSON: %v", err)
+		}
+		return raw.Headline
+	}
+
+	const tied = "p95 of dep risk scores (one of 4 modules at 32)"
+	h := render(3, tied)
+	cand := h["candidates"].([]interface{})[0].(map[string]interface{})
+	if cand["tied_with"] != float64(3) {
+		t.Errorf("candidate tied_with = %v, want 3", cand["tied_with"])
+	}
+	if h["reason"] != tied || cand["reason"] != tied {
+		t.Errorf("headline.reason = %v, candidate reason = %v, want both %q", h["reason"], cand["reason"], tied)
+	}
+
+	h = render(0, "p95 of dep risk scores")
+	cand = h["candidates"].([]interface{})[0].(map[string]interface{})
+	if _, ok := cand["tied_with"]; ok {
+		t.Errorf("candidate tied_with present for zero, want omitted")
+	}
+}

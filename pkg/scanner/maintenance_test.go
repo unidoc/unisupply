@@ -418,7 +418,7 @@ func TestMaintenanceScanner_FetchLatestVersion_Success(t *testing.T) {
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = server.URL
 
-	version, timestamp := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
+	version, timestamp, _ := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
 
 	if version != "v1.0.0" {
 		t.Errorf("version = %q, want %q", version, "v1.0.0")
@@ -437,7 +437,7 @@ func TestMaintenanceScanner_FetchLatestVersion_ProxyError(t *testing.T) {
 	ms := NewMaintenanceScanner(1 * time.Millisecond) // Very short timeout
 	ms.proxyURL = server.URL
 
-	version, timestamp := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
+	version, timestamp, _ := ms.fetchLatestVersion(context.Background(), "github.com/foo/bar")
 
 	if version != "" {
 		t.Errorf("version should be empty on error, got %q", version)

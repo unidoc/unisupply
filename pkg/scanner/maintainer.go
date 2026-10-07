@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,17 @@ import (
 // exhausted (X-RateLimit-Remaining: 0 on a 403 or 429 response).
 var errRateLimited = errors.New("github rate limit exceeded")
 
+// Values of MaintainerInfo.UnavailableReason.
+const (
+	// UnavailableRateLimited means GitHub rejected the request for exceeding
+	// the API rate limit.
+	UnavailableRateLimited = "rate_limited"
+
+	// UnavailableAPIError means the repository request failed for any other
+	// reason: a network error, a non-200 status, or an unusable response.
+	UnavailableAPIError = "github_api_error"
+)
+
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
 	// DataAvailable is false when the GitHub API was unreachable, returned a
@@ -32,8 +44,21 @@ type MaintainerInfo struct {
 	DataAvailable     bool   `json:"data_available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 
-	Owner            string    `json:"owner"`
-	Repo             string    `json:"repo"`
+	// Owner and Repo are the repository's canonical GitHub name as reported by
+	// the API, which differs from the name in the module path (or proxy Origin)
+	// when the repository was renamed or transferred. They are the requested
+	// name when the repository could not be fetched.
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+
+	// SourceRepo is the GitHub repository the data was read from, as
+	// "github.com/owner/repo", and SourceRepoVia says how the module was
+	// mapped to it (SourceViaProxyOrigin or SourceViaGopkgIn). Both are set
+	// only when the module path itself is not a github.com path, so a reader
+	// can see why a vanity module is reported against that repository.
+	SourceRepo    string `json:"source_repo,omitempty"`
+	SourceRepoVia string `json:"source_repo_via,omitempty"`
+
 	OwnerName        string    `json:"owner_name"`     // display name of owner
 	OwnerLocation    string    `json:"owner_location"` // country/city
 	OwnerCompany     string    `json:"owner_company"`  // company affiliation
@@ -113,6 +138,9 @@ type MaintainerScanner struct {
 	diskCache *maintainerCache
 	mu        sync.Mutex
 
+	// repoLocks holds one mutex per owner/repo, guarded by mu.
+	repoLocks map[string]*sync.Mutex
+
 	// ScanStart is the reference time used for all age/activity classifications.
 	// It is truncated to the start of a UTC day so that two scans on the same
 	// calendar day produce identical band results for the same lastCommit.
@@ -125,23 +153,33 @@ type MaintainerScanner struct {
 	// warning does not tell the user to set a token they did set.
 	TokenRejected bool
 
+	// OriginURLs maps a module path to the Origin.URL its module proxy .info
+	// reported (see OriginURLs, MaintenanceInfo.OriginURL). It lets vanity
+	// modules whose proxy Origin is a github.com repository be scanned. It is
+	// optional: without it only github.com and gopkg.in paths resolve. It must
+	// not be modified while a scan is running.
+	OriginURLs map[string]string
+
 	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
 	// per scanner instance, even when many goroutines hit the limit simultaneously.
 	rateLimitWarnOnce sync.Once
 }
 
 // CountGitHubDeps returns the number of dependencies in graph whose module path
-// resolves to a GitHub-hosted repository. Used to estimate API call volume
-// before scanning so callers can warn when the unauthenticated rate limit
-// (60 req/hr, ~20 deps at 3 calls each) is likely to be exceeded.
+// resolves to a GitHub-hosted repository, by module path or the gopkg.in rule.
+// It does not know proxy Origins; see CountGitHubDepsWithOrigins.
 func CountGitHubDeps(graph *resolver.Graph) int {
-	n := 0
-	for _, dep := range graph.Dependencies {
-		if owner, repo := parseGitHubPath(dep.Module.Path); owner != "" && repo != "" {
-			n++
-		}
-	}
-	return n
+	return CountGitHubDepsWithOrigins(graph, nil)
+}
+
+// CountGitHubDepsWithOrigins returns the number of dependencies in graph that
+// the maintainer scanner will query GitHub for: those ResolveSourceRepo maps
+// to a repository given originURLs (module path to proxy Origin.URL, see
+// OriginURLs). Used to estimate API call volume before scanning so callers can
+// warn when the unauthenticated rate limit (60 req/hr, ~20 deps at 3 calls
+// each) is likely to be exceeded.
+func CountGitHubDepsWithOrigins(graph *resolver.Graph, originURLs map[string]string) int {
+	return len(resolveSourceRepos(graph, originURLs))
 }
 
 // NewMaintainerScanner creates a new maintainer scanner with a disk-backed
@@ -162,6 +200,7 @@ func NewMaintainerScanner(timeout time.Duration, githubToken string) *Maintainer
 // githubRepo represents relevant fields from the GitHub repos API.
 type githubRepo struct {
 	Name        string `json:"name"`
+	FullName    string `json:"full_name"`
 	Description string `json:"description"`
 	Archived    bool   `json:"archived"`
 	Disabled    bool   `json:"disabled"`
@@ -209,31 +248,27 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	sem := make(chan struct{}, 5)
 
 	// Pre-count GitHub-resolvable modules so Progress totals are accurate.
-	var ghDeps []*resolver.Dependency
-	type ownerRepo struct{ owner, repo string }
-	repos := make(map[*resolver.Dependency]ownerRepo)
+	repos := resolveSourceRepos(graph, ms.OriginURLs)
+	ghDeps := make([]*resolver.Dependency, 0, len(repos))
 	for _, dep := range graph.Dependencies {
-		owner, repo := parseGitHubPath(dep.Module.Path)
-		if owner == "" || repo == "" {
-			continue
+		if _, ok := repos[dep.Module.Path]; ok {
+			ghDeps = append(ghDeps, dep)
 		}
-		ghDeps = append(ghDeps, dep)
-		repos[dep] = ownerRepo{owner, repo}
 	}
 	total := len(ghDeps)
 
 	var done int64
 
 	for _, dep := range ghDeps {
-		or := repos[dep]
+		src := repos[dep.Module.Path]
 		wg.Add(1)
-		go func(d *resolver.Dependency, owner, repo string) {
+		go func(d *resolver.Dependency, src sourceRepo) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := ms.analyzeRepo(ctx, owner, repo)
+			info := ms.analyzeRepo(ctx, src.owner, src.repo)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
@@ -243,11 +278,15 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 				// and all report whichever one wrote last.
 				mi := *info
 				mi.SubDependencies = d.TransitiveDeps
+				if src.via != SourceViaModulePath {
+					mi.SourceRepo = "github.com/" + src.owner + "/" + src.repo
+					mi.SourceRepoVia = src.via
+				}
 				mu.Lock()
 				results[d.Module.Path] = &mi
 				mu.Unlock()
 			}
-		}(dep, or.owner, or.repo)
+		}(dep, src)
 	}
 
 	wg.Wait()
@@ -256,6 +295,28 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 
 func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string) *MaintainerInfo {
 	cacheKey := owner + "/" + repo
+	ms.mu.Lock()
+	if cached, ok := ms.cache[cacheKey]; ok {
+		ms.mu.Unlock()
+		return cached
+	}
+	// Serialize lookups of one repository. Modules from the same repository
+	// (gopkg.in/yaml.v2 and .v3, foo/bar and foo/bar/v2) are scanned
+	// concurrently, and checking the cache alone lets each of them miss and
+	// fetch the repository again, spending the API quota several times over.
+	if ms.repoLocks == nil {
+		ms.repoLocks = make(map[string]*sync.Mutex)
+	}
+	lock, ok := ms.repoLocks[cacheKey]
+	if !ok {
+		lock = new(sync.Mutex)
+		ms.repoLocks[cacheKey] = lock
+	}
+	ms.mu.Unlock()
+
+	lock.Lock()
+	defer lock.Unlock()
+
 	ms.mu.Lock()
 	if cached, ok := ms.cache[cacheKey]; ok {
 		ms.mu.Unlock()
@@ -273,7 +334,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 	repoData, err := ms.fetchRepo(ctx, owner, repo)
 	if err != nil {
 		if errors.Is(err, errRateLimited) {
-			info.UnavailableReason = "rate_limited"
+			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
 			if ms.TokenRejected {
@@ -283,7 +344,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
 		} else {
-			info.UnavailableReason = "github_api_error"
+			info.UnavailableReason = UnavailableAPIError
 		}
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
@@ -293,6 +354,15 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 
 	// The primary API call succeeded: all fields that follow are real data.
 	info.DataAvailable = true
+
+	// Use the repository's canonical name from here on. A renamed or
+	// transferred repository (an old name in go.mod, or in a proxy Origin) is
+	// served through a redirect, and the owner and contributors endpoints
+	// built from the old name would redirect or 404 as well.
+	if o, r := canonicalRepoName(repoData.FullName); o != "" {
+		owner, repo = o, r
+		info.Owner, info.Repo = o, r
+	}
 
 	info.Description = repoData.Description
 	info.IsArchived = repoData.Archived
@@ -426,15 +496,31 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 	if ms.token != "" {
 		auth = "Bearer " + ms.token
 	}
-	body, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host:       "api.github.com",
+	opts := GetOptions{
+		Host:       githubAPIHost,
 		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
 		AuthHeader: auth,
 		Accept:     "application/vnd.github.v3+json",
 		Purpose:    purpose,
-	})
+	}
+	body, resp, err := ms.client.Get(ctx, url, opts)
 	if err != nil {
 		return nil, err
+	}
+
+	// GitHub answers a renamed or transferred repository with a redirect to
+	// its canonical /repositories/{id} URL, and the shared client blocks
+	// redirects. Follow one hop here, same host only, and only for this
+	// scanner: a second redirect or any other target is an error below.
+	if isRedirectStatus(resp.StatusCode) {
+		target, ok := githubAPIRedirectTarget(resp.Header.Get("Location"))
+		if !ok {
+			return nil, fmt.Errorf("GitHub API returned %d for %s with an unusable redirect", resp.StatusCode, url)
+		}
+		body, resp, err = ms.client.Get(ctx, target, opts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
@@ -453,12 +539,55 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
 
-	// Persist only on success; non-200 responses are never cached.
+	// Persist only on success; non-200 responses are never cached. The body is
+	// stored under the original URL, so a later run is served from the cache
+	// without repeating the redirect.
 	if ms.diskCache != nil {
 		_ = ms.diskCache.Put(url, body) // ignore cache-write errors — not fatal
 	}
 
 	return body, nil
+}
+
+// githubAPIHost is the only host the maintainer scanner talks to, and the only
+// host a redirect may lead to.
+const githubAPIHost = "api.github.com"
+
+// isRedirectStatus reports whether code is a redirect GitHub uses for moved
+// resources.
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
+// githubAPIRedirectTarget returns location when it is an absolute https URL on
+// api.github.com, with no credentials or port. Anything else (another host,
+// plain http, a relative reference, an empty header) is rejected, so a
+// redirect cannot move the request, or its Authorization header, off GitHub's
+// API.
+func githubAPIRedirectTarget(location string) (string, bool) {
+	u, err := url.Parse(location)
+	if err != nil || u.Scheme != "https" || u.User != nil || !strings.EqualFold(u.Host, githubAPIHost) {
+		return "", false
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return "", false
+	}
+	return u.String(), true
+}
+
+// canonicalRepoName splits a GitHub full_name ("owner/repo") into its parts,
+// returning empty strings when it is not exactly that shape.
+func canonicalRepoName(fullName string) (owner, repo string) {
+	owner, repo, ok := strings.Cut(fullName, "/")
+	if !ok || !ownerNamePattern.MatchString(owner) || !repoNamePattern.MatchString(repo) {
+		return "", ""
+	}
+	return owner, repo
 }
 
 // classifyActivity returns "active", "sporadic", "inactive", or "unknown"

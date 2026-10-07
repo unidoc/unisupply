@@ -3,14 +3,19 @@ package resolver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"golang.org/x/mod/semver"
 
@@ -30,17 +35,45 @@ type Dependency struct {
 	TransitiveDeps int      // how many dependencies this module itself pulls in
 
 	// IsTestOnly is a three-state field indicating whether this module is
-	// exclusively required for testing:
+	// exclusively required for testing. It is derived from the main module's
+	// own package graph (see classifyTestOnlyDeps), not from the module graph:
 	//
-	//   nil          — unknown; go list -m -json -test failed or was not run.
-	//                  Task 10's test-only severity discount MUST NOT fire when
-	//                  this is nil — under-discounting is safer than a silent
-	//                  wrong discount on an unverified classification.
-	//   &false       — confirmed production dependency (appears in non-test
-	//                  import graph of the main module).
-	//   &true        — confirmed test-only dependency (go list reports Test:true,
-	//                  meaning it only appears via test imports of the main module).
+	//   nil    - unknown. Classification was unavailable, the module is in
+	//            neither package list (see InBuild), or a platform could not be
+	//            listed and a test-only verdict could not be proven. A
+	//            test-only discount MUST NOT fire on nil: under-discounting is
+	//            safer than a silent wrong discount on an unverified
+	//            classification.
+	//   &false - confirmed production dependency: a package of this module is
+	//            imported by non-test code of the main module on at least one
+	//            GOOS.
+	//   &true  - confirmed test-only dependency: imported by the main module's
+	//            tests but by no production package on any GOOS.
 	IsTestOnly *bool
+
+	// InBuild is a three-state field indicating whether any package of this
+	// module is compiled into the main module's production code or tests
+	// (any of linux, darwin, windows, with cgo on or off):
+	//
+	//   nil    - unknown: classification was unavailable; or the module was
+	//            found by no list but the verdict is not safe to give (the
+	//            main module requires it directly, so it may be imported only
+	//            under a custom build tag, or a platform could not be listed).
+	//   &true  - at least one package of the module is in a production or test
+	//            package list.
+	//   &false - classification succeeded and no package of the module is in
+	//            any list: it is in the module graph only (for example it is
+	//            required by a dependency that the main module uses only in
+	//            part). Dependencies' own tests do not count.
+	InBuild *bool
+
+	// Platforms lists the GOOS values on which a production module is built,
+	// sorted. It is set only when the module is in the production package
+	// list of a strict subset of the GOOS values that were listed, so a nil
+	// value means "all listed platforms" (or unknown), not "none". It is left
+	// nil when any GOOS could not be listed, because a subset claim over a
+	// platform that was not observed cannot be backed.
+	Platforms []string
 }
 
 // Graph holds the resolved dependency graph.
@@ -122,10 +155,11 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 		}
 	}
 
-	// Classify test-only deps via `go list -m -json -test all`. This is a
-	// best-effort enrichment: if it fails (air-gapped CI, vendor-only mode,
-	// network issue), IsTestOnly stays nil on all deps and a warning is
-	// appended so the caller knows the discount cannot be applied.
+	// Classify test-only and in-build deps from the main module's package
+	// graph. This is a best-effort enrichment: if it fails (air-gapped CI,
+	// vendor-only mode, network issue), IsTestOnly and InBuild stay nil on all
+	// deps and a warning is appended so the caller knows the classification
+	// cannot be applied.
 	if listWarn := classifyTestOnlyDeps(ctx, filepath.Dir(gomodPath), graph); listWarn != "" {
 		warnings = append(warnings, listWarn)
 	}
@@ -266,106 +300,436 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 	return nil
 }
 
-// classifyTestOnlyDeps determines which modules are used exclusively in test
-// code by comparing two `go list` package graphs:
+// listGOOS are the target operating systems whose package graphs are unioned.
+// `go list` evaluates build constraints for one GOOS at a time, so a module
+// imported only from a _windows.go file is invisible on a darwin or linux host.
+// Sorted, so Dependency.Platforms comes out sorted without a further pass.
+// GOARCH-only differences are out of scope.
+var listGOOS = []string{"darwin", "linux", "windows"}
+
+// maxParallelLists bounds the concurrent `go list` subprocesses. Each one
+// loads the whole package graph, so the limit keeps memory and cache
+// contention modest while still overlapping the I/O-bound parts.
+const maxParallelLists = 4
+
+// listRun identifies one `go list` invocation.
+type listRun struct {
+	goos string
+	cgo  bool // CGO_ENABLED=1; false lists with CGO_ENABLED=0
+	test bool // include the main module's tests (-test)
+}
+
+// listResult is the outcome of one listRun.
+type listResult struct {
+	// mods is the set of module paths of every package the run resolved. It
+	// is valid positive evidence even when the run also reports unresolved
+	// packages: a module that was seen is in the build.
+	mods map[string]struct{}
+
+	// unresolved holds the import paths that could not be mapped to a module
+	// (no required module provides them, go.sum entry missing, lookup
+	// disabled or failed). Each one hides a module, so the run cannot prove
+	// anything about modules it did not see.
+	unresolved []string
+
+	// tolerated holds "package: reason" notes for per-package errors whose
+	// module is still known, such as an unmatched //go:embed pattern.
+	tolerated []string
+
+	// err is a toolchain-level failure (the command did not run or exited
+	// non-zero); mods is empty in that case.
+	err error
+
+	// needsModUpdate is set when the run failed, or left packages unresolved,
+	// because go.mod or go.sum would have to be changed. It can only happen
+	// under -mod=readonly (see listArgs).
+	needsModUpdate bool
+}
+
+// platformList merges the runs of one GOOS: production and test module sets
+// are the union over CGO_ENABLED=0 and CGO_ENABLED=1.
+type platformList struct {
+	goos       string
+	prod, test map[string]struct{}
+	unresolved []string
+	err        error
+
+	// needsModUpdate is true when any run of this GOOS reported that go.mod or
+	// go.sum needs updating.
+	needsModUpdate bool
+}
+
+// clean reports whether every run for this GOOS completed and mapped every
+// package to a module. Only a clean platform can prove that a module is absent.
+func (p *platformList) clean() bool {
+	return p.err == nil && len(p.unresolved) == 0
+}
+
+// failure describes why the platform is not clean, for the warning text.
+func (p *platformList) failure() string {
+	if p.err != nil {
+		return p.err.Error()
+	}
+	names := slices.Clone(p.unresolved)
+	if len(names) > 3 {
+		names = append(names[:3], "...")
+	}
+	return "unresolved packages: " + strings.Join(names, ", ")
+}
+
+// classifyTestOnlyDeps classifies each module in graph against the main
+// module's own package graph. It sets Dependency.IsTestOnly, InBuild and
+// Platforms and returns a warning ("" when there is nothing to report).
 //
-//  1. Production package graph: `go list -f '{{if .Module}}{{.Module.Path}}{{end}}' all`
-//     — modules required to build the main module without any test code.
-//  2. Full package graph (including tests): same with the -test flag added.
+// Two lists are taken per target platform, for each of linux, darwin and
+// windows with CGO_ENABLED=0 and CGO_ENABLED=1 (the union of the cgo settings
+// is what a build on that GOOS may use):
 //
-// A module present only in set 2 (and not in set 1) is test-only. A module in
-// both sets is a production dependency.
+//  1. Production: `go list -e -deps ./...`, the modules whose packages the main
+//     module's non-test code imports, directly or transitively.
+//  2. Production plus tests: `go list -e -deps -test ./...`, which adds only the
+//     packages the main module's own tests import. It does not include the
+//     tests of dependencies, whatever `go` version go.mod declares.
 //
-// The function sets Dependency.IsTestOnly on each module in graph and returns a
-// non-empty warning string if either `go list` call fails. In that case every
-// dep's IsTestOnly remains nil — the scorer (Task 10) must not apply a
-// test-only discount when the field is nil (unknown). Under-discounting is
-// safer than a silent wrong discount on an unverified classification.
+// `go list all` is deliberately not used. For go.mod files declaring go 1.16 or
+// newer `all` and `all -test` yield the same modules, so a comparison can never
+// report a test-only module; below go 1.16 `all` also includes packages needed
+// by dependencies' own tests, which would classify them as production.
+//
+// A module in a production list on any platform is production (IsTestOnly
+// &false). A module only in a test list is test-only (&true). Both are in the
+// build (InBuild &true). A module in no list is outside the build (InBuild
+// &false), with the exceptions below. Platforms records the GOOS values of a
+// production module that is not built on every platform.
+//
+// Known limit: a package behind a custom build tag (`//go:build integration`)
+// is in no list. A module the main module requires directly (no `// indirect`)
+// that no list contains may be imported only under such a tag, so it gets
+// InBuild nil rather than &false. An indirect module is not guarded this way:
+// the main module cannot import it directly, so graph-only is the likely cause.
+//
+// Failure handling. A platform is clean when all of its runs succeed and every
+// package resolves to a module. With -e, a package whose module cannot be
+// resolved is listed without a Module, so on its own it would make the module
+// that provides it look absent from the build. Such a run is therefore treated
+// as failed rather than tolerated; per-package errors with a known module (an
+// unmatched //go:embed pattern) are tolerated and named in the warning.
+//
+// A failing platform does not make classification unavailable for the others
+// (a package that does not build on Windows must not blind a Linux scan):
+// everything the failed runs did resolve still counts as positive evidence, and
+// the platforms that succeeded classify the rest. What a failed platform
+// cannot do is prove absence. If any platform failed, a module no list contains
+// gets InBuild nil (it may be imported only on the platform that failed), a
+// test-only verdict is withheld (the module may be production there) and
+// Platforms is left nil (a subset claim needs every platform). Only when every
+// platform fails is classification unavailable: all fields stay nil and the
+// warning says so, because under-discounting is safer than a silent wrong
+// discount on an unverified classification.
 func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string {
 	// Offline runs the toolchain with GOPROXY=off, so `go list` fails whenever
 	// the module cache is cold. That is the mode working as designed, not a
-	// broken environment — say so, and report the exit status as the reason it
-	// could not be classified rather than as a fault.
-	unavailable := func(which string, err error) string {
-		if offline.Enabled() {
-			return fmt.Sprintf("offline — %s could not resolve from the local module cache; test-only classification unavailable (IsTestOnly will be nil for all deps)", which)
+	// broken environment, so say so rather than report it as a fault.
+	unavailable := func(failures []string, needsModUpdate bool) string {
+		if offline.Enabled() && needsModUpdate {
+			return "offline — go.mod or go.sum needs updating (go mod tidy); go list was run read-only so the project's go.mod and go.sum are not modified; test-only classification unavailable (IsTestOnly and InBuild will be nil for all deps)"
 		}
-		return fmt.Sprintf("%s failed; test-only classification unavailable (IsTestOnly will be nil for all deps): %v", which, err)
+		if offline.Enabled() {
+			return "offline — go list could not resolve from the local module cache; test-only classification unavailable (IsTestOnly and InBuild will be nil for all deps)"
+		}
+		return fmt.Sprintf("go list failed on every platform; test-only classification unavailable (IsTestOnly and InBuild will be nil for all deps): %s", strings.Join(failures, "; "))
 	}
 
-	// Collect production (non-test) module paths.
-	prodMods, err := listModulePaths(ctx, dir, false)
-	if err != nil {
-		return unavailable("go list (production)", err)
-	}
+	platforms, tolerated := listPlatforms(ctx, dir)
 
-	// Collect module paths including test imports.
-	allMods, err := listModulePaths(ctx, dir, true)
-	if err != nil {
-		return unavailable("go list -test", err)
+	var failed []string // "GOOS=x (reason)"
+	var okOS []string
+	needsModUpdate := false
+	for _, p := range platforms {
+		if p.clean() {
+			okOS = append(okOS, p.goos)
+			continue
+		}
+		failed = append(failed, fmt.Sprintf("GOOS=%s (%s)", p.goos, p.failure()))
+		needsModUpdate = needsModUpdate || p.needsModUpdate
 	}
+	if len(okOS) == 0 {
+		return unavailable(failed, needsModUpdate)
+	}
+	partial := len(failed) > 0
 
-	// Require at least one module path from each call — an empty result means
-	// the go list call succeeded but produced nothing meaningful (e.g. vendor
-	// mode with incomplete vendor directory). Treat this as unavailable rather
-	// than incorrectly classifying every dep as production.
-	if len(prodMods) == 0 && len(allMods) == 0 {
+	// Require at least one module path: an empty result means go list succeeded
+	// but produced nothing meaningful (for example no Go packages, or vendor
+	// mode with an incomplete vendor directory). Treat it as unavailable rather
+	// than classifying every dep as outside the build. A real listing always
+	// contains the main module itself.
+	listed := false
+	for _, p := range platforms {
+		if len(p.prod) > 0 || len(p.test) > 0 {
+			listed = true
+			break
+		}
+	}
+	if !listed {
 		return "go list returned no module paths; test-only classification unavailable"
 	}
 
-	// Classify each dep in the graph.
-	classified := 0
 	for modPath, dep := range graph.Dependencies {
-		_, inProd := prodMods[modPath]
-		_, inAll := allMods[modPath]
-
-		if !inProd && !inAll {
-			// Module is not in either graph (e.g. from go.sum only). Leave nil.
-			continue
+		var prodOn []string
+		inTest := false
+		for _, p := range platforms {
+			if _, ok := p.prod[modPath]; ok {
+				prodOn = append(prodOn, p.goos)
+			}
+			if _, ok := p.test[modPath]; ok {
+				inTest = true
+			}
 		}
 
-		isTest := inAll && !inProd
-		dep.IsTestOnly = &isTest
-		classified++
+		inBuild := true
+		switch {
+		case len(prodOn) > 0:
+			notTest := false
+			dep.IsTestOnly = &notTest
+			if !partial && len(prodOn) < len(platforms) {
+				dep.Platforms = prodOn
+			}
+		case inTest:
+			// A failed platform may build this module in production, so the
+			// verdict is only given when every platform was listed.
+			if !partial {
+				testOnly := true
+				dep.IsTestOnly = &testOnly
+			}
+		case partial || dep.Direct:
+			// Not provably absent: see the failure handling and build-tag
+			// notes above.
+			continue
+		default:
+			inBuild = false
+		}
+		dep.InBuild = &inBuild
 	}
 
-	if classified == 0 {
-		return "go list produced no matching modules for the dependency graph; test-only classification unavailable"
+	var warnings []string
+	if partial {
+		warnings = append(warnings, fmt.Sprintf(
+			"go list failed for %s; classified from %s only. Modules found on no platform are left unclassified (InBuild nil), and test-only and platform-restriction verdicts are withheld",
+			strings.Join(failed, "; "), strings.Join(okOS, ",")))
 	}
-
-	return ""
+	if len(tolerated) > 0 {
+		warnings = append(warnings, "go list reported package errors that do not affect module classification: "+strings.Join(tolerated, "; "))
+	}
+	return strings.Join(warnings, ". ")
 }
 
-// listModulePaths runs `go list -f {{if .Module}}{{.Module.Path}}{{end}} all`
-// in dir (with -test if withTest is true) and returns the unique set of module
-// paths referenced by the package graph. An error is returned when go list
-// fails (non-zero exit, unavailable Go toolchain, network timeout, etc.).
-func listModulePaths(ctx context.Context, dir string, withTest bool) (map[string]struct{}, error) {
-	args := []string{"list", "-f", "{{if .Module}}{{.Module.Path}}{{end}}"}
-	if withTest {
+// listPlatforms runs the production and test lists for every GOOS in listGOOS
+// with CGO_ENABLED=0 and CGO_ENABLED=1 (12 `go list` runs, at most
+// maxParallelLists at once) and merges them per GOOS. It also returns the
+// deduplicated, sorted per-package errors the runs tolerated.
+func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, tolerated []string) {
+	runs := make([]listRun, 0, len(listGOOS)*4)
+	for _, goos := range listGOOS {
+		for _, cgo := range []bool{false, true} {
+			for _, test := range []bool{false, true} {
+				runs = append(runs, listRun{goos: goos, cgo: cgo, test: test})
+			}
+		}
+	}
+
+	results := make([]listResult, len(runs))
+	sem := make(chan struct{}, maxParallelLists)
+	var wg sync.WaitGroup
+	for i, run := range runs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = listPackages(ctx, dir, run)
+		}()
+	}
+	wg.Wait()
+
+	byOS := make(map[string]*platformList, len(listGOOS))
+	platforms = make([]*platformList, 0, len(listGOOS))
+	for _, goos := range listGOOS {
+		p := &platformList{goos: goos, prod: map[string]struct{}{}, test: map[string]struct{}{}}
+		byOS[goos] = p
+		platforms = append(platforms, p)
+	}
+	toleratedSet := make(map[string]struct{})
+	for i, run := range runs {
+		res, p := results[i], byOS[run.goos]
+		dst := p.prod
+		if run.test {
+			dst = p.test
+		}
+		maps.Copy(dst, res.mods)
+		if res.err != nil && p.err == nil {
+			p.err = res.err
+		}
+		p.needsModUpdate = p.needsModUpdate || res.needsModUpdate
+		for _, u := range res.unresolved {
+			if !slices.Contains(p.unresolved, u) {
+				p.unresolved = append(p.unresolved, u)
+			}
+		}
+		for _, n := range res.tolerated {
+			toleratedSet[n] = struct{}{}
+		}
+	}
+	for _, p := range platforms {
+		slices.Sort(p.unresolved)
+	}
+	return platforms, slices.Sorted(maps.Keys(toleratedSet))
+}
+
+// listedPackage is the subset of `go list -json` output that classification
+// reads.
+type listedPackage struct {
+	ImportPath string
+	Standard   bool
+	Module     *struct{ Path string }
+	Error      *struct{ Err string }
+}
+
+// listFields selects the `go list -json` fields to emit; the full output is
+// over a megabyte per run for a small module. EmbedFiles is requested only for
+// its side effect: with a field selection, go list resolves //go:embed
+// patterns, and so reports an unmatched one as a package Error, only when an
+// embed field is asked for. Without it the error is silently dropped and the
+// warning could not name the package.
+const listFields = "ImportPath,Standard,Module,Error,EmbedFiles"
+
+// listArgs builds the `go list` arguments for run.
+//
+// Offline mode adds -mod=readonly. offline.Env sets GOFLAGS=-mod=mod, which
+// lets the toolchain add missing requirements and go.sum entries, so a scan
+// would rewrite the scanned project's go.mod and go.sum, and the concurrent
+// runs of listPlatforms could race on those files. A -mod flag on the command
+// line takes precedence over the one in GOFLAGS. Online, the user's own
+// environment decides, so nothing is added.
+func listArgs(run listRun, readOnly bool) []string {
+	args := []string{"list", "-e", "-deps"}
+	if run.test {
 		args = append(args, "-test")
 	}
-	args = append(args, "all")
+	if readOnly {
+		args = append(args, "-mod=readonly")
+	}
+	return append(args, "-json="+listFields, "./...")
+}
 
-	netlog.Subprocess("go "+strings.Join(args, " "), offline.SubprocessNote("module proxy/VCS may be contacted by the go toolchain; see GOPROXY"))
+// modUpdateMarkers are fragments of the go toolchain's messages that say go.mod
+// or go.sum would have to change, which -mod=readonly forbids. They are matched
+// against the toolchain's English message text, which has no structured
+// equivalent in `go list -json`, so a toolchain that rewords them degrades to
+// the generic offline warning. Observed on go1.26:
+//
+//   - "go: updates to go.mod needed, disabled by -mod=readonly; to update it: ..."
+//     (stderr, non-zero exit);
+//   - "cannot find module providing package P: import lookup disabled by
+//     -mod=readonly";
+//   - "missing go.sum entry for module providing package P ...";
+//   - "module M provides package P and is replaced but not required ...".
+//
+// The cold-cache failure ("module lookup disabled by GOPROXY=off") matches none
+// of them.
+var modUpdateMarkers = []string{
+	"disabled by -mod=readonly",
+	"missing go.sum entry",
+	"is replaced but not required",
+}
 
+// needsModUpdate reports whether a go list message says go.mod or go.sum needs
+// updating.
+func needsModUpdate(msg string) bool {
+	return slices.ContainsFunc(modUpdateMarkers, func(m string) bool {
+		return strings.Contains(msg, m)
+	})
+}
+
+// listPackages runs one `go list -e -deps [-test] ./...` for run in dir.
+//
+// -e keeps per-package errors from failing the whole listing. Whether an error
+// is tolerable is decided structurally: every package that resolved carries a
+// Module (standard library packages excepted), so a non-standard package with
+// an Error and no Module is one whose module could not be resolved. Packages
+// with an Error and a Module (an unmatched //go:embed pattern, a build
+// constraint excluding all files on this GOOS) are tolerated and noted.
+func listPackages(ctx context.Context, dir string, run listRun) listResult {
+	cgo := "0"
+	if run.cgo {
+		cgo = "1"
+	}
+	args := listArgs(run, offline.Enabled())
+
+	netlog.Subprocess(
+		fmt.Sprintf("GOOS=%s CGO_ENABLED=%s go %s", run.goos, cgo, strings.Join(args, " ")),
+		offline.SubprocessNote("module proxy/VCS may be contacted by the go toolchain; see GOPROXY"),
+	)
+
+	// offline.Env returns nil when offline mode is off, meaning "inherit"; the
+	// platform variables must still be set then, so start from the parent's
+	// environment. They are appended last because exec.Cmd resolves duplicate
+	// keys last-wins, so they override anything inherited.
+	env := offline.Env(os.Environ())
+	if env == nil {
+		env = os.Environ()
+	}
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
-	cmd.Env = offline.Env(os.Environ())
+	cmd.Env = append(slices.Clone(env), "GOOS="+run.goos, "CGO_ENABLED="+cgo)
 
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			needsUpdate := needsModUpdate(string(exitErr.Stderr))
+			if msg := firstLine(string(exitErr.Stderr)); msg != "" {
+				err = fmt.Errorf("%w: %s", err, msg)
+			}
+			return listResult{err: err, needsModUpdate: needsUpdate}
+		}
+		return listResult{err: err}
 	}
 
-	result := make(map[string]struct{})
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			result[line] = struct{}{}
+	res := listResult{mods: make(map[string]struct{})}
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for {
+		var pkg listedPackage
+		if err := dec.Decode(&pkg); err != nil {
+			if !errors.Is(err, io.EOF) {
+				res.err = fmt.Errorf("decoding go list output: %w", err)
+			}
+			break
+		}
+		if pkg.Module != nil && pkg.Module.Path != "" {
+			res.mods[pkg.Module.Path] = struct{}{}
+		}
+		if pkg.Error == nil {
+			continue
+		}
+		if pkg.Module == nil && !pkg.Standard {
+			res.unresolved = append(res.unresolved, pkg.ImportPath)
+			res.needsModUpdate = res.needsModUpdate || needsModUpdate(pkg.Error.Err)
+			continue
+		}
+		res.tolerated = append(res.tolerated, fmt.Sprintf("%s: %s", pkg.ImportPath, firstLine(pkg.Error.Err)))
+	}
+	return res
+}
+
+// firstLine returns the first non-empty line of s, trimmed. go list errors can
+// span several lines of remediation advice that does not belong in a warning.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
 		}
 	}
-	return result, nil
+	return ""
 }
 
 func addFromGoSum(sumPath string, graph *Graph, gomod *parser.GoMod) error {
