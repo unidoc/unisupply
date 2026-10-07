@@ -289,6 +289,10 @@ Notable fields:
   nor a GitHub push within that many months. A repository pushed to recently
   passes even if its last tag is old; without push data (no token, non-GitHub
   module) the release age alone decides.
+- `no_unmaintained_months`, `no_archived` and `no_deprecated` skip modules
+  confirmed outside the build (`in_build: false`, in the module graph only). A
+  module whose build membership is unknown is still checked, and so is a
+  test-only module.
 - `forbid_pseudo_versions` — fail on a pseudo-version pin, except for modules
   confirmed test-only or outside the build.
 - `require_gosum_verified` — fail when `go mod verify` reported a checksum

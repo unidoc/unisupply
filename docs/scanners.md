@@ -555,7 +555,9 @@ declares.
 `-e` keeps a per-package error from failing the whole listing. A package error
 whose module is known (for example a `//go:embed` pattern that matches nothing
 because the build output is gitignored and absent from a fresh clone) is
-tolerated and named in the warning. A package that no module provides, a
+tolerated and named in a scan note, not a warning: classification is
+unaffected, so the text report lists it under "SCAN NOTES" rather than "SCAN
+LIMITATIONS", and the JSON report carries it in `notes`. A package that no module provides, a
 missing `go.sum` entry or a failed lookup is not tolerated: with `-e` the
 package would be listed without a module and its module would silently look
 absent, so that platform is treated as failed instead.
@@ -610,6 +612,7 @@ show an `outside build` label next to `test-only` under the same rule.
 | Time bombs (archived, KEV, CRITICAL CVE) | skipped | skipped | Nothing that is not compiled in can detonate in the shipped code |
 | Pseudo-version pin severity and penalty | INFO, no penalty | INFO, no penalty | See [Pseudo-version pins](#pseudo-version-pins) |
 | `forbid_pseudo_versions` policy rule | exempt | exempt | Same reason |
+| `no_unmaintained_months`, `no_archived`, `no_deprecated` policy rules | not exempt | exempt | The scorer's archived floor and time bombs already skip modules that are not compiled in; the gate now agrees. An unknown `InBuild` is still checked |
 | CVE severity downgrade (`severity_adjusted`) | −1 tier | not applied | Reachability already downgrades a CVE in a module that is not linked in (`required` tier); a second discount would count the same fact twice |
 | `cve_floor` | skipped | not applied | Same reason |
 | `integrity_floor`, `forbid_replace_redirect` | `integrity_floor` skips; policy rule does not | not applied | A `replace` directive is a `go.mod`-level signal; see [Integrity](#integrity) |

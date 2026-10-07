@@ -37,12 +37,20 @@ type Policy struct {
 
 	// NoUnmaintained fails if any dependency has had neither a release nor a push
 	// (GitHub pushed_at, when known) in this many months.
+	//
+	// Confirmed outside-the-build deps (InBuild == &false, in the module graph
+	// only) are exempt: no code of theirs is compiled into the project. A nil
+	// (unknown) InBuild is not exempt. Test-only deps are not exempt.
 	NoUnmaintainedMonths *int `json:"no_unmaintained_months,omitempty"`
 
-	// NoArchived fails if any dependency is archived.
+	// NoArchived fails if any dependency is archived. Confirmed outside-the-build
+	// deps are exempt and a nil (unknown) InBuild is not; see
+	// NoUnmaintainedMonths. Test-only deps are not exempt.
 	NoArchived bool `json:"no_archived,omitempty"`
 
-	// NoDeprecated fails if any dependency is deprecated.
+	// NoDeprecated fails if any dependency is deprecated. Confirmed
+	// outside-the-build deps are exempt and a nil (unknown) InBuild is not; see
+	// NoUnmaintainedMonths. Test-only deps are not exempt.
 	NoDeprecated bool `json:"no_deprecated,omitempty"`
 
 	// NoTyposquatting fails if any dependency has a typosquatting indicator.
@@ -189,15 +197,17 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		// not exempt and denied.
 		if p.ForbidPseudoVersions && ds.PseudoVersion {
 			testOnly := ds.IsTestOnly != nil && *ds.IsTestOnly
-			outsideBuild := ds.InBuild != nil && !*ds.InBuild
-			if !testOnly && !outsideBuild {
+			if !testOnly && !isConfirmedOutsideBuild(ds) {
 				result.addError("forbid_pseudo_versions", ds.Module,
 					fmt.Sprintf("pinned to pseudo-version %s", ds.Version))
 			}
 		}
 
-		// No unmaintained.
-		if p.NoUnmaintainedMonths != nil && ds.Maintenance != nil {
+		// No unmaintained. The maintenance-health rules (this one, no_archived
+		// and no_deprecated) exempt confirmed outside-the-build deps, matching
+		// the scorer, whose archived floor and time bombs skip them; nil
+		// (unknown) InBuild is not exempt and denied.
+		if p.NoUnmaintainedMonths != nil && ds.Maintenance != nil && !isConfirmedOutsideBuild(ds) {
 			// A module counts as maintained when it was either released or pushed
 			// to within the limit, so a repo that is active but rarely tagged
 			// passes. Without activity data this is the release age alone.
@@ -212,12 +222,12 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		}
 
 		// No archived.
-		if p.NoArchived && ds.Maintenance != nil && ds.Maintenance.Archived {
+		if p.NoArchived && ds.Maintenance != nil && ds.Maintenance.Archived && !isConfirmedOutsideBuild(ds) {
 			result.addError("no_archived", ds.Module, "repository is archived")
 		}
 
 		// No deprecated.
-		if p.NoDeprecated && ds.Maintenance != nil && ds.Maintenance.Deprecated {
+		if p.NoDeprecated && ds.Maintenance != nil && ds.Maintenance.Deprecated && !isConfirmedOutsideBuild(ds) {
 			result.addError("no_deprecated", ds.Module, "module is deprecated")
 		}
 
@@ -291,6 +301,13 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 	}
 
 	return result
+}
+
+// isConfirmedOutsideBuild reports whether ds is confirmed to be in the module
+// graph only (InBuild == &false). A nil InBuild (unknown) is not confirmed, so
+// rules that exempt such deps keep denying when classification was unavailable.
+func isConfirmedOutsideBuild(ds *scorer.DependencyScore) bool {
+	return ds.InBuild != nil && !*ds.InBuild
 }
 
 func (r *Result) addError(rule, module, detail string) {

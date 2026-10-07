@@ -305,6 +305,21 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 		}
 		_ = c.Draw(notePara)
 	}
+
+	// Scan notes are informational and say nothing is missing, so they are
+	// kept apart from the data-quality notes above.
+	if len(ps.Notes) > 0 {
+		subheading(c, "Scan Notes", bold)
+		scanNotes := c.NewStyledParagraph()
+		scanNotes.SetMargins(0, 0, 5, 0)
+		scanNotes.SetLineHeight(1.6)
+		for _, n := range ps.Notes {
+			chunk := scanNotes.Append("  • " + n + "\n")
+			chunk.Style.Font = regular
+			chunk.Style.FontSize = 10
+		}
+		_ = c.Draw(scanNotes)
+	}
 }
 
 // filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).

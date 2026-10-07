@@ -102,6 +102,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **A pseudo-version pin on a module outside the build is INFO with no score
   penalty**, as for a test-only module, and the `forbid_pseudo_versions` policy
   rule no longer fails on it.
+- **The `no_unmaintained_months`, `no_archived` and `no_deprecated` policy rules
+  skip modules that are outside the build.** `--policy-preset strict` no longer
+  fails on an archived or unmaintained module that is only in the module graph,
+  which the scorer already did not count. A module with an unknown classification
+  is still checked, and so is a test-only module.
 - **Some checks deliberately still apply to such modules:** CVE severity and
   `cve_floor` (reachability already discounts a vulnerability in a module that
   is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
@@ -205,8 +210,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   directory that is not in the checkout.** A build output such as `web/dist` is
   usually gitignored, so a fresh clone made `go list` exit with `pattern
   web/dist: no matching files found` and every dependency went unclassified. The
-  listing now tolerates per-package errors that do not hide a module, and the
-  warning names the failing package. Errors that do hide a module (an import no
+  listing now tolerates per-package errors that do not hide a module, and a scan
+  note names the failing package. Notes are shown apart from the scan
+  limitations (text report heading "SCAN NOTES", JSON `notes`) because they do
+  not make the results incomplete. Errors that do hide a module (an import no
   module provides, a missing `go.sum` entry) still make that platform
   unavailable instead of producing a wrong answer.
 - **Platform-specific dependencies were unclassified (#135).** A module imported

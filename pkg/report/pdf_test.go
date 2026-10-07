@@ -7,6 +7,7 @@ import (
 	"github.com/unidoc/unipdf/v5/creator"
 	"github.com/unidoc/unipdf/v5/model"
 
+	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -258,4 +259,25 @@ func TestWriteTimeBombsSection_Smoke(t *testing.T) {
 
 	writeTimeBombsSection(c, archivedTimeBombScore(), regular, bold)
 	writeTimeBombsSection(c, &scorer.ProjectScore{}, regular, bold)
+}
+
+// TestWriteExecutiveSummary_ScanNotesSmoke verifies the executive summary
+// renders with scan notes and without them, without panicking.
+func TestWriteExecutiveSummary_ScanNotesSmoke(t *testing.T) {
+	_ = initLicense()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+
+	for _, notes := range [][]string{nil, {"go list reported package errors that do not affect module classification: x"}} {
+		c := creator.New()
+		c.SetPageSize(creator.PageSizeLetter)
+		c.SetPageMargins(50, 50, 50, 50)
+		c.NewPage()
+		ps := &scorer.ProjectScore{OverallLevel: scorer.RiskLow, Notes: notes}
+		writeExecutiveSummary(c, graph, ps, PDFOptions{}, regular, bold)
+	}
 }

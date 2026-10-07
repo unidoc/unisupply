@@ -893,3 +893,51 @@ func TestWriteJSON_HeadlineTiedWith(t *testing.T) {
 		t.Errorf("candidate tied_with present for zero, want omitted")
 	}
 }
+
+// TestWriteJSON_Notes verifies that notes are emitted next to warnings and the
+// key is omitted when there are none.
+func TestWriteJSON_Notes(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	dep := &scorer.DependencyScore{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 10, RiskLevel: scorer.RiskLow}
+
+	decode := func(t *testing.T, ps *scorer.ProjectScore) map[string]json.RawMessage {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+			t.Fatalf("WriteJSON() failed: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+			t.Fatalf("failed to unmarshal JSON: %v", err)
+		}
+		return raw
+	}
+
+	t.Run("emitted", func(t *testing.T) {
+		raw := decode(t, &scorer.ProjectScore{
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{dep},
+			Warnings:     []string{"a warning"},
+			Notes:        []string{"a note"},
+		})
+		var notes, warnings []string
+		if err := json.Unmarshal(raw["notes"], &notes); err != nil || len(notes) != 1 || notes[0] != "a note" {
+			t.Errorf("notes = %s, want [\"a note\"]", raw["notes"])
+		}
+		if err := json.Unmarshal(raw["warnings"], &warnings); err != nil || len(warnings) != 1 || warnings[0] != "a warning" {
+			t.Errorf("warnings = %s, want [\"a warning\"]", raw["warnings"])
+		}
+	})
+
+	t.Run("omitted when empty", func(t *testing.T) {
+		raw := decode(t, &scorer.ProjectScore{
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{dep},
+		})
+		if _, ok := raw["notes"]; ok {
+			t.Errorf("notes present with none set: %s", raw["notes"])
+		}
+	})
+}

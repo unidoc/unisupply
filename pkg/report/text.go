@@ -265,6 +265,15 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			fmt.Fprintf(w, "  ! %s\n", warning)
 		}
 	}
+	// Notes are informational: they say nothing is missing, so they get their
+	// own heading rather than sitting under SCAN LIMITATIONS.
+	if len(ps.Notes) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN NOTES — informational, results unaffected\n")
+		for _, note := range ps.Notes {
+			fmt.Fprintf(w, "  - %s\n", note)
+		}
+	}
 
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))

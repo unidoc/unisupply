@@ -81,6 +81,13 @@ type Graph struct {
 	Root         string
 	Dependencies map[string]*Dependency // keyed by module path
 	EdgeCount    int                    // total edges in the dependency graph
+
+	// Notes holds informational messages from resolution that do not make the
+	// results incomplete, such as per-package go list errors that leave module
+	// classification unaffected. Resolve's warnings, by contrast, name a
+	// degradation. Reports must show notes apart from warnings so a note is not
+	// read as a scan limitation.
+	Notes []string
 }
 
 // SortedPaths returns the module paths in Dependencies in ascending order.
@@ -159,9 +166,13 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 	// graph. This is a best-effort enrichment: if it fails (air-gapped CI,
 	// vendor-only mode, network issue), IsTestOnly and InBuild stay nil on all
 	// deps and a warning is appended so the caller knows the classification
-	// cannot be applied.
-	if listWarn := classifyTestOnlyDeps(ctx, filepath.Dir(gomodPath), graph); listWarn != "" {
+	// cannot be applied. Tolerated package errors are only a note.
+	listWarn, listNote := classifyTestOnlyDeps(ctx, filepath.Dir(gomodPath), graph)
+	if listWarn != "" {
 		warnings = append(warnings, listWarn)
+	}
+	if listNote != "" {
+		graph.Notes = append(graph.Notes, listNote)
 	}
 
 	return graph, warnings, nil
@@ -379,7 +390,11 @@ func (p *platformList) failure() string {
 
 // classifyTestOnlyDeps classifies each module in graph against the main
 // module's own package graph. It sets Dependency.IsTestOnly, InBuild and
-// Platforms and returns a warning ("" when there is nothing to report).
+// Platforms and returns a warning and a note ("" when there is nothing to
+// report). The warning names a degradation (a failed platform, or
+// classification unavailable). The note names tolerated per-package errors,
+// which leave the classification unaffected and so must not be presented as a
+// limitation of the results.
 //
 // Two lists are taken per target platform, for each of linux, darwin and
 // windows with CGO_ENABLED=0 and CGO_ENABLED=1 (the union of the cgo settings
@@ -413,7 +428,7 @@ func (p *platformList) failure() string {
 // resolved is listed without a Module, so on its own it would make the module
 // that provides it look absent from the build. Such a run is therefore treated
 // as failed rather than tolerated; per-package errors with a known module (an
-// unmatched //go:embed pattern) are tolerated and named in the warning.
+// unmatched //go:embed pattern) are tolerated and named in the note.
 //
 // A failing platform does not make classification unavailable for the others
 // (a package that does not build on Windows must not blind a Linux scan):
@@ -426,7 +441,7 @@ func (p *platformList) failure() string {
 // platform fails is classification unavailable: all fields stay nil and the
 // warning says so, because under-discounting is safer than a silent wrong
 // discount on an unverified classification.
-func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string {
+func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warning, note string) {
 	// Offline runs the toolchain with GOPROXY=off, so `go list` fails whenever
 	// the module cache is cold. That is the mode working as designed, not a
 	// broken environment, so say so rather than report it as a fault.
@@ -454,7 +469,7 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string 
 		needsModUpdate = needsModUpdate || p.needsModUpdate
 	}
 	if len(okOS) == 0 {
-		return unavailable(failed, needsModUpdate)
+		return unavailable(failed, needsModUpdate), ""
 	}
 	partial := len(failed) > 0
 
@@ -471,7 +486,7 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string 
 		}
 	}
 	if !listed {
-		return "go list returned no module paths; test-only classification unavailable"
+		return "go list returned no module paths; test-only classification unavailable", ""
 	}
 
 	for modPath, dep := range graph.Dependencies {
@@ -511,16 +526,15 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) string 
 		dep.InBuild = &inBuild
 	}
 
-	var warnings []string
 	if partial {
-		warnings = append(warnings, fmt.Sprintf(
+		warning = fmt.Sprintf(
 			"go list failed for %s; classified from %s only. Modules found on no platform are left unclassified (InBuild nil), and test-only and platform-restriction verdicts are withheld",
-			strings.Join(failed, "; "), strings.Join(okOS, ",")))
+			strings.Join(failed, "; "), strings.Join(okOS, ","))
 	}
 	if len(tolerated) > 0 {
-		warnings = append(warnings, "go list reported package errors that do not affect module classification: "+strings.Join(tolerated, "; "))
+		note = "go list reported package errors that do not affect module classification: " + strings.Join(tolerated, "; ")
 	}
-	return strings.Join(warnings, ". ")
+	return warning, note
 }
 
 // listPlatforms runs the production and test lists for every GOOS in listGOOS

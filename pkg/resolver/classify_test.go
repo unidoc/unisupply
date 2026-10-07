@@ -73,8 +73,16 @@ func writeStub(t *testing.T, root, name string, opts stubOpts) {
 }
 
 // classify writes the fixture, builds a Graph from its go.mod requirements
-// the way Resolve does, runs classifyTestOnlyDeps and returns both results.
+// the way Resolve does, runs classifyTestOnlyDeps and returns the graph and the
+// warning.
 func classify(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Graph, string) {
+	t.Helper()
+	g, warn, _ := classifyWithNote(t, fx, stubs)
+	return g, warn
+}
+
+// classifyWithNote is classify that also returns the informational note.
+func classifyWithNote(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Graph, string, string) {
 	t.Helper()
 	setGoEnv(t)
 
@@ -115,8 +123,8 @@ func classify(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Graph, stri
 		graph.Dependencies[req.Path] = &Dependency{Module: req, Direct: !req.Indirect}
 	}
 
-	warn := classifyTestOnlyDeps(context.Background(), mainDir, graph)
-	return graph, warn
+	warn, note := classifyTestOnlyDeps(context.Background(), mainDir, graph)
+	return graph, warn, note
 }
 
 func dep(t *testing.T, g *Graph, name string) *Dependency {
@@ -156,10 +164,11 @@ func wantPlatforms(t *testing.T, g *Graph, name string, want []string) {
 }
 
 // A //go:embed pattern that matches nothing (a gitignored build output in a
-// fresh clone) must not stop classification, and the warning must name the
-// package.
+// fresh clone) must not stop classification. The failing package is named in a
+// note, not a warning: classification is unaffected, so it is not a limitation
+// of the results.
 func TestClassify_MissingEmbedIsTolerated(t *testing.T) {
-	g, warn := classify(t, fixture{
+	g, warn, note := classifyWithNote(t, fixture{
 		direct: []string{"prod"},
 		files: map[string]string{
 			"main.go": `package main
@@ -179,11 +188,14 @@ func main() { _ = assets }
 	}, map[string]stubOpts{"prod": {}})
 
 	wantState(t, g, "prod", "false", "true")
-	if !strings.Contains(warn, "example.com/main") || !strings.Contains(warn, "missing/dir") {
-		t.Errorf("warning = %q, want it to name package example.com/main and the pattern", warn)
+	if warn != "" {
+		t.Errorf("warning = %q, want none: a tolerated package error is a note", warn)
 	}
-	if strings.Contains(warn, "unavailable") {
-		t.Errorf("warning = %q, classification must not be reported unavailable", warn)
+	if !strings.Contains(note, "example.com/main") || !strings.Contains(note, "missing/dir") {
+		t.Errorf("note = %q, want it to name package example.com/main and the pattern", note)
+	}
+	if strings.Contains(note, "unavailable") {
+		t.Errorf("note = %q, classification must not be reported unavailable", note)
 	}
 }
 

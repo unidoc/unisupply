@@ -144,16 +144,21 @@ func TestBuildClassification_MissingEmbedAndGraphOnlyModule(t *testing.T) {
 	)
 	graph, warnings := resolveBuildFixture(t, "embed-graphonly")
 
-	if len(warnings) != 1 {
-		t.Fatalf("warnings = %q, want exactly one", warnings)
+	// The tolerated package error is informational: Resolve reports it as a
+	// note, not as a warning that would be shown as a scan limitation.
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none", warnings)
+	}
+	if len(graph.Notes) != 1 {
+		t.Fatalf("notes = %q, want exactly one", graph.Notes)
 	}
 	for _, want := range []string{"example.com/embedapp", "web/dist"} {
-		if !strings.Contains(warnings[0], want) {
-			t.Errorf("warning %q does not name %q", warnings[0], want)
+		if !strings.Contains(graph.Notes[0], want) {
+			t.Errorf("note %q does not name %q", graph.Notes[0], want)
 		}
 	}
-	if strings.Contains(warnings[0], "unavailable") {
-		t.Errorf("warning %q: classification must not be reported unavailable", warnings[0])
+	if strings.Contains(graph.Notes[0], "unavailable") {
+		t.Errorf("note %q: classification must not be reported unavailable", graph.Notes[0])
 	}
 
 	// webkit's used package does not import unusedlib; only a sibling package

@@ -143,7 +143,7 @@ func TestClassifyOfflineUntidyModule(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			warn := classifyTestOnlyDeps(context.Background(), mainDir, graph)
+			warn, _ := classifyTestOnlyDeps(context.Background(), mainDir, graph)
 
 			after, err := os.ReadFile(filepath.Join(mainDir, "go.mod"))
 			if err != nil {

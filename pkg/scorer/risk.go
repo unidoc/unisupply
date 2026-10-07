@@ -225,6 +225,13 @@ type ProjectScore struct {
 	// token) so downstream tooling can decide how to act on the scores.
 	// This field lives on the top-level ProjectScore only — NOT per-dep.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Notes carries informational messages that do not make the results
+	// incomplete, for example per-package go list errors that leave module
+	// classification unaffected. Unlike Warnings, a note names no unavailable
+	// signal, so reports render it apart from the scan limitations.
+	// This field lives on the top-level ProjectScore only — NOT per-dep.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // Diagnostics carries tail aggregates retained for debugging.

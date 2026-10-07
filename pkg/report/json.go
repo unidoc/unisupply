@@ -57,7 +57,12 @@ type JSONReport struct {
 
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
-	Warnings          []string             `json:"warnings,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Notes lists informational messages that do not make the results
+	// incomplete, such as go list package errors that leave module
+	// classification unaffected. It is absent when there are none.
+	Notes             []string             `json:"notes,omitempty"`
 	Summary           JSONSummary          `json:"summary"`
 	Deps              []JSONDependency     `json:"dependencies"`
 	CI                *JSONCIReport        `json:"ci_cd_assessment,omitempty"`
@@ -426,6 +431,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		DebugScoring:              ps.DebugScoring,
 		Diagnostics:               jsonDiagnostics(ps.Diagnostics),
 		Warnings:                  ps.Warnings,
+		Notes:                     ps.Notes,
 		TimeBombs:                 collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
 			CriticalRiskCount: ps.CriticalRiskCount,

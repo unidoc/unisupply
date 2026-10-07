@@ -179,6 +179,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)
 	}
+	for _, n := range graph.Notes {
+		rep.Step("%s", n)
+	}
 	rep.Done("%d modules", len(graph.Dependencies))
 
 	// Validate the token after Resolve, so a bad path or an empty project
@@ -343,6 +346,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
+	// Resolver notes are informational and kept apart from the warnings, so a
+	// report does not present them as a limitation of the results.
+	projectScore.Notes = append(projectScore.Notes, graph.Notes...)
 	rep.Done("")
 
 	var ciReport *scanner.CIReport
