@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,10 +75,10 @@ type VulnEnricher struct {
 	cacheDir string
 	now      func() time.Time
 
-	// nvdKeyRejected is set when NVD rejected the API key; the rest of the
-	// scan queries NVD unauthenticated, as if no key had been given. Enrich
-	// runs sequentially, so no lock is needed.
-	nvdKeyRejected bool
+	// nvdKeyRejected is set when NVD rejected the API key, or the key cannot
+	// be sent as a header value; the rest of the scan queries NVD
+	// unauthenticated, as if no key had been given.
+	nvdKeyRejected atomic.Bool
 }
 
 // NewVulnEnricher creates a new VulnEnricher. The returned enricher is safe
@@ -86,6 +88,7 @@ func NewVulnEnricher(opts VulnEnricherOptions) *VulnEnricher {
 	if now == nil {
 		now = time.Now
 	}
+	opts.NVDAPIKey = strings.TrimSpace(opts.NVDAPIKey)
 
 	e := &VulnEnricher{
 		client: NewClient(ClientOptions{Timeout: 10 * time.Second}),
@@ -277,20 +280,26 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 // aliasCandidates returns the aliases of v to look up on OSV: GHSA-* first,
 // then CVE-*, each group sorted ascending, skipping v.ID itself, duplicates
-// and malformed IDs, capped at maxAliasLookups.
+// and malformed IDs, capped at maxAliasLookups. When v has a CVE alias, one
+// slot is kept for it, so many GHSA aliases cannot crowd out the CVE record
+// and its CVSS vector.
 func aliasCandidates(v *Vulnerability) []string {
-	var out []string
-	for _, prefix := range []string{"GHSA-", "CVE-"} {
-		var group []string
+	group := func(prefix string) []string {
+		var g []string
 		for _, a := range v.Aliases {
-			if !strings.HasPrefix(a, prefix) || a == v.ID || !validateVulnID(a) || slices.Contains(group, a) {
+			if !strings.HasPrefix(a, prefix) || a == v.ID || !validateVulnID(a) || slices.Contains(g, a) {
 				continue
 			}
-			group = append(group, a)
+			g = append(g, a)
 		}
-		sort.Strings(group)
-		out = append(out, group...)
+		sort.Strings(g)
+		return g
 	}
+	ghsas, cves := group("GHSA-"), group("CVE-")
+	if len(cves) > 0 && len(ghsas) > maxAliasLookups-1 {
+		ghsas = ghsas[:maxAliasLookups-1]
+	}
+	out := slices.Concat(ghsas, cves)
 	if len(out) > maxAliasLookups {
 		out = out[:maxAliasLookups]
 	}
@@ -535,7 +544,15 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 		Accept:   "application/json",
 		Purpose:  "vulnenrich:nvd",
 	}
-	useKey := e.opts.NVDAPIKey != "" && !e.nvdKeyRejected
+	useKey := e.opts.NVDAPIKey != "" && !e.nvdKeyRejected.Load()
+	if useKey && !validHeaderValue(e.opts.NVDAPIKey) {
+		// net/http would refuse the request before sending it, failing every
+		// NVD lookup in the scan.
+		useKey = false
+		if e.nvdKeyRejected.CompareAndSwap(false, true) {
+			warnings = append(warnings, "vuln enrichment: NVD API key contains characters not allowed in an HTTP header; continuing unauthenticated")
+		}
+	}
 	if useKey {
 		getOpts.APIKeyHeader = "apiKey"
 		getOpts.APIKey = e.opts.NVDAPIKey
@@ -545,11 +562,12 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
 		return nil, warnings
 	}
-	if useKey && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404) {
+	if useKey && nvdRejectsKey(resp) {
 		// A bad key must not cost more than no key: retry this request
 		// unauthenticated, and send no key for the rest of the scan.
-		e.nvdKeyRejected = true
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", resp.StatusCode))
+		if e.nvdKeyRejected.CompareAndSwap(false, true) {
+			warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", resp.StatusCode))
+		}
 		result, retryWarns := e.fetchNVD(ctx, cveID)
 		return result, append(warnings, retryWarns...)
 	}
@@ -596,6 +614,26 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 
 	result.Source = "nvd"
 	return result, warnings
+}
+
+// nvdRejectsKey reports whether resp says the API key is bad. NVD answers an
+// invalid key with HTTP 404 and the header "message: Invalid apiKey."; 401 is
+// taken as a rejection too. A 403 or a bare 404 is not: a 403 can come from
+// NVD's CDN under load, and dropping a valid key then would cost the higher
+// rate limit exactly when it is needed.
+func nvdRejectsKey(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	return strings.Contains(strings.ToLower(resp.Header.Get("message")), "invalid apikey")
+}
+
+// validHeaderValue reports whether s can be sent as an HTTP header value:
+// net/http rejects control characters other than horizontal tab.
+func validHeaderValue(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		return (r < 0x20 && r != '\t') || r == 0x7f
+	})
 }
 
 // fetchGHSAByCVE queries https://api.github.com/advisories?cve_id=<cveID> and
@@ -680,8 +718,13 @@ func cvssStringToTier(s string) string {
 //	7.0–8.9   HIGH
 //	4.0–6.9   MEDIUM
 //	0.1–3.9   LOW
+//
+// A score of 0.0 or below has no tier (CVSS "None") and returns "", the same
+// as an unrecognized label in cvssStringToTier.
 func cvssScoreToTier(score float64) string {
 	switch {
+	case score <= 0:
+		return ""
 	case score >= 9.0:
 		return "CRITICAL"
 	case score >= 7.0:
@@ -732,9 +775,9 @@ func (e *VulnEnricher) ensureCacheDir() error {
 }
 
 // loadCache returns a cached enrichResult if one exists and is still within its
-// TTL (24h for successes, 1h for failures). Returns (nil, false) on any miss or
-// error, including a version mismatch — which acts as a one-time self-healing
-// invalidation when the on-disk shape changes.
+// TTL (24h for successes, 1h for failures and unscored answers). Returns
+// (nil, false) on any miss or error, including a version mismatch — which acts
+// as a one-time self-healing invalidation when the on-disk shape changes.
 func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 	path := e.cacheFilePath(id)
 	data, err := os.ReadFile(path)
@@ -751,8 +794,11 @@ func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 		return nil, false
 	}
 
+	// Failures and unscored answers share the short TTL. Unscored is an
+	// answer, but a fresh advisory's score is often published within days,
+	// and rechecking hourly picks it up sooner.
 	ttl := cacheTTL
-	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Severity == "" {
+	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Source == "unscored" || entry.Result.Severity == "" {
 		ttl = cacheFailTTL
 	}
 

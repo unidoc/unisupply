@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,8 +72,8 @@ func main() {
 	flag.BoolVar(&scanWorkflows, "scan-workflows", false, "Scan GitHub Actions workflow files in .github/workflows/")
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
-	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
-	flag.StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key for higher CVE severity lookup rate limits (or set NVD_API_KEY env)")
+	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (prefer set GITHUB_TOKEN env)")
+	flag.StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key for higher CVE severity lookup rate limits (prefer set the NVD_API_KEY env)")
 	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
@@ -100,12 +101,12 @@ func main() {
 
 	// GitHub token from env if not set via flag.
 	if githubToken == "" {
-		githubToken = os.Getenv("GITHUB_TOKEN")
+		githubToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}
 
 	// NVD API key from env if not set via flag.
 	if nvdAPIKey == "" {
-		nvdAPIKey = os.Getenv("NVD_API_KEY")
+		nvdAPIKey = strings.TrimSpace(os.Getenv("NVD_API_KEY"))
 	}
 
 	// Determine target path.
@@ -421,7 +422,6 @@ func printUsage() {
 	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
 	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
 	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if token missing or invalid")
-	fmt.Println("  unisupply --nvd-api-key $NVD_API_KEY ./      # Raise the NVD severity lookup rate limit")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")

@@ -13,9 +13,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **`--nvd-api-key` (or `NVD_API_KEY`) raises the NVD rate limit** of the CVE
   severity fallback from 5 to 50 requests per 30 seconds. The key is sent only
-  as an `apiKey` header to `services.nvd.nist.gov`. A rejected key produces one
-  warning and the scan continues unauthenticated, so a bad key never costs
-  severities that no key would have found. `pkg/runner.Options`
+  as an `apiKey` header to `services.nvd.nist.gov`, with surrounding whitespace
+  trimmed. A key NVD rejects (404 with `message: Invalid apiKey.`, or 401)
+  produces one warning and the scan continues unauthenticated, so a bad key
+  never costs severities that no key would have found. A 403 does not drop
+  the key. `pkg/runner.Options`
   gains `NVDAPIKey`, and `scanner.ScanVulnsWithOptions` is the new entry point
   (`ScanVulns` is unchanged).
 

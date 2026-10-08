@@ -252,9 +252,10 @@ the first tier that yields a severity wins:
 
 1. OSV record of the advisory's own ID.
 2. OSV records of its `GHSA-*` aliases, then its `CVE-*` aliases, each group in
-   ascending order, at most 4 alias lookups per advisory. Only the aliases
-   already on the advisory are looked up; aliases listed inside fetched records
-   are not followed. A record's `database_specific.severity` is preferred; if
+   ascending order, at most 4 alias lookups per advisory. When the advisory has
+   a CVE alias, one of the 4 is kept for it, so GHSA aliases cannot crowd it
+   out. Only the aliases already on the advisory are looked up; aliases listed
+   inside fetched records are not followed. A record's `database_specific.severity` is preferred; if
    absent, its CVSS v3.0/v3.1 vector is scored locally with the first.org base
    score formula. CVSS v2 and v4 entries are ignored, and a score of 0.0 is not
    treated as a severity.
@@ -286,9 +287,16 @@ after one hour.
 50 with one. Set `--nvd-api-key` (or `NVD_API_KEY`) to make the NVD fallback
 less likely to be rate limited. The key is sent only as an `apiKey` header to
 `services.nvd.nist.gov`, never in a URL, report, warning, cache file or
-`--network-log` line. If NVD answers 401, 403 or 404 while a key is set, one
-warning is emitted, that request is retried without the key and the rest of
-the scan queries NVD unauthenticated, exactly as if no key had been set. The lookup order is unchanged.
+`--network-log` line. Surrounding whitespace is trimmed from the key. NVD
+answers an invalid key with HTTP 404 and the header `message: Invalid apiKey.`;
+on that answer, or on HTTP 401, one warning is emitted, that request is retried
+without the key and the rest of the scan queries NVD unauthenticated, exactly
+as if no key had been set. A 403 or a 404 without that message is an ordinary
+failed lookup and the key is kept, since a 403 can come from NVD's CDN under
+load. A key containing characters an HTTP header cannot carry is dropped the
+same way, with one warning. Prefer `NVD_API_KEY` over the flag: a flag value is
+visible to other users in `ps` and can end up in CI logs. The lookup order is
+unchanged.
 
 ### Threat-intel enrichment (EPSS + CISA KEV)
 

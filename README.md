@@ -402,21 +402,21 @@ unisupply --help
 
 The most frequently used flags:
 
-| Flag                    | Purpose                                                       |
-| ----------------------- | ------------------------------------------------------------- |
-| `-f, --format`          | `text`, `json`, `pdf`, `sbom-cyclonedx`, `sbom-spdx`          |
-| `-o, --output`          | Output file (default: stdout for text/json/sbom)              |
-| `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                      |
+| Flag                    | Purpose                                                                                                              |
+| ----------------------- |----------------------------------------------------------------------------------------------------------------------|
+| `-f, --format`          | `text`, `json`, `pdf`, `sbom-cyclonedx`, `sbom-spdx`                                                                 |
+| `-o, --output`          | Output file (default: stdout for text/json/sbom)                                                                     |
+| `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                                                                             |
 | `--nvd-api-key`         | NVD API key for higher severity lookup rate limits (or `NVD_API_KEY` env) |
-| `--trust-index-url`     | unitrust endpoint for curated trust scores                    |
-| `--trust-index-allow-private` | Allow `--trust-index-url` to target RFC1918/link-local addresses (self-hosted) |
-| `--policy-preset`       | `strict` or `moderate`                                        |
-| `--policy`              | Path to a custom policy JSON file                             |
-| `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only             |
-| `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts |
-| `--min-risk`            | Hide dependencies below the given score (e.g. `--min-risk 26` for medium+) |
-| `--direct-only`         | Skip transitive dependencies                                  |
-| `-v, --verbose`         | Per-dependency breakdown                                      |
+| `--trust-index-url`     | unitrust endpoint for curated trust scores                                                                           |
+| `--trust-index-allow-private` | Allow `--trust-index-url` to target RFC1918/link-local addresses (self-hosted)                                       |
+| `--policy-preset`       | `strict` or `moderate`                                                                                               |
+| `--policy`              | Path to a custom policy JSON file                                                                                    |
+| `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only                                                                    |
+| `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts                                                        |
+| `--min-risk`            | Hide dependencies below the given score (e.g. `--min-risk 26` for medium+)                                           |
+| `--direct-only`         | Skip transitive dependencies                                                                                         |
+| `-v, --verbose`         | Per-dependency breakdown                                                                                             |
 
 Environment variables:
 
