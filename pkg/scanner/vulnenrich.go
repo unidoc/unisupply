@@ -533,26 +533,20 @@ func cvssScoreToTier(score float64) string {
 }
 
 // parseCVSSScore extracts a numeric CVSS base score from the string OSV
-// stores under severity[].score. OSV permits two shapes:
+// stores under severity[].score. OSV permits two shapes, both handled here:
 //
-//   - A bare base score ("7.5") — handled here.
-//   - A full CVSS vector ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") —
-//     NOT handled here. The base score is not encoded in the vector; it must
-//     be computed from the impact and exploitability sub-metrics using the
-//     CVSS v3.1 formula (https://www.first.org/cvss/v3.1/specification-document).
-//     Implementing that formula requires either a CVSS library (none currently
-//     vendored) or ~80 lines of math we have deliberately not added.
+//   - A bare base score ("7.5").
+//   - A CVSS v3.0 or v3.1 vector ("CVSS:3.1/AV:N/AC:L/..."), whose base score
+//     is computed by cvss3BaseScore.
 //
-// When the input is a vector, parseCVSSScore returns (0, false). The caller
-// falls back to OSV's database_specific.severity (text tier) or to the GHSA
-// advisory's numeric CVSS score, both of which already carry the same
-// information for nearly all Go-ecosystem advisories.
+// CVSS v2 and v4 vectors return (0, false); they are not scored.
 func parseCVSSScore(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
 	// Direct numeric value (some OSV entries use just the score).
-	if score, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+	if score, err := strconv.ParseFloat(s, 64); err == nil {
 		return score, true
 	}
-	return 0, false
+	return cvss3BaseScore(s)
 }
 
 // --- On-disk 24h cache ---
