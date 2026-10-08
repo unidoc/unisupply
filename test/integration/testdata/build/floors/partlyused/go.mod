@@ -1,4 +1,4 @@
-module example.com/rarelytagged
+module example.com/partlyused
 
 go 1.21
 

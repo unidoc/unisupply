@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,19 +46,11 @@ type MaintainerInfo struct {
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 
 	// Owner and Repo are the repository's canonical GitHub name as reported by
-	// the API, which differs from the name in the module path (or proxy Origin)
-	// when the repository was renamed or transferred. They are the requested
-	// name when the repository could not be fetched.
+	// the API, which differs from the name in the module path when the
+	// repository was renamed or transferred. They are the requested name when
+	// the repository could not be fetched.
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
-
-	// SourceRepo is the GitHub repository the data was read from, as
-	// "github.com/owner/repo", and SourceRepoVia says how the module was
-	// mapped to it (SourceViaProxyOrigin or SourceViaGopkgIn). Both are set
-	// only when the module path itself is not a github.com path, so a reader
-	// can see why a vanity module is reported against that repository.
-	SourceRepo    string `json:"source_repo,omitempty"`
-	SourceRepoVia string `json:"source_repo_via,omitempty"`
 
 	OwnerName        string    `json:"owner_name"`     // display name of owner
 	OwnerLocation    string    `json:"owner_location"` // country/city
@@ -153,33 +146,23 @@ type MaintainerScanner struct {
 	// warning does not tell the user to set a token they did set.
 	TokenRejected bool
 
-	// OriginURLs maps a module path to the Origin.URL its module proxy .info
-	// reported (see OriginURLs, MaintenanceInfo.OriginURL). It lets vanity
-	// modules whose proxy Origin is a github.com repository be scanned. It is
-	// optional: without it only github.com and gopkg.in paths resolve. It must
-	// not be modified while a scan is running.
-	OriginURLs map[string]string
-
 	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
 	// per scanner instance, even when many goroutines hit the limit simultaneously.
 	rateLimitWarnOnce sync.Once
 }
 
 // CountGitHubDeps returns the number of dependencies in graph whose module path
-// resolves to a GitHub-hosted repository, by module path or the gopkg.in rule.
-// It does not know proxy Origins; see CountGitHubDepsWithOrigins.
+// resolves to a GitHub-hosted repository. Used to estimate API call volume
+// before scanning so callers can warn when the unauthenticated rate limit
+// (60 req/hr, ~20 deps at 3 calls each) is likely to be exceeded.
 func CountGitHubDeps(graph *resolver.Graph) int {
-	return CountGitHubDepsWithOrigins(graph, nil)
-}
-
-// CountGitHubDepsWithOrigins returns the number of dependencies in graph that
-// the maintainer scanner will query GitHub for: those ResolveSourceRepo maps
-// to a repository given originURLs (module path to proxy Origin.URL, see
-// OriginURLs). Used to estimate API call volume before scanning so callers can
-// warn when the unauthenticated rate limit (60 req/hr, ~20 deps at 3 calls
-// each) is likely to be exceeded.
-func CountGitHubDepsWithOrigins(graph *resolver.Graph, originURLs map[string]string) int {
-	return len(resolveSourceRepos(graph, originURLs))
+	n := 0
+	for _, dep := range graph.Dependencies {
+		if owner, repo := parseGitHubPath(dep.Module.Path); owner != "" && repo != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // NewMaintainerScanner creates a new maintainer scanner with a disk-backed
@@ -248,27 +231,31 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	sem := make(chan struct{}, 5)
 
 	// Pre-count GitHub-resolvable modules so Progress totals are accurate.
-	repos := resolveSourceRepos(graph, ms.OriginURLs)
-	ghDeps := make([]*resolver.Dependency, 0, len(repos))
+	var ghDeps []*resolver.Dependency
+	type ownerRepo struct{ owner, repo string }
+	repos := make(map[*resolver.Dependency]ownerRepo)
 	for _, dep := range graph.Dependencies {
-		if _, ok := repos[dep.Module.Path]; ok {
-			ghDeps = append(ghDeps, dep)
+		owner, repo := parseGitHubPath(dep.Module.Path)
+		if owner == "" || repo == "" {
+			continue
 		}
+		ghDeps = append(ghDeps, dep)
+		repos[dep] = ownerRepo{owner, repo}
 	}
 	total := len(ghDeps)
 
 	var done int64
 
 	for _, dep := range ghDeps {
-		src := repos[dep.Module.Path]
+		or := repos[dep]
 		wg.Add(1)
-		go func(d *resolver.Dependency, src sourceRepo) {
+		go func(d *resolver.Dependency, owner, repo string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			rep.Step("%s", d.Module.Path)
-			info := ms.analyzeRepo(ctx, src.owner, src.repo)
+			info := ms.analyzeRepo(ctx, owner, repo)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
@@ -278,15 +265,11 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 				// and all report whichever one wrote last.
 				mi := *info
 				mi.SubDependencies = d.TransitiveDeps
-				if src.via != SourceViaModulePath {
-					mi.SourceRepo = "github.com/" + src.owner + "/" + src.repo
-					mi.SourceRepoVia = src.via
-				}
 				mu.Lock()
 				results[d.Module.Path] = &mi
 				mu.Unlock()
 			}
-		}(dep, src)
+		}(dep, or.owner, or.repo)
 	}
 
 	wg.Wait()
@@ -301,7 +284,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 		return cached
 	}
 	// Serialize lookups of one repository. Modules from the same repository
-	// (gopkg.in/yaml.v2 and .v3, foo/bar and foo/bar/v2) are scanned
+	// (foo/bar and foo/bar/v2) are scanned
 	// concurrently, and checking the cache alone lets each of them miss and
 	// fetch the repository again, spending the API quota several times over.
 	if ms.repoLocks == nil {
@@ -356,7 +339,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 	info.DataAvailable = true
 
 	// Use the repository's canonical name from here on. A renamed or
-	// transferred repository (an old name in go.mod, or in a proxy Origin) is
+	// transferred repository (an old name in go.mod) is
 	// served through a redirect, and the owner and contributors endpoints
 	// built from the old name would redirect or 404 as well.
 	if o, r := canonicalRepoName(repoData.FullName); o != "" {
@@ -579,6 +562,15 @@ func githubAPIRedirectTarget(location string) (string, bool) {
 	}
 	return u.String(), true
 }
+
+// ownerNamePattern and repoNamePattern are GitHub's own name alphabets. They
+// are enforced on the full_name a response reports, so a garbled or hostile
+// value cannot inject path segments or query strings into the GitHub API URLs
+// built from it.
+var (
+	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+)
 
 // canonicalRepoName splits a GitHub full_name ("owner/repo") into its parts,
 // returning empty strings when it is not exactly that shape.

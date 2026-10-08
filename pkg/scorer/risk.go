@@ -433,9 +433,9 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 
 		// Count unmaintained.
 		if ds.Maintenance != nil {
-			if months := ds.Maintenance.MonthsInactive(); months >= 24 {
+			if ds.Maintenance.MonthsSinceRelease >= 24 {
 				ps.Unmaintained2yr++
-			} else if months >= 12 {
+			} else if ds.Maintenance.MonthsSinceRelease >= 12 {
 				ps.Unmaintained1yr++
 			}
 		}
@@ -645,22 +645,6 @@ func scoreDependency(
 		}
 	}
 
-	// Backfill repository activity (GitHub pushed_at) the same way, so the
-	// maintenance axis does not read "no release" as "no maintenance" for repos
-	// that are pushed to but rarely tagged. Only a proxy-backed record is
-	// extended: with maint == nil the proxy lookup failed and the axis stays
-	// unmeasured, and building a record from activity alone would fabricate a
-	// release age of 0. Unlike the Archived flag above, activity is written to a
-	// copy: the record is shared through the maintenance scanner cache, and a
-	// copy keeps one module's push date and the scoring clock from lingering
-	// there, so repeated scoring is idempotent.
-	if maint != nil && maintainerInfo != nil && !maintainerInfo.LastCommitDate.IsZero() {
-		withActivity := *maint
-		withActivity.LastActivity = maintainerInfo.LastCommitDate
-		withActivity.MonthsSinceActivity = scanner.MonthsSince(now, maintainerInfo.LastCommitDate)
-		maint = &withActivity
-	}
-
 	ds := &DependencyScore{
 		Module:         dep.Module.Path,
 		Version:        dep.Module.Version,
@@ -702,7 +686,7 @@ func scoreDependency(
 		if maint.Deprecated {
 			ds.RiskFactors = append(ds.RiskFactors, "deprecated")
 		}
-		if maint.MonthsInactive() >= 24 {
+		if maint.MonthsSinceRelease >= 24 {
 			ds.RiskFactors = append(ds.RiskFactors, "unmaintained")
 		}
 	}
@@ -1156,9 +1140,7 @@ func maintenanceScore(maint *scanner.MaintenanceInfo) float64 {
 		return 100
 	}
 
-	// Bands on the newer of the last release and the last push, so a repo that
-	// is worked on but rarely tagged is not scored as abandoned.
-	months := maint.MonthsInactive()
+	months := maint.MonthsSinceRelease
 	switch {
 	case months < 6:
 		return 0

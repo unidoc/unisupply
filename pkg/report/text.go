@@ -366,9 +366,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			fmt.Fprintf(w, "  ├─ Last release: %d months ago\n", ds.Maintenance.MonthsSinceRelease)
 		}
-		if ds.Maintenance.HasActivity() {
-			fmt.Fprintf(w, "  ├─ Last push: %d months ago\n", ds.Maintenance.MonthsSinceActivity)
-		}
 		if ds.Maintenance.Archived {
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
@@ -394,9 +391,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			ownerLine += " (" + mi.OwnerCompany + ")"
 		}
 		fmt.Fprintf(w, "  ├─ Maintainer: %s [%s]\n", ownerLine, ownerType)
-		if mi.SourceRepoVia != "" {
-			fmt.Fprintf(w, "  ├─ Source repository: %s (via %s)\n", mi.SourceRepo, mi.SourceRepoVia)
-		}
 
 		if mi.OwnerLocation != "" {
 			fmt.Fprintf(w, "  ├─ Location: %s\n", mi.OwnerLocation)
@@ -789,18 +783,10 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		switch {
 		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		case ds.Maintenance.MonthsInactive() >= 24:
-			if ds.Maintenance.HasActivity() {
-				reasons = append(reasons, fmt.Sprintf("no release in %d months and no push in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
-			} else {
-				reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-			}
-		case ds.Maintenance.MonthsInactive() >= 12:
-			if ds.Maintenance.HasActivity() {
-				reasons = append(reasons, fmt.Sprintf("last release %d months ago and last push %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
-			} else {
-				reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
-			}
+		case ds.Maintenance.MonthsSinceRelease >= 24:
+			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
+		case ds.Maintenance.MonthsSinceRelease >= 12:
+			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
 		}
 	}
 
@@ -927,7 +913,7 @@ func reachabilityTag(r string) string {
 const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only or outside the build, that is " +
 	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
 	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
-	"modules with no recent release or push are counted under Unmaintained."
+	"modules with no recent release are counted under Unmaintained."
 
 // wrapWords splits s into lines of at most width runes, breaking at spaces.
 // A single word longer than width gets a line of its own.

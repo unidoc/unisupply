@@ -195,9 +195,7 @@ func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) 
 	// Classify version scheme.
 	info.VersionScheme = classifyVersionScheme(versions)
 
-	// Check for governance files (if GitHub). Only github.com module paths are
-	// checked: vanity paths are not mapped to a repository here, unlike in the
-	// maintainer scanner (see ResolveSourceRepo).
+	// Check for governance files (if GitHub).
 	owner, repo := parseGitHubPath(modPath)
 	if owner != "" && repo != "" {
 		rs.checkGovernanceFiles(ctx, owner, repo, info)

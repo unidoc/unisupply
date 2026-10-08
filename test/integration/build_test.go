@@ -320,13 +320,11 @@ func TestBuildClassification_CobraGo115(t *testing.T) {
 	}
 }
 
-// Floors, time bombs and the unmaintained factor against classified modules:
-// a graph-only archived module, a vanity-path archived direct module and a
-// module whose last tag is old but whose repository is pushed to.
-func TestBuildClassification_FloorsAndActivity(t *testing.T) {
+// Floors and time bombs against classified modules: an archived module that is
+// only in the module graph, and an archived direct module that is built.
+func TestBuildClassification_Floors(t *testing.T) {
 	const (
-		yaml      = "gopkg.in/yaml.v3"
-		rare      = "example.com/rarelytagged"
+		partly    = "example.com/partlyused"
 		stale     = "example.com/stale"
 		graphOnly = "example.com/archivedgraphonly"
 	)
@@ -335,29 +333,15 @@ func TestBuildClassification_FloorsAndActivity(t *testing.T) {
 		t.Errorf("unexpected warnings: %q", warnings)
 	}
 	checkClassification(t, graph, map[string]wantClass{
-		yaml:      {direct: true, isTestOnly: "false", inBuild: "true"},
-		rare:      {direct: true, isTestOnly: "false", inBuild: "true"},
+		partly:    {direct: true, isTestOnly: "false", inBuild: "true"},
 		stale:     {direct: true, isTestOnly: "false", inBuild: "true"},
 		graphOnly: {direct: false, isTestOnly: "nil", inBuild: "false"},
 	})
 
-	// The scanner derives the repository from the module path alone: no new
-	// host is contacted. The maintainer data below is what that scan returns.
-	owner, repo, via := scanner.ResolveSourceRepo(yaml, "")
-	if owner != "go-yaml" || repo != "yaml" || via != scanner.SourceViaGopkgIn {
-		t.Fatalf("ResolveSourceRepo(%s) = %s/%s via %s, want go-yaml/yaml via %s", yaml, owner, repo, via, scanner.SourceViaGopkgIn)
-	}
 	archivedRepo := func() *scanner.MaintainerInfo {
-		return &scanner.MaintainerInfo{
-			DataAvailable: true,
-			Owner:         owner,
-			Repo:          repo,
-			SourceRepo:    "github.com/go-yaml/yaml",
-			SourceRepoVia: scanner.SourceViaGopkgIn,
-			IsArchived:    true,
-		}
+		return &scanner.MaintainerInfo{DataAvailable: true, IsArchived: true}
 	}
-	months := map[string]int{yaml: 6, rare: 6, stale: 6, graphOnly: 6}
+	months := map[string]int{partly: 6, stale: 6, graphOnly: 6}
 
 	t.Run("graph-only archived module does not floor", func(t *testing.T) {
 		in := buildScoreInput(graph, months)
@@ -386,62 +370,23 @@ func TestBuildClassification_FloorsAndActivity(t *testing.T) {
 		}
 	})
 
-	t.Run("archived vanity-path direct module floors at 60", func(t *testing.T) {
+	t.Run("archived built direct module floors at 60", func(t *testing.T) {
 		in := buildScoreInput(graph, months)
-		in.Maintainers[yaml] = archivedRepo()
+		in.Maintainers[stale] = archivedRepo()
 		ps := scorer.ScoreAll(in)
 
 		h := ps.HeadlineCandidate
-		if ps.HeadlineDriver != "archived_floor" || ps.OverallScore != 60 || h == nil || h.DrivingDep != yaml {
-			t.Fatalf("headline = %s %d %+v, want archived_floor 60 on %s", ps.HeadlineDriver, ps.OverallScore, h, yaml)
+		if ps.HeadlineDriver != "archived_floor" || ps.OverallScore != 60 || h == nil || h.DrivingDep != stale {
+			t.Fatalf("headline = %s %d %+v, want archived_floor 60 on %s", ps.HeadlineDriver, ps.OverallScore, h, stale)
 		}
 		if ps.OverallLevel != scorer.RiskHigh {
 			t.Errorf("overall level = %s, want HIGH", ps.OverallLevel)
 		}
-		if !hasFactor(scoreOf(t, ps, yaml), "archived") {
-			t.Errorf("%s: risk factors %v lack archived", yaml, scoreOf(t, ps, yaml).RiskFactors)
+		if !hasFactor(scoreOf(t, ps, stale), "archived") {
+			t.Errorf("%s: risk factors %v lack archived", stale, scoreOf(t, ps, stale).RiskFactors)
 		}
-		if !hasTimeBomb(ps, "archived", yaml) {
-			t.Errorf("%s not reported as an archived time bomb", yaml)
-		}
-	})
-
-	t.Run("old tag with recent push is not unmaintained", func(t *testing.T) {
-		const (
-			oldTagMonths = 40
-			recentPush   = 1
-			stalePush    = 30
-		)
-		monthsAgo := func(n int) time.Time { return buildScoreNow.AddDate(0, -n, 0) }
-		months := map[string]int{yaml: 6, rare: oldTagMonths, stale: oldTagMonths, graphOnly: 6}
-
-		in := buildScoreInput(graph, months)
-		in.Maintainers[rare] = &scanner.MaintainerInfo{DataAvailable: true, LastCommitDate: monthsAgo(recentPush)}
-		in.Maintainers[stale] = &scanner.MaintainerInfo{DataAvailable: true, LastCommitDate: monthsAgo(stalePush)}
-		ps := scorer.ScoreAll(in)
-
-		rareScore, staleScore := scoreOf(t, ps, rare), scoreOf(t, ps, stale)
-		if hasFactor(rareScore, "unmaintained") {
-			t.Errorf("%s: factors %v include unmaintained despite a push %d month ago", rare, rareScore.RiskFactors, recentPush)
-		}
-		if got := rareScore.Maintenance.MonthsInactive(); got != recentPush {
-			t.Errorf("%s: MonthsInactive = %d, want %d", rare, got, recentPush)
-		}
-		if rareScore.Maintenance.MonthsSinceRelease != oldTagMonths {
-			t.Errorf("%s: MonthsSinceRelease = %d, want the release age %d kept", rare, rareScore.Maintenance.MonthsSinceRelease, oldTagMonths)
-		}
-		if !hasFactor(staleScore, "unmaintained") {
-			t.Errorf("%s: factors %v lack unmaintained for an old tag and an old push", stale, staleScore.RiskFactors)
-		}
-		if rareScore.RiskScore >= staleScore.RiskScore {
-			t.Errorf("active module scored %d, abandoned one %d, want active lower", rareScore.RiskScore, staleScore.RiskScore)
-		}
-
-		// Control: without GitHub data the same old tag reads as unmaintained.
-		delete(in.Maintainers, rare)
-		ps = scorer.ScoreAll(in)
-		if !hasFactor(scoreOf(t, ps, rare), "unmaintained") {
-			t.Errorf("control: %s lacks unmaintained without activity data", rare)
+		if !hasTimeBomb(ps, "archived", stale) {
+			t.Errorf("%s not reported as an archived time bomb", stale)
 		}
 	})
 }

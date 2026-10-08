@@ -31,71 +31,9 @@ func proxyHost(proxyURL string) string {
 type MaintenanceInfo struct {
 	LastRelease        time.Time `json:"last_release"`
 	MonthsSinceRelease int       `json:"months_since_release"`
-
-	// LastActivity is the GitHub pushed_at date of the module's repository
-	// (MaintainerInfo.LastCommitDate). It counts a push to any branch, bots
-	// included, so it is a looser signal than the default branch's latest
-	// commit. The module proxy does not expose it: the scorer backfills it from
-	// the maintainer scan, and it stays zero when that data is unavailable
-	// (no token, non-GitHub module, API failure).
-	LastActivity time.Time `json:"last_activity,omitzero"`
-
-	// MonthsSinceActivity is the calendar-month age of LastActivity. It is
-	// meaningful only when LastActivity is non-zero.
-	MonthsSinceActivity int `json:"months_since_activity,omitempty"`
-
-	Archived      bool   `json:"archived"`
-	Deprecated    bool   `json:"deprecated"`
-	LatestVersion string `json:"latest_version"`
-
-	// OriginURL is the source repository URL from the module proxy's .info
-	// Origin field, taken from the responses already fetched for this module
-	// (the latest version's, else the scanned version's). It is empty when the
-	// proxy reports no Origin, which is common for old and gopkg.in modules.
-	// It feeds the maintainer scanner's repository resolution and is not part
-	// of the JSON output.
-	OriginURL string `json:"-"`
-}
-
-// OriginURLs returns the proxy Origin.URL of every module in maintenance that
-// has one, keyed by module path, for MaintainerScanner.OriginURLs.
-func OriginURLs(maintenance map[string]*MaintenanceInfo) map[string]string {
-	out := make(map[string]string, len(maintenance))
-	for path, info := range maintenance {
-		if info != nil && info.OriginURL != "" {
-			out[path] = info.OriginURL
-		}
-	}
-	return out
-}
-
-// HasActivity reports whether repository activity is known for the module.
-func (m *MaintenanceInfo) HasActivity() bool {
-	return m != nil && !m.LastActivity.IsZero()
-}
-
-// MonthsInactive returns the months since the module last showed signs of
-// maintenance: the smaller of MonthsSinceRelease and MonthsSinceActivity when
-// activity is known, otherwise MonthsSinceRelease alone. A repository that is
-// pushed to but rarely tagged is therefore not mistaken for an abandoned one,
-// while a module with no activity data keeps the release-only behaviour.
-// MonthsSinceRelease stays the right value for statements that are specifically
-// about releases.
-func (m *MaintenanceInfo) MonthsInactive() int {
-	if m == nil {
-		return 0
-	}
-	if !m.HasActivity() {
-		return m.MonthsSinceRelease
-	}
-	return min(m.MonthsSinceRelease, m.MonthsSinceActivity)
-}
-
-// MonthsSince returns the whole calendar months from t to now, clamped at 0.
-// It is the single month formula behind MonthsSinceRelease and
-// MonthsSinceActivity.
-func MonthsSince(now, t time.Time) int {
-	return monthsSince(now, t)
+	Archived           bool      `json:"archived"`
+	Deprecated         bool      `json:"deprecated"`
+	LatestVersion      string    `json:"latest_version"`
 }
 
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
@@ -132,14 +70,6 @@ type proxyVersionInfo struct {
 		Ref  string `json:"Ref"`
 		Hash string `json:"Hash"`
 	} `json:"Origin,omitempty"`
-}
-
-// originURL returns the Origin.URL, or "" when the proxy reported none.
-func (v *proxyVersionInfo) originURL() string {
-	if v == nil || v.Origin == nil {
-		return ""
-	}
-	return v.Origin.URL
 }
 
 // ScanAll checks maintenance health for all dependencies.
@@ -212,18 +142,12 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 	if versionErr == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
 		info.MonthsSinceRelease = monthsSince(ms.ScanStart, versionInfo.Time)
-		info.OriginURL = versionInfo.originURL()
 	}
 
 	// Check latest version to see if there's a newer release.
-	latestVersion, latestTime, latestOrigin := ms.fetchLatestVersion(ctx, modPath)
+	latestVersion, latestTime := ms.fetchLatestVersion(ctx, modPath)
 	if latestVersion != "" {
 		info.LatestVersion = latestVersion
-		// The latest version's Origin is preferred: it reflects where the
-		// module lives now. The scanned version's is the fallback.
-		if latestOrigin != "" {
-			info.OriginURL = latestOrigin
-		}
 		if !latestTime.IsZero() {
 			info.LastRelease = latestTime
 			info.MonthsSinceRelease = monthsSince(ms.ScanStart, latestTime)
@@ -268,7 +192,7 @@ func (ms *MaintenanceScanner) fetchVersionInfo(ctx context.Context, modPath, ver
 	return &info, nil
 }
 
-func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath string) (version string, t time.Time, originURL string) {
+func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath string) (string, time.Time) {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@latest", ms.proxyURL, escapedPath)
 
@@ -277,15 +201,15 @@ func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath st
 		Purpose: "maintenance:latest",
 	})
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return "", time.Time{}, ""
+		return "", time.Time{}
 	}
 
 	var info proxyVersionInfo
 	if err := json.Unmarshal(body, &info); err != nil {
-		return "", time.Time{}, ""
+		return "", time.Time{}
 	}
 
-	return info.Version, info.Time, info.originURL()
+	return info.Version, info.Time
 }
 
 func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath string, info *MaintenanceInfo) {

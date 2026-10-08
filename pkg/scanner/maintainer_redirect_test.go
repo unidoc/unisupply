@@ -89,12 +89,11 @@ func (g *redirectGitHub) scanner() *MaintainerScanner {
 func TestMaintainerScanner_FollowsRenameRedirect(t *testing.T) {
 	gh := newRedirectGitHub(t)
 	graph := makeGraphWithDeps(
-		struct{ path, ver string }{"dario.cat/mergo", "v1.0.0"},
+		struct{ path, ver string }{"github.com/imdario/mergo", "v0.3.16"},
 	)
 	ms := gh.scanner()
-	ms.OriginURLs = map[string]string{"dario.cat/mergo": "https://github.com/imdario/mergo"}
 
-	mi := ms.ScanAll(context.Background(), graph)["dario.cat/mergo"]
+	mi := ms.ScanAll(context.Background(), graph)["github.com/imdario/mergo"]
 	if mi == nil {
 		t.Fatal("no maintainer info")
 	}
@@ -103,9 +102,6 @@ func TestMaintainerScanner_FollowsRenameRedirect(t *testing.T) {
 	}
 	if mi.Owner != "darccio" || mi.Repo != "mergo" {
 		t.Errorf("Owner/Repo = %s/%s, want the canonical darccio/mergo", mi.Owner, mi.Repo)
-	}
-	if mi.SourceRepo != "github.com/imdario/mergo" || mi.SourceRepoVia != SourceViaProxyOrigin {
-		t.Errorf("SourceRepo = %q via %q, want the resolved (old) name via proxy_origin", mi.SourceRepo, mi.SourceRepoVia)
 	}
 	if mi.OwnerName != "Dario Castane" || mi.ContributorCount != 2 {
 		t.Errorf("OwnerName = %q, ContributorCount = %d: follow-up calls must use the canonical name", mi.OwnerName, mi.ContributorCount)

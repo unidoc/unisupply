@@ -886,9 +886,6 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			addBullet(details, fmt.Sprintf("Last release: %d months ago", ds.Maintenance.MonthsSinceRelease), regular)
 		}
-		if ds.Maintenance.HasActivity() {
-			addBullet(details, fmt.Sprintf("Last push: %d months ago", ds.Maintenance.MonthsSinceActivity), regular)
-		}
 		if ds.Maintenance.Archived {
 			addBullet(details, "Repository archived", regular)
 		}

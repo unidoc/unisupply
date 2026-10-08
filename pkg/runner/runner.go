@@ -255,14 +255,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	rep.Done("")
 
-	// Vanity modules (go.yaml.in/..., k8s.io/...) reach GitHub through the
-	// proxy Origin the maintenance scan already read, so no extra request is
-	// made to find them.
-	originURLs := scanner.OriginURLs(maintenance)
-
 	if githubToken == "" && !offlineMode {
 		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
-		if n := scanner.CountGitHubDepsWithOrigins(graph, originURLs); n > 20 {
+		if n := scanner.CountGitHubDeps(graph); n > 20 {
 			// A rejected token was cleared above, so the token is empty here
 			// too; "unset" would tell that user to set a token they did set.
 			reason := "GITHUB_TOKEN is unset"
@@ -277,7 +272,6 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	maintainerScanner := scanner.NewMaintainerScanner(timeout, githubToken)
 	maintainerScanner.ScanStart = scanStart
 	maintainerScanner.TokenRejected = tokenStatus.rejected
-	maintainerScanner.OriginURLs = originURLs
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
