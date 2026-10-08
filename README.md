@@ -99,7 +99,7 @@ path that pulled the module in.
 | Scanner          | What it checks                                          | Data source                |
 | ---------------- | ------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs in dependencies                              | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, last GitHub push, archive status, deprecation | Go Module Proxy (push date from the GitHub scan) |
+| Maintenance      | Last release, archive status, deprecation               | Go Module Proxy            |
 | Maintainer       | Contributors, bus factor, activity, org verification    | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules        | Built-in list              |
 | Resilience       | Release cadence, governance files, version scheme       | GitHub API                 |
@@ -153,7 +153,7 @@ Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
 compiled into your binary (it is required by a dependency's `go.mod` but none
 of its packages is imported). `unisupply` classifies each module against the
 main module's own `go list -deps ./...` and `go list -deps -test ./...` for
-linux, darwin and windows, and reports `in_build` (`false`: graph only),
+linux, darwin and windows on amd64 and arm64, and reports `in_build` (`false`: graph only),
 `test_only` and `platforms` (the GOOS values of a platform-specific module) in
 the JSON output; the text and PDF reports label such modules `outside build` or
 `test-only`. An unknown classification is omitted and never discounts. When the
@@ -285,10 +285,6 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
-- `no_unmaintained_months` — fail a dependency that has had neither a release
-  nor a GitHub push within that many months. A repository pushed to recently
-  passes even if its last tag is old; without push data (no token, non-GitHub
-  module) the release age alone decides.
 - `no_unmaintained_months`, `no_archived` and `no_deprecated` skip modules
   confirmed outside the build (`in_build: false`, in the module graph only). A
   module whose build membership is unknown is still checked, and so is a
@@ -469,15 +465,6 @@ the same data already public in your `go.mod`.
 | `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
 | `cloud.unidoc.io` | License key + metered usage counters (doc count, package version, hostname, local IP, MAC address); no source, no scan results | PDF report generation, only when `UNIDOC_LICENSE_API_KEY` is set | opt-in — omit `--format pdf` |
-
-**Vanity import paths.** A module whose path is not on `github.com` (for
-example `gopkg.in/yaml.v3` or `go.yaml.in/yaml/v3`) is mapped to its GitHub
-repository so the maintainer scanner can report archived status and activity
-for it. The mapping uses the `Origin` field of the `proxy.golang.org` responses
-the maintenance scanner already fetches, when it names a `github.com`
-repository, and a static `gopkg.in` rule that needs no request. No other host
-is contacted to resolve it, and the maintainer scanner still sends only the
-repository owner and name to `api.github.com`.
 
 **GitHub token validation.** When a token is supplied, `unisupply` checks it
 once, after resolving the dependency graph and before any scanner runs, with a

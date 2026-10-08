@@ -10,7 +10,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Scanner          | What it checks                                             | Data source                |
 | ---------------- | ---------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs (call-graph-aware via `govulncheck`)            | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, last GitHub push, archive status, deprecation | Go Module Proxy (push date from the GitHub scan) |
+| Maintenance      | Last release, archive status, deprecation                  | Go Module Proxy            |
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
@@ -19,20 +19,6 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
 | Integrity        | `go.mod` `replace`/`exclude` directive audit, `go.sum` verification, pseudo-version pin audit | `go.mod`/`go.sum` (offline) |
-
-The Maintainer scanner finds a module's GitHub repository in this order: a
-`github.com/` module path; the `Origin.URL` the module proxy reports in the
-`.info` responses the Maintenance scanner already fetches, when it points at
-`github.com`; then a static `gopkg.in` rule (`gopkg.in/pkg.vN` is
-`github.com/go-pkg/pkg`, `gopkg.in/user/pkg.vN` is `github.com/user/pkg`). This
-lets vanity paths such as `gopkg.in/yaml.v3` (archived upstream) report archive
-status, activity and maintainer data. Mapped modules carry `source_repo` and
-`source_repo_via` (`proxy_origin` or `gopkg_in_rule`) in the JSON
-`maintainer` object and a "Source repository" line in the text report. No
-extra host is contacted. Limits: modules whose proxy `Origin` is not on GitHub
-(for example `golang.org/x/*`, served from `go.googlesource.com`) and modules
-with no `Origin` outside `gopkg.in` are not covered, and the Resilience
-scanner's governance-file checks still read only `github.com/` paths.
 
 A repository that GitHub has renamed or transferred answers with a redirect.
 The Maintainer scanner follows one hop, on `api.github.com` only, and reports
@@ -348,7 +334,7 @@ but no package from it is compiled into your binary.
 | Component        | Range  | Notes                                                          |
 | ---------------- | ------ | -------------------------------------------------------------- |
 | Vulnerabilities  | 0–100  | CRITICAL = 100, HIGH = 80, MEDIUM = 50, LOW = 25; capped at 100 |
-| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo), on the newer of the last release and the last GitHub push when the push date is known; 100 if archived; 30 if unknown |
+| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo); 100 if archived; 30 if unknown |
 | Depth            | 0–100  | 0 (direct), 20 (depth 1), 40 (deeper)                          |
 | Maintainer       | 0–100  | 0 for trusted namespaces / multi-maintainer; 50 for bus factor 1; 30 if unknown |
 | Maturity         | 0–100  | 0 for trusted namespaces or v1+; 30 for v0.x; 50 if untagged   |
@@ -358,32 +344,6 @@ namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,
 `go.opentelemetry.io/`, `github.com/golang/`, `github.com/google/`,
 `github.com/googleapis/`, etc.) — these projects use v0.x and centralized
 maintainership by design, not neglect.
-
-### Maintenance activity
-
-The Maintenance axis does not rest on release tags alone. The module proxy
-reports the last release; the Maintainer scanner reports the repository's
-GitHub `pushed_at` date. When the push date is known the report carries it as
-`maintenance.last_activity` and `maintenance.months_since_activity`, and the
-axis bands on `min(months since release, months since push)`. The
-`unmaintained` risk factor, the `unmaintained_1yr` / `unmaintained_2yr`
-summary counts, the "no release in N months" wording in the text report and the
-`no_unmaintained_months` policy rule all use the same combined value, so the
-report, the score and the policy agree. A repository that is pushed to but
-rarely tagged (for example a module pinned to a commit newer than its last
-tag) is therefore not scored like an abandoned one. `months_since_release`
-still reports the release age on its own.
-
-Without push data (no GitHub token, a non-GitHub module, an API failure) the
-axis falls back to the release age alone, exactly as before. Archived
-repositories stay at 100 whatever their activity.
-
-Known limit: `pushed_at` counts a push to **any** branch, including bot and
-CI-maintenance pushes, so a repository that only receives automated pushes can
-look active. A stricter signal is the latest commit on the default branch
-(`GET /repos/{owner}/{repo}/commits?per_page=1`, one extra API call per
-module). It is a possible follow-up, to be revisited if bot pushes are seen
-masking abandoned repositories.
 
 ## Integrity
 
@@ -528,16 +488,19 @@ report.
 
 ### How it is classified
 
-For each of `linux`, `darwin` and `windows`, with `CGO_ENABLED=0` and
-`CGO_ENABLED=1`, it runs two lists in the main module's directory:
+For each of `linux`, `darwin` and `windows` on `amd64` and `arm64`, with
+`CGO_ENABLED=0` and `CGO_ENABLED=1`, it runs two lists in the main module's
+directory:
 
 1. **Production:** `go list -e -deps ./...`, the modules whose packages the main
    module's non-test code imports, directly or transitively.
 2. **Production plus tests:** `go list -e -deps -test ./...`, which adds only
    the packages the main module's own tests import.
 
-That is 12 `go list` runs (four at a time); a module counts as present when any
-GOOS lists it. In offline mode the lists read only the local module cache and
+That is 24 `go list` runs (four at a time); a module counts as present when any
+target lists it. Every GOOS/GOARCH pair is listed whatever the host, so the
+verdict for a module imported only from an `_amd64.go` or `_arm64.go` file does
+not depend on the machine the scan runs on. In offline mode the lists read only the local module cache and
 classification is unavailable on a cold cache. They also run with
 `-mod=readonly`, so a scan never rewrites the scanned project's `go.mod` or
 `go.sum`; if either needs updating (`go mod tidy`), classification is
@@ -572,8 +535,8 @@ absent, so that platform is treated as failed instead.
 | `in_build` | `true` | In a production or test list: some package of the module is compiled into the main module or its tests |
 | | `false` | In the module graph only: no list contains it |
 | | absent | Unknown |
-| `platforms` | `["windows"]` | A production module listed on a strict subset of the three GOOS values, for example a module imported only from a `_windows.go` file |
-| | absent | Built on all three, or unknown; not an assertion about other GOOS values |
+| `platforms` | `["windows"]` | A production module listed on a strict subset of the three GOOS values (on either architecture), for example a module imported only from a `_windows.go` file |
+| | absent | Built on all three, or unknown; not an assertion about other GOOS values. An architecture-only import is not reported here |
 
 `in_build` is three-state and a consumer must never read absence as `false`:
 only an explicit `false` is a confirmed graph-only module. Every consumer
@@ -586,20 +549,35 @@ show an `outside build` label next to `test-only` under the same rule.
 - **Build tags.** A package behind a custom tag (`//go:build integration`) is in
   no list, so a module imported only there looks graph-only. Guard: a module
   that `go.mod` requires **directly** (no `// indirect`) but that no list
-  contains gets `in_build` absent, not `false`. The guard covers direct
-  requirements only; an indirect module cannot be imported by the main module
-  itself, so graph-only is the likely reason it was not found.
-- **Platforms.** Only `linux`, `darwin` and `windows` are listed, and GOARCH is
-  not varied. A module imported only on another GOOS, or only on a particular
-  architecture, is not seen.
-- **Per-platform failure.** A GOOS whose lists fail (for example a package that
+  contains gets `in_build` absent, not `false`, and so does every module
+  reachable from it in the module graph (`go mod graph`), since the tagged
+  build compiles that requirement's own dependencies. The rule is "reachable
+  from", not "reachable only through": for go 1.17 and newer, `go mod tidy`
+  lists every module the tagged code needs as a `// indirect` requirement of
+  the main module, so those modules also have an edge from the main module. A
+  real case is gin, which imports `github.com/bytedance/sonic` only under
+  `-tags=sonic`: sonic and the modules it pulls in (`cloudwego/base64x`,
+  `klauspost/cpuid/v2`, `twitchyliquid64/golang-asm`, `golang.org/x/arch`,
+  ...) are all left unknown. The module graph is coarser than the package
+  graph, so modules that sonic's own tests need, and nothing compiles, are
+  left unknown too. Other indirect modules are not guarded: the main module
+  cannot import them directly, so graph-only is the likely reason they were
+  not found.
+- **`tool` directives.** A module needed only by a go 1.24 `tool` directive is
+  in no list: `go tool` builds the tool separately, and nothing of it is linked
+  into the main module. It is reported as `in_build: false` like any other
+  graph-only module, so the outside-the-build exemptions below apply to it.
+- **Platforms.** Only `linux`, `darwin` and `windows` on `amd64` and `arm64`
+  are listed. A module imported only on another GOOS (`freebsd`, `js`, ...) or
+  another architecture (`386`, `riscv64`, ...) is not seen.
+- **Per-platform failure.** A GOOS/GOARCH target whose lists fail (for example a package that
   does not build on Windows) does not discard the others. Everything the failed
   runs did resolve still counts as evidence that a module is built; the
   platforms that succeeded classify the rest. A failed platform cannot prove
   that a module is absent, so while any platform has failed, a module found on
   no list gets `in_build` absent rather than `false`, a `test_only: true`
   verdict is withheld (the module may be production on the failed platform) and
-  `platforms` is left unset. The warning names the failing GOOS. Only when
+  `platforms` is left unset. The warning names the failing GOOS and GOARCH. Only when
   every platform fails is classification unavailable: every field stays absent
   and a warning says so.
 

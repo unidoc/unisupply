@@ -82,10 +82,9 @@ well-known module. **Strict preset:** enabled.
 
 #### `.no_unmaintained_months` *(int)*
 Fails any dependency whose last release is older than the given number
-of months, unless its repository was pushed to within that many months
-(GitHub `pushed_at`, any branch, when known). Dependencies confirmed to be
-outside the build (`in_build: false`) are exempt; a dependency whose build
-membership is unknown is not. **Strict preset:** `24`.
+of months. Dependencies confirmed to be outside the build (`in_build: false`)
+are exempt; a dependency whose build membership is unknown is not.
+**Strict preset:** `24`.
 
 ### Dependency graph rules
 

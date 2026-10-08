@@ -43,10 +43,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Scores and policy results can change for existing projects, in both
   directions.** Scores can drop for repositories whose p95 or archived floor was
-  set by a module that is only in the module graph and never built, and for
-  actively developed repositories that rarely tag releases. Scores can rise for
-  repositories with an archived dependency under a vanity import path (for
-  example `gopkg.in/yaml.v3`), which now counts as archived. Test-only
+  set by a module that is only in the module graph and never built. Test-only
   classification now works for the first time, so every test-only discount (CVE
   tier, archived and CVE floors, time bombs, pseudo-version checks and the
   `forbid_pseudo_versions` exemption) applies to real scans; scores and policy
@@ -65,12 +62,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   discounts anything. The text and PDF reports label confirmed graph-only
   modules `outside build`, next to `test-only`.
 - **Classification uses the main module's own package lists** (`go list -e
-  -deps ./...` and `-deps -test ./...`, for each of linux, darwin and windows,
-  with `CGO_ENABLED` 0 and 1) instead of `go list all`. A package behind a
-  custom build tag is not seen, so a module that `go.mod` requires directly but
-  that no list contains is left unclassified rather than called graph-only. If
-  one platform fails to list, the others still classify, and the warning names
-  the one that failed. Under `--offline` these lists run with `-mod=readonly`,
+  -deps ./...` and `-deps -test ./...`, for each of linux, darwin and windows
+  on amd64 and arm64, with `CGO_ENABLED` 0 and 1) instead of `go list all`.
+  Every target is listed whatever the host, so the result does not depend on
+  the machine the scan runs on. A package behind a custom build tag is not
+  seen, so a module that `go.mod` requires directly but that no list contains
+  is left unclassified rather than called graph-only, and so is every module
+  reachable from it in the module graph (gin's `sonic` dependencies under
+  `-tags=sonic`, for example). If one platform fails to list, the others still
+  classify, and the warning names the one that failed. A module needed only by
+  a go 1.24 `tool` directive is classified as outside the build. Under `--offline` these lists run with `-mod=readonly`,
   so the scanned project's `go.mod` and `go.sum` are never rewritten; when they
   need updating, classification is unavailable and the warning names that cause.
   See [docs/scanners.md](docs/scanners.md#build-membership).
@@ -112,30 +113,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
   `replace` directive is a `go.mod`-level signal).
 
-#### Maintenance uses the newer of the last release and the last push
-
-- **A repository that is pushed to but rarely tagged is no longer scored as
-  abandoned.** When GitHub data is available, the maintenance score, the
-  `unmaintained` risk factor and the unmaintained counts use whichever is newer
-  of the last release and the last push. The JSON `maintenance` object gains
-  `last_activity` and `months_since_activity`, and the text and PDF reports show
-  "Last push". Without GitHub data the release age alone is used, as before.
-- **The `no_unmaintained_months` policy rule is more lenient for actively pushed
-  repositories:** a dependency passes when it was released or pushed to within
-  the limit. GitHub's push date counts a push to any branch, bots included, so
-  a repository that only receives automated pushes can look active.
-
-#### Archived, activity and maintainer data for vanity import paths
-
-- **Modules whose path is not on `github.com` now get GitHub data when their
-  repository can be determined without contacting a new host.** The repository
-  comes from the `Origin` the module proxy already returns, when it names a
-  `github.com` repository, or from the fixed `gopkg.in` rule
-  (`gopkg.in/yaml.v3` is `go-yaml/yaml`). The maintainer record carries
-  `source_repo` and `source_repo_via` (`proxy_origin` or `gopkg_in_rule`).
-  Modules served from other hosts, such as `golang.org/x/*`, are not covered.
-  The network contract is unchanged.
-
 #### Time bombs explained in every report; PDF reports now list them
 
 - **The text report, PDF report and weekly security issue now say what a
@@ -143,8 +120,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   test-only or outside the build, that is archived upstream or has a CISA
   KEV-listed or CRITICAL CVE. An archived
   module cannot be fixed by updating — it has to be replaced or removed — and
-  age alone does not make a time bomb (modules with no recent release or push
-  are counted under Unmaintained).
+  age alone does not make a time bomb (modules with no recent release are
+  counted under Unmaintained).
 - **PDF reports now have a Time Bombs section** under Key Findings, listing
   each one's kind, module and detail. Previously the PDF named only the
   headline rule on its cover (`Driver: archived_floor`), not the module
