@@ -53,7 +53,7 @@ type Dependency struct {
 
 	// InBuild is a three-state field indicating whether any package of this
 	// module is compiled into the main module's production code or tests
-	// (any of linux, darwin, windows, with cgo on or off):
+	// (any of linux, darwin, windows on amd64 or arm64, with cgo on or off):
 	//
 	//   nil    - unknown: classification was unavailable; or the module was
 	//            found by no list but the verdict is not safe to give (the
@@ -69,12 +69,13 @@ type Dependency struct {
 	//            own tests do not count.
 	InBuild *bool
 
-	// Platforms lists the GOOS values on which a production module is built,
-	// sorted. It is set only when the module is in the production package
-	// list of a strict subset of the GOOS values that were listed, so a nil
-	// value means "all listed platforms" (or unknown), not "none". It is left
-	// nil when any GOOS could not be listed, because a subset claim over a
-	// platform that was not observed cannot be backed.
+	// Platforms lists the GOOS values on which a production module is built
+	// (on any listed GOARCH), sorted. It is set only when the module is in the
+	// production package list of a strict subset of the GOOS values that were
+	// listed, so a nil value means "all listed platforms" (or unknown), not
+	// "none". It is left nil when any GOOS/GOARCH target could not be listed,
+	// because a subset claim over a platform that was not observed cannot be
+	// backed.
 	Platforms []string
 }
 
@@ -313,12 +314,17 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 	return nil
 }
 
-// listGOOS are the target operating systems whose package graphs are unioned.
-// `go list` evaluates build constraints for one GOOS at a time, so a module
-// imported only from a _windows.go file is invisible on a darwin or linux host.
-// Sorted, so Dependency.Platforms comes out sorted without a further pass.
-// GOARCH-only differences are out of scope.
-var listGOOS = []string{"darwin", "linux", "windows"}
+// listGOOS and listGOARCH are the targets whose package graphs are unioned:
+// every GOOS with every GOARCH. `go list` evaluates build constraints for one
+// target at a time, so a module imported only from a _windows.go file is
+// invisible on a darwin or linux host, and one imported only from an
+// _amd64.go file is invisible on an arm64 host. Listing every pair makes the
+// verdict independent of the machine the scan runs on. listGOOS is sorted, so
+// Dependency.Platforms comes out sorted without a further pass.
+var (
+	listGOOS   = []string{"darwin", "linux", "windows"}
+	listGOARCH = []string{"amd64", "arm64"}
+)
 
 // maxParallelLists bounds the concurrent `go list` subprocesses. Each one
 // loads the whole package graph, so the limit keeps memory and cache
@@ -327,9 +333,10 @@ const maxParallelLists = 4
 
 // listRun identifies one `go list` invocation.
 type listRun struct {
-	goos string
-	cgo  bool // CGO_ENABLED=1; false lists with CGO_ENABLED=0
-	test bool // include the main module's tests (-test)
+	goos   string
+	goarch string
+	cgo    bool // CGO_ENABLED=1; false lists with CGO_ENABLED=0
+	test   bool // include the main module's tests (-test)
 }
 
 // listResult is the outcome of one listRun.
@@ -359,20 +366,25 @@ type listResult struct {
 	needsModUpdate bool
 }
 
-// platformList merges the runs of one GOOS: production and test module sets
-// are the union over CGO_ENABLED=0 and CGO_ENABLED=1.
+// platformList merges the runs of one GOOS/GOARCH target: production and test
+// module sets are the union over CGO_ENABLED=0 and CGO_ENABLED=1.
 type platformList struct {
-	goos       string
-	prod, test map[string]struct{}
-	unresolved []string
-	err        error
+	goos, goarch string
+	prod, test   map[string]struct{}
+	unresolved   []string
+	err          error
 
-	// needsModUpdate is true when any run of this GOOS reported that go.mod or
-	// go.sum needs updating.
+	// needsModUpdate is true when any run of this target reported that go.mod
+	// or go.sum needs updating.
 	needsModUpdate bool
 }
 
-// clean reports whether every run for this GOOS completed and mapped every
+// name is the target as "goos/goarch".
+func (p *platformList) name() string {
+	return p.goos + "/" + p.goarch
+}
+
+// clean reports whether every run for this target completed and mapped every
 // package to a module. Only a clean platform can prove that a module is absent.
 func (p *platformList) clean() bool {
 	return p.err == nil && len(p.unresolved) == 0
@@ -399,8 +411,8 @@ func (p *platformList) failure() string {
 // limitation of the results.
 //
 // Two lists are taken per target platform, for each of linux, darwin and
-// windows with CGO_ENABLED=0 and CGO_ENABLED=1 (the union of the cgo settings
-// is what a build on that GOOS may use):
+// windows on amd64 and arm64, with CGO_ENABLED=0 and CGO_ENABLED=1 (the union
+// of the cgo settings is what a build on that target may use):
 //
 //  1. Production: `go list -e -deps ./...`, the modules whose packages the main
 //     module's non-test code imports, directly or transitively.
@@ -417,7 +429,8 @@ func (p *platformList) failure() string {
 // &false). A module only in a test list is test-only (&true). Both are in the
 // build (InBuild &true). A module in no list is outside the build (InBuild
 // &false), with the exceptions below. Platforms records the GOOS values of a
-// production module that is not built on every platform.
+// production module that is not built on every GOOS; GOARCH differences are
+// unioned per GOOS and not reported.
 //
 // Known limit: a package behind a custom build tag (`//go:build integration`)
 // is in no list. A module the main module requires directly (no `// indirect`)
@@ -469,18 +482,18 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 
 	platforms, tolerated := listPlatforms(ctx, dir)
 
-	var failed []string // "GOOS=x (reason)"
-	var okOS []string
+	var failed []string // "GOOS=x GOARCH=y (reason)"
+	var okTargets []string
 	needsModUpdate := false
 	for _, p := range platforms {
 		if p.clean() {
-			okOS = append(okOS, p.goos)
+			okTargets = append(okTargets, p.name())
 			continue
 		}
-		failed = append(failed, fmt.Sprintf("GOOS=%s (%s)", p.goos, p.failure()))
+		failed = append(failed, fmt.Sprintf("GOOS=%s GOARCH=%s (%s)", p.goos, p.goarch, p.failure()))
 		needsModUpdate = needsModUpdate || p.needsModUpdate
 	}
-	if len(okOS) == 0 {
+	if len(okTargets) == 0 {
 		return unavailable(failed, needsModUpdate), ""
 	}
 	partial := len(failed) > 0
@@ -541,7 +554,7 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 		case len(prodOn) > 0:
 			notTest := false
 			dep.IsTestOnly = &notTest
-			if !partial && len(prodOn) < len(platforms) {
+			if !partial && len(prodOn) < len(listGOOS) {
 				dep.Platforms = prodOn
 			}
 		case inTest:
@@ -564,7 +577,7 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 	if partial {
 		warning = fmt.Sprintf(
 			"go list failed for %s; classified from %s only. Modules found on no platform are left unclassified (InBuild nil), and test-only and platform-restriction verdicts are withheld",
-			strings.Join(failed, "; "), strings.Join(okOS, ","))
+			strings.Join(failed, "; "), strings.Join(okTargets, ","))
 	}
 	if len(tolerated) > 0 {
 		note = "go list reported package errors that do not affect module classification: " + strings.Join(tolerated, "; ")
@@ -606,16 +619,19 @@ func reachableFrom(graph *Graph, seeds []string) map[string]bool {
 	return seen
 }
 
-// listPlatforms runs the production and test lists for every GOOS in listGOOS
-// with CGO_ENABLED=0 and CGO_ENABLED=1 (12 `go list` runs, at most
-// maxParallelLists at once) and merges them per GOOS. It also returns the
-// deduplicated, sorted per-package errors the runs tolerated.
+// listPlatforms runs the production and test lists for every GOOS/GOARCH pair
+// of listGOOS and listGOARCH with CGO_ENABLED=0 and CGO_ENABLED=1 (24 `go list`
+// runs, at most maxParallelLists at once) and merges them per target, ordered
+// by GOOS then GOARCH. It also returns the deduplicated, sorted per-package
+// errors the runs tolerated.
 func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, tolerated []string) {
-	runs := make([]listRun, 0, len(listGOOS)*4)
+	runs := make([]listRun, 0, len(listGOOS)*len(listGOARCH)*4)
 	for _, goos := range listGOOS {
-		for _, cgo := range []bool{false, true} {
-			for _, test := range []bool{false, true} {
-				runs = append(runs, listRun{goos: goos, cgo: cgo, test: test})
+		for _, goarch := range listGOARCH {
+			for _, cgo := range []bool{false, true} {
+				for _, test := range []bool{false, true} {
+					runs = append(runs, listRun{goos: goos, goarch: goarch, cgo: cgo, test: test})
+				}
 			}
 		}
 	}
@@ -634,16 +650,18 @@ func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, 
 	}
 	wg.Wait()
 
-	byOS := make(map[string]*platformList, len(listGOOS))
-	platforms = make([]*platformList, 0, len(listGOOS))
+	byTarget := make(map[string]*platformList, len(listGOOS)*len(listGOARCH))
+	platforms = make([]*platformList, 0, len(listGOOS)*len(listGOARCH))
 	for _, goos := range listGOOS {
-		p := &platformList{goos: goos, prod: map[string]struct{}{}, test: map[string]struct{}{}}
-		byOS[goos] = p
-		platforms = append(platforms, p)
+		for _, goarch := range listGOARCH {
+			p := &platformList{goos: goos, goarch: goarch, prod: map[string]struct{}{}, test: map[string]struct{}{}}
+			byTarget[p.name()] = p
+			platforms = append(platforms, p)
+		}
 	}
 	toleratedSet := make(map[string]struct{})
 	for i, run := range runs {
-		res, p := results[i], byOS[run.goos]
+		res, p := results[i], byTarget[run.goos+"/"+run.goarch]
 		dst := p.prod
 		if run.test {
 			dst = p.test
@@ -749,7 +767,7 @@ func listPackages(ctx context.Context, dir string, run listRun) listResult {
 	args := listArgs(run, offline.Enabled())
 
 	netlog.Subprocess(
-		fmt.Sprintf("GOOS=%s CGO_ENABLED=%s go %s", run.goos, cgo, strings.Join(args, " ")),
+		fmt.Sprintf("GOOS=%s GOARCH=%s CGO_ENABLED=%s go %s", run.goos, run.goarch, cgo, strings.Join(args, " ")),
 		offline.SubprocessNote("module proxy/VCS may be contacted by the go toolchain; see GOPROXY"),
 	)
 
@@ -763,7 +781,7 @@ func listPackages(ctx context.Context, dir string, run listRun) listResult {
 	}
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(slices.Clone(env), "GOOS="+run.goos, "CGO_ENABLED="+cgo)
+	cmd.Env = append(slices.Clone(env), "GOOS="+run.goos, "GOARCH="+run.goarch, "CGO_ENABLED="+cgo)
 
 	out, err := cmd.Output()
 	if err != nil {

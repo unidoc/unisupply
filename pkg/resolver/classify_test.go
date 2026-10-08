@@ -463,6 +463,51 @@ import _ "example.com/unixonly"
 	wantPlatforms(t, g, "unixonly", []string{"darwin", "linux"})
 }
 
+// A module imported only on one GOARCH is production whatever the host
+// architecture: every GOOS is listed on both amd64 and arm64, so the verdict
+// does not depend on the runner. Platforms stays GOOS-granular: an arch-only
+// import is on every GOOS. The inherited GOARCH must not leak into the
+// listing.
+func TestClassify_ArchSpecificImportIsProduction(t *testing.T) {
+	t.Setenv("GOARCH", "riscv64")
+
+	g, warn := classify(t, fixture{
+		direct: []string{"prod", "amd64only", "arm64only", "linuxarm"},
+		files: map[string]string{
+			"main.go": `package main
+
+import _ "example.com/prod"
+
+func main() {}
+`,
+			"x_amd64.go": `package main
+
+import _ "example.com/amd64only"
+`,
+			"x_arm64.go": `package main
+
+import _ "example.com/arm64only"
+`,
+			"la.go": `//go:build linux && arm64
+
+package main
+
+import _ "example.com/linuxarm"
+`,
+		},
+	}, map[string]stubOpts{"prod": {}, "amd64only": {}, "arm64only": {}, "linuxarm": {}})
+
+	if warn != "" {
+		t.Errorf("unexpected warning: %q", warn)
+	}
+	for _, name := range []string{"prod", "amd64only", "arm64only", "linuxarm"} {
+		wantState(t, g, name, "false", "true")
+	}
+	wantPlatforms(t, g, "amd64only", nil)
+	wantPlatforms(t, g, "arm64only", nil)
+	wantPlatforms(t, g, "linuxarm", []string{"linux"})
+}
+
 // Imports gated on cgo and on !cgo are both seen: the lists are unioned over
 // CGO_ENABLED=0 and CGO_ENABLED=1.
 func TestClassify_CgoGatedImportsAreProduction(t *testing.T) {
