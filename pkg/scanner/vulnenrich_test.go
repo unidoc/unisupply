@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,8 +181,10 @@ func TestVulnEnrich_GHSAFixture(t *testing.T) {
 	if v.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL; warnings: %v", v.Severity, warns)
 	}
-	if calls != 3 {
-		t.Errorf("Expected 3 HTTP calls (OSV + NVD + GitHub), got %d", calls)
+	// OSV + OSV alias record (GHSA-vc3v-ppc7-v486, 404) + NVD + GitHub: the
+	// alias lookup now runs before NVD.
+	if calls != 4 {
+		t.Errorf("Expected 4 HTTP calls (OSV + OSV alias + NVD + GitHub), got %d", calls)
 	}
 }
 
@@ -746,3 +749,345 @@ func loadFixture(t *testing.T, name string) []byte {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// --- Alias cache ---
+
+func TestAliasCache_RoundTrip(t *testing.T) {
+	e := newEnricherWithTransport(t, &staticTransport{}, "", func() time.Time {
+		return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	})
+	e.saveAliasCache("GHSA-aaaa-bbbb-cccc", "HIGH")
+	sev, hit := e.loadAliasCache("GHSA-aaaa-bbbb-cccc")
+	if !hit || sev != "HIGH" {
+		t.Errorf("loadAliasCache = (%q, %v), want (HIGH, true)", sev, hit)
+	}
+	if _, hit := e.loadAliasCache("GHSA-other"); hit {
+		t.Error("unexpected hit for an alias that was never saved")
+	}
+}
+
+func TestAliasCache_Expiry(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, &staticTransport{}, "", func() time.Time { return now })
+	e.saveAliasCache("CVE-2026-1", "HIGH")
+
+	now = now.Add(23 * time.Hour)
+	if _, hit := e.loadAliasCache("CVE-2026-1"); !hit {
+		t.Error("entry should still be fresh after 23h")
+	}
+	now = now.Add(2 * time.Hour)
+	if _, hit := e.loadAliasCache("CVE-2026-1"); hit {
+		t.Error("entry should have expired after 25h")
+	}
+}
+
+func TestAliasCache_EmptySeverityIsHit(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	e := newEnricherWithTransport(t, &staticTransport{}, "", func() time.Time { return now })
+	e.saveAliasCache("CVE-2026-2", "")
+
+	// Well past the 1h failure TTL but inside 24h.
+	now = now.Add(5 * time.Hour)
+	sev, hit := e.loadAliasCache("CVE-2026-2")
+	if !hit || sev != "" {
+		t.Errorf("loadAliasCache = (%q, %v), want (empty, true)", sev, hit)
+	}
+}
+
+func TestAliasCache_Permissions(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "alias-cache")
+	e := NewVulnEnricher(VulnEnricherOptions{CacheDir: cacheDir})
+	e.saveAliasCache("CVE-2026-3", "LOW")
+
+	info, err := os.Stat(filepath.Join(cacheDir, "osv-CVE-2026-3.json"))
+	if err != nil {
+		t.Fatalf("alias cache file not created: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != cacheFileMode {
+		t.Errorf("alias cache file mode = %04o, want %04o", perm, cacheFileMode)
+	}
+	dirInfo, err := os.Stat(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != cacheDirMode {
+		t.Errorf("cache dir mode = %04o, want %04o", perm, cacheDirMode)
+	}
+}
+
+// --- Alias lookup and unscored state ---
+
+// aliasTransport serves OSV records from a path-to-body map (404 when absent),
+// fails NVD and GitHub with a network error, and counts requests.
+type aliasTransport struct {
+	osv       map[string]string
+	osvStatus map[string]int // overrides for specific IDs
+	osvPaths  []string
+	nvdCalls  int
+	ghsaCalls int
+	failEvery bool
+	// nvd and ghsa, when set, answer that host with the given status and
+	// body; when nil the host is unreachable (transport error).
+	nvd  *stubAnswer
+	ghsa *stubAnswer
+}
+
+type stubAnswer struct {
+	status int
+	body   string
+}
+
+func (s *stubAnswer) response() (*http.Response, error) {
+	if s == nil {
+		return nil, errors.New("unreachable")
+	}
+	return &http.Response{StatusCode: s.status, Body: io.NopCloser(strings.NewReader(s.body)), Header: make(http.Header)}, nil
+}
+
+func (a *aliasTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if a.failEvery {
+		return nil, errors.New("unreachable")
+	}
+	switch req.URL.Host {
+	case osvHost:
+		id := strings.TrimPrefix(req.URL.Path, "/v1/vulns/")
+		a.osvPaths = append(a.osvPaths, id)
+		status, body := 404, `{"code":5,"message":"not found"}`
+		if b, ok := a.osv[id]; ok {
+			status, body = 200, b
+		}
+		if st, ok := a.osvStatus[id]; ok {
+			status, body = st, `{"error":"x"}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	case nvdHost:
+		a.nvdCalls++
+		return a.nvd.response()
+	case ghsaHost:
+		a.ghsaCalls++
+		return a.ghsa.response()
+	}
+	return nil, errors.New("unreachable")
+}
+
+func (a *aliasTransport) countOSV(id string) int {
+	n := 0
+	for _, p := range a.osvPaths {
+		if p == id {
+			n++
+		}
+	}
+	return n
+}
+
+func osvFixtures(t *testing.T, ids ...string) map[string]string {
+	t.Helper()
+	m := make(map[string]string, len(ids))
+	for _, id := range ids {
+		m[id] = string(loadFixture(t, "osv-"+id+".json"))
+	}
+	return m
+}
+
+func TestVulnEnrich_GHSAAliasResolves(t *testing.T) {
+	tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-5005", "GHSA-jppx-rxg9-jmrx")}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-5005", Aliases: []string{"CVE-2026-39833", "GHSA-jppx-rxg9-jmrx"}, Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v)
+
+	if v.Severity != "CRITICAL" || v.SeveritySource != "osv" || v.SeverityAlias != "GHSA-jppx-rxg9-jmrx" {
+		t.Errorf("got severity=%q source=%q alias=%q", v.Severity, v.SeveritySource, v.SeverityAlias)
+	}
+	if tr.nvdCalls != 0 || tr.ghsaCalls != 0 {
+		t.Errorf("NVD calls=%d GitHub calls=%d, want 0 and 0", tr.nvdCalls, tr.ghsaCalls)
+	}
+	if n := tr.countOSV("CVE-2026-39833"); n != 0 {
+		t.Errorf("OSV requests for the CVE alias = %d, want 0 (GHSA wins first)", n)
+	}
+}
+
+func TestVulnEnrich_CVEAliasVectorResolves(t *testing.T) {
+	tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-4918", "CVE-2026-33814")}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-4918", Aliases: []string{"CVE-2026-33814"}, Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v)
+
+	if v.Severity != "HIGH" || v.SeveritySource != "osv" || v.SeverityAlias != "CVE-2026-33814" {
+		t.Errorf("got severity=%q source=%q alias=%q", v.Severity, v.SeveritySource, v.SeverityAlias)
+	}
+	if v.PublishedAt == nil {
+		t.Error("PublishedAt should be carried over from the primary OSV record")
+	}
+}
+
+func TestVulnEnrich_NoAliasesUnscored(t *testing.T) {
+	tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-5932")}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-5932", Severity: "UNKNOWN"}
+	warns := e.Enrich(context.Background(), v)
+
+	assertUnscored(t, v, warns)
+}
+
+// nvdNoData and ghsaNoData are authoritative "no record" answers.
+var (
+	nvdNoData  = &stubAnswer{200, `{"totalResults":0,"vulnerabilities":[]}`}
+	ghsaNoData = &stubAnswer{200, `[]`}
+)
+
+func TestVulnEnrich_CVEAliasNoSeverityUnscored(t *testing.T) {
+	// CVE-2026-46604 is a 404 on OSV (recorded: the API answers 404 with an
+	// alias hint), so it is absent from the map. NVD and GitHub both answer
+	// that they have no record, so nothing is published anywhere.
+	tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-5066"), nvd: nvdNoData, ghsa: ghsaNoData}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-5066", Aliases: []string{"CVE-2026-46604"}, Severity: "UNKNOWN"}
+	warns := e.Enrich(context.Background(), v)
+
+	assertUnscored(t, v, warns)
+	if tr.nvdCalls != 1 || tr.ghsaCalls != 1 {
+		t.Errorf("NVD calls=%d GitHub calls=%d, want 1 and 1", tr.nvdCalls, tr.ghsaCalls)
+	}
+}
+
+// TestVulnEnrich_FallbackErrorStaysFailed covers the case seen live for
+// GO-2026-4559: OSV has no severity, but NVD was rate limited although it
+// publishes one. A tier that did not answer may have missed a published
+// severity, so the advisory is a lookup failure, never "unscored".
+func TestVulnEnrich_FallbackErrorStaysFailed(t *testing.T) {
+	cases := []struct {
+		name string
+		nvd  *stubAnswer
+		ghsa *stubAnswer
+	}{
+		{"NVD 429, GitHub no data", &stubAnswer{429, ``}, ghsaNoData},
+		{"NVD no data, GitHub 403", nvdNoData, &stubAnswer{403, `{"message":"rate limited"}`}},
+		{"NVD 503, GitHub no data", &stubAnswer{503, ``}, ghsaNoData},
+		{"NVD malformed JSON, GitHub no data", &stubAnswer{200, `{`}, ghsaNoData},
+		{"both unreachable", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-5066"), nvd: tc.nvd, ghsa: tc.ghsa}
+			e := newEnricherWithTransport(t, tr, "", nil)
+
+			v := &Vulnerability{ID: "GO-2026-5066", Aliases: []string{"CVE-2026-46604"}, Severity: "UNKNOWN"}
+			warns := e.Enrich(context.Background(), v)
+
+			if !v.EnrichmentFailed || v.SeveritySource != "none" {
+				t.Errorf("EnrichmentFailed=%v SeveritySource=%q, want true and none", v.EnrichmentFailed, v.SeveritySource)
+			}
+			for _, w := range warns {
+				if strings.HasPrefix(w, severityUnscoredPrefix) {
+					t.Errorf("unexpected unscored warning: %q", w)
+				}
+			}
+		})
+	}
+}
+
+func assertUnscored(t *testing.T, v *Vulnerability, warns []string) {
+	t.Helper()
+	if v.SeveritySource != "unscored" {
+		t.Errorf("SeveritySource = %q, want unscored", v.SeveritySource)
+	}
+	if v.EnrichmentFailed {
+		t.Error("EnrichmentFailed must be false for an unscored advisory")
+	}
+	if v.Severity != "UNKNOWN" {
+		t.Errorf("Severity = %q, want UNKNOWN", v.Severity)
+	}
+	if len(v.EnrichmentErrors) != 0 {
+		t.Errorf("EnrichmentErrors = %v, want empty", v.EnrichmentErrors)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.HasPrefix(w, severityUnscoredPrefix) {
+			found = true
+		}
+		if strings.HasPrefix(w, severityLookupFailedPrefix) {
+			t.Errorf("unexpected failure warning: %q", w)
+		}
+	}
+	if !found {
+		t.Errorf("no warning with prefix %q in %v", severityUnscoredPrefix, warns)
+	}
+}
+
+func TestVulnEnrich_OSVErrorStaysFailed(t *testing.T) {
+	tr := &aliasTransport{
+		osv:       osvFixtures(t, "GO-2026-5066"),
+		osvStatus: map[string]int{"CVE-2026-46604": 503},
+	}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-5066", Aliases: []string{"CVE-2026-46604"}, Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v)
+
+	if !v.EnrichmentFailed || v.SeveritySource != "none" {
+		t.Errorf("EnrichmentFailed=%v SeveritySource=%q, want true and none", v.EnrichmentFailed, v.SeveritySource)
+	}
+}
+
+func TestVulnEnrich_UnscoredCachedPath(t *testing.T) {
+	tr := &aliasTransport{osv: osvFixtures(t, "GO-2026-5932")}
+	e := newEnricherWithTransport(t, tr, "", func() time.Time {
+		return time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	})
+
+	v1 := &Vulnerability{ID: "GO-2026-5932", Severity: "UNKNOWN"}
+	e.Enrich(context.Background(), v1)
+	if v1.SeveritySource != "unscored" {
+		t.Fatalf("first call: SeveritySource = %q", v1.SeveritySource)
+	}
+
+	e.client.Transport = &aliasTransport{failEvery: true}
+	v2 := &Vulnerability{ID: "GO-2026-5932", Severity: "UNKNOWN"}
+	warns := e.Enrich(context.Background(), v2)
+	assertUnscored(t, v2, warns)
+}
+
+func TestVulnEnrich_AliasCacheShared(t *testing.T) {
+	tr := &aliasTransport{osv: osvFixtures(t, "CVE-2026-33814")}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	for _, id := range []string{"GO-2026-4918", "GO-2026-4961"} {
+		v := &Vulnerability{ID: id, Aliases: []string{"CVE-2026-33814"}, Severity: "UNKNOWN"}
+		e.Enrich(context.Background(), v)
+		if v.Severity != "HIGH" {
+			t.Errorf("%s: Severity = %q, want HIGH", id, v.Severity)
+		}
+	}
+	if n := tr.countOSV("CVE-2026-33814"); n != 1 {
+		t.Errorf("OSV requests for the shared CVE = %d, want 1", n)
+	}
+}
+
+func TestVulnEnrich_AliasLookupCap(t *testing.T) {
+	tr := &aliasTransport{}
+	e := newEnricherWithTransport(t, tr, "", nil)
+
+	v := &Vulnerability{
+		ID: "GO-2026-9999",
+		Aliases: []string{
+			"GHSA-aaaa-aaaa-aaaa", "GHSA-bbbb-bbbb-bbbb", "GHSA-cccc-cccc-cccc",
+			"GHSA-dddd-dddd-dddd", "GHSA-eeee-eeee-eeee", "GHSA-ffff-ffff-ffff",
+		},
+		Severity: "UNKNOWN",
+	}
+	e.Enrich(context.Background(), v)
+
+	aliasReqs := 0
+	for _, p := range tr.osvPaths {
+		if strings.HasPrefix(p, "GHSA-") {
+			aliasReqs++
+		}
+	}
+	if aliasReqs != maxAliasLookups {
+		t.Errorf("alias requests = %d, want %d", aliasReqs, maxAliasLookups)
+	}
+}
