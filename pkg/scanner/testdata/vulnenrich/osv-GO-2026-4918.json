@@ -1,0 +1,14 @@
+{
+  "id": "GO-2026-4918",
+  "aliases": [
+    "BIT-golang-2026-33814",
+    "CVE-2026-33814"
+  ],
+  "published": "2026-05-07T19:21:40Z",
+  "modified": "2026-10-07T10:41:46.070042506Z",
+  "severity": null,
+  "database_specific": {
+    "review_status": "REVIEWED",
+    "url": "https://pkg.go.dev/vuln/GO-2026-4918"
+  }
+}

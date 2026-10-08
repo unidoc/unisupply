@@ -237,11 +237,66 @@ machine contract.
 
 **Repeated enrichment failures are collapsed.** When several advisories fail
 severity enrichment, the per-advisory `severity lookup failed …` warnings
-render as one line naming the count and the first five IDs (each advisory once,
+(and, separately, the `severity not yet published …` warnings for unscored
+advisories) render as one line each naming the count and the first five IDs (each advisory once,
 even when reported under more than one module). The collapse happens in the
 scanner, so the summary is what the top-level `warnings` array in JSON output
 contains as well; the per-vulnerability `enrichment_errors` array is not
 collapsed and remains the machine contract for which advisories failed.
+
+### Severity resolution order
+
+govulncheck does not report a severity, and OSV's `GO-` records never carry
+one, so each advisory with an unknown severity is resolved in this order, and
+the first tier that yields a severity wins:
+
+1. OSV record of the advisory's own ID.
+2. OSV records of its `GHSA-*` aliases, then its `CVE-*` aliases, each group in
+   ascending order, at most 4 alias lookups per advisory. When the advisory has
+   a CVE alias, one of the 4 is kept for it, so GHSA aliases cannot crowd it
+   out. Only the aliases already on the advisory are looked up; aliases listed
+   inside fetched records are not followed. A record's `database_specific.severity` is preferred; if
+   absent, its CVSS v3.0/v3.1 vector is scored locally with the first.org base
+   score formula. CVSS v2 and v4 entries are ignored, and a score of 0.0 is not
+   treated as a severity.
+3. NVD (by CVE alias).
+4. The GitHub Advisory API (by CVE alias).
+
+OSV alias responses are cached for 24 hours, one file per alias, so advisories
+that share an alias cost one request.
+
+When an advisory is resolved from an alias record, the JSON field
+`severity_alias` names that alias and `severity_source` is `osv`.
+
+**`severity_source: "unscored"` is not a failure.** It means every source
+consulted for the advisory answered and none has published a severity: OSV
+with 200 or 404, and NVD and GitHub (when a CVE alias exists) with 200.
+`severity` stays `UNKNOWN`, `enrichment_failed` is false and
+`enrichment_errors` is empty. Compare `severity_source: "none"` with
+`enrichment_failed: true`, which means at least one lookup failed (network
+error, rate limiting such as NVD 429 or GitHub 403, HTTP 5xx, unparsable
+response). A failed lookup may have missed a published severity, so it is
+never reported as unscored. Scoring is the same for both: an
+unscored advisory is treated as MEDIUM, or HIGH when the vulnerable function is
+confirmed called. Only the label differs; the text report marks the two cases
+`[enrichment_failed]` and `[severity_unpublished]`, and the PDF lists unscored
+advisories in a separate Data-quality note. Unscored advisories are rechecked
+after one hour.
+
+**NVD API key.** NVD allows 5 requests per rolling 30 seconds without a key and
+50 with one. Set `--nvd-api-key` (or `NVD_API_KEY`) to make the NVD fallback
+less likely to be rate limited. The key is sent only as an `apiKey` header to
+`services.nvd.nist.gov`, never in a URL, report, warning, cache file or
+`--network-log` line. Surrounding whitespace is trimmed from the key. NVD
+answers an invalid key with HTTP 404 and the header `message: Invalid apiKey.`;
+on that answer, or on HTTP 401, one warning is emitted, that request is retried
+without the key and the rest of the scan queries NVD unauthenticated, exactly
+as if no key had been set. A 403 or a 404 without that message is an ordinary
+failed lookup and the key is kept, since a 403 can come from NVD's CDN under
+load. A key containing characters an HTTP header cannot carry is dropped the
+same way, with one warning. Prefer `NVD_API_KEY` over the flag: a flag value is
+visible to other users in `ps` and can end up in CI logs. The lookup order is
+unchanged.
 
 ### Threat-intel enrichment (EPSS + CISA KEV)
 

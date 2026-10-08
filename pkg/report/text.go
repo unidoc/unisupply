@@ -849,6 +849,8 @@ func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.Deb
 			enrich := ""
 			if cve.EnrichmentFailed {
 				enrich = " [enrichment_failed]"
+			} else if cve.SeverityUnscored {
+				enrich = " [severity_unpublished]"
 			}
 			reachInfo := ""
 			if cve.Reachability != "" {

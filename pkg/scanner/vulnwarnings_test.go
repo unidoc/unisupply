@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -174,9 +175,11 @@ func TestCollapseSeverityLookupWarnings_DoesNotMutateInput(t *testing.T) {
 // TestEnricherWarningUsesSharedPrefix ties the emitter to the aggregator: if
 // the message in vulnenrich.go is reworded without updating the prefix, the
 // collapse silently stops matching and the warning spam returns. Hermetic —
-// every enrichment tier is answered by a stub that knows nothing.
+// every enrichment tier is answered by a stub that errors. The stub returns
+// 500 rather than 404: a 404 from OSV is an authoritative "no record" and now
+// yields an unscored advisory, not a lookup failure.
 func TestEnricherWarningUsesSharedPrefix(t *testing.T) {
-	enricher := newEnricherWithTransport(t, &staticTransport{body: "{}", statusCode: 404}, "", nil)
+	enricher := newEnricherWithTransport(t, &staticTransport{body: "{}", statusCode: 500}, "", nil)
 
 	v := &Vulnerability{ID: "GO-2026-9999", Severity: "UNKNOWN"}
 	warnings := enricher.Enrich(t.Context(), v)
@@ -207,5 +210,66 @@ func TestCollapsedSummaryUsesSharedPrefix(t *testing.T) {
 	}
 	if !strings.HasPrefix(got[0], severityLookupFailedPrefix) {
 		t.Errorf("summary %q does not start with %q", got[0], severityLookupFailedPrefix)
+	}
+}
+
+// TestEnricherUnscoredWarningUsesSharedPrefix is the unscored counterpart of
+// TestEnricherWarningUsesSharedPrefix.
+func TestEnricherUnscoredWarningUsesSharedPrefix(t *testing.T) {
+	enricher := newEnricherWithTransport(t, &staticTransport{body: "{}", statusCode: 404}, "", nil)
+
+	v := &Vulnerability{ID: "GO-2026-9999", Severity: "UNKNOWN"}
+	warnings := enricher.Enrich(t.Context(), v)
+
+	for _, w := range warnings {
+		if strings.HasPrefix(w, severityUnscoredPrefix) {
+			return
+		}
+	}
+	t.Errorf("no warning carried %q:\n%v", severityUnscoredPrefix, warnings)
+}
+
+func unscoredWarning(id string) string {
+	return severityUnscoredPrefix + id + "; severity not yet published"
+}
+
+// TestCollapse_FailedAndUnscoredGroupsSeparate verifies that failed and
+// unscored warnings each collapse into their own summary with their own count.
+func TestCollapse_FailedAndUnscoredGroupsSeparate(t *testing.T) {
+	var in []string
+	for i := 0; i < 3; i++ {
+		in = append(in, failedWarning(fmt.Sprintf("GO-2026-%04d", 100+i)))
+	}
+	for i := 0; i < 7; i++ {
+		in = append(in, unscoredWarning(fmt.Sprintf("GO-2026-%04d", 200+i)))
+	}
+	in = append(in, "unrelated warning")
+
+	got := collapseSeverityLookupWarnings(in)
+
+	if len(got) != 3 {
+		t.Fatalf("got %d lines, want 3: %v", len(got), got)
+	}
+	if !strings.HasPrefix(got[0], severityLookupFailedPrefix+"3 advisories") {
+		t.Errorf("failed summary = %q", got[0])
+	}
+	if !strings.HasPrefix(got[1], severityUnscoredPrefix+"7 advisories") {
+		t.Errorf("unscored summary = %q", got[1])
+	}
+	if !strings.Contains(got[1], "not lookup failures") || !strings.Contains(got[1], "…") {
+		t.Errorf("unscored summary should say these are not failures and elide the tail: %q", got[1])
+	}
+	if got[2] != "unrelated warning" {
+		t.Errorf("got[2] = %q", got[2])
+	}
+}
+
+// TestCollapse_SingleUnscoredPassesThrough verifies one unscored warning is
+// kept verbatim rather than rebuilt as a summary of one.
+func TestCollapse_SingleUnscoredPassesThrough(t *testing.T) {
+	in := []string{unscoredWarning("GO-2026-0001")}
+	got := collapseSeverityLookupWarnings(in)
+	if len(got) != 1 || got[0] != in[0] {
+		t.Errorf("got %v, want %v", got, in)
 	}
 }
