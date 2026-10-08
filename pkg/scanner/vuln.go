@@ -77,15 +77,22 @@ type Vulnerability struct {
 	// the original severity was UNKNOWN and the ID passed validation).
 	EnrichmentAttempted bool `json:"enrichment_attempted,omitempty"`
 
-	// EnrichmentFailed is true when enrichment was attempted but all tiers
-	// (OSV, NVD, and GitHub Advisory) failed. Distinguishes "no severity data"
-	// from "severity data unavailable due to API failure".
+	// EnrichmentFailed is true when enrichment was attempted, no tier produced
+	// a severity, and at least one lookup (OSV, NVD or GitHub) failed
+	// (SeveritySource "none"). It is false for an "unscored" advisory: every
+	// source consulted answered, but none has published a severity. Distinguishes "no severity data" from "severity data
+	// unavailable due to API failure".
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
 
 	// SeveritySource records which API resolved the severity: "osv", "nvd",
-	// "ghsa", or "none" when all tiers failed. Empty when enrichment was not
-	// attempted (severity was known from govulncheck).
+	// "ghsa"; "none" when a lookup failed; or "unscored" when every source
+	// consulted (OSV, NVD, GitHub) answered but none has published a severity. Empty when
+	// enrichment was not attempted (severity was known from govulncheck).
 	SeveritySource string `json:"severity_source,omitempty"`
+
+	// SeverityAlias is the alias ID (GHSA-* or CVE-*) whose OSV record
+	// supplied the severity, when it did not come from the advisory's own ID.
+	SeverityAlias string `json:"severity_alias,omitempty"`
 
 	// EnrichmentErrors holds a brief failure summary when all enrichment tiers
 	// failed (EnrichmentFailed==true). At most one entry: the consolidated
@@ -320,6 +327,21 @@ func callPath(trace []traceEntry) []string {
 // failed scan as a clean one. The scorer excludes the 40% vulnerability weight
 // when this is false; see scorer.ScoreInput.VulnScanUnavailable.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
+	return ScanVulnsWithOptions(ctx, projectDir, VulnScanOptions{GitHubToken: githubToken})
+}
+
+// VulnScanOptions carries the credentials ScanVulnsWithOptions forwards to the
+// severity enrichment lookups.
+type VulnScanOptions struct {
+	// GitHubToken is sent as a Bearer token to api.github.com only.
+	GitHubToken string
+	// NVDAPIKey is sent as the apiKey header to services.nvd.nist.gov only.
+	NVDAPIKey string
+}
+
+// ScanVulnsWithOptions is ScanVulns with explicit credentials for the
+// enrichment lookups. It returns the same values as ScanVulns.
+func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanOptions) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
 		// govulncheck runs in-process and reaches vuln.go.dev through
 		// http.DefaultClient, so offline mode would refuse its requests and
@@ -371,7 +393,7 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
-	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: opts.GitHubToken, NVDAPIKey: opts.NVDAPIKey})
 	var enrichWarnings []string
 	// Sorted module order keeps the warning order, and the single-failure path
 	// in collapseSeverityLookupWarnings, stable across runs.
@@ -622,46 +644,63 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 // rewords all three at once.
 const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
 
+// severityUnscoredPrefix opens the enricher's per-advisory "no severity
+// published yet" message. It is not a failure: every source consulted answered
+// and none carried a severity. Kept next to severityLookupFailedPrefix for the same
+// reason: emitter, matcher and collapsed summary share one constant.
+const severityUnscoredPrefix = "severity not yet published (OSV/NVD/GitHub) for "
+
 // maxListedFailedIDs caps how many advisory IDs the aggregate warning names
 // before eliding the rest.
 const maxListedFailedIDs = 5
 
 // collapseSeverityLookupWarnings replaces a run of per-advisory
-// "severity lookup failed" warnings with a single line naming the count and
-// the first few IDs. Every other warning passes through untouched, in order.
+// "severity lookup failed" warnings, and separately a run of per-advisory
+// "severity not yet published" warnings, with one summary line each naming the
+// count and the first few IDs. Every other warning passes through untouched,
+// in order.
 //
 // A scan of a vulnerability-heavy module produced 21 near-identical lines,
 // which buried the warnings that were not repeats. The information is not
-// lost: each affected vulnerability keeps its own EnrichmentErrors entry,
-// which is what the JSON report exposes.
+// lost: each affected vulnerability keeps its own EnrichmentErrors entry
+// (failures) or SeveritySource (unscored), which is what the JSON report
+// exposes.
 func collapseSeverityLookupWarnings(warnings []string) []string {
+	out := collapseWarningGroup(warnings, severityLookupFailedPrefix, "advisories; severities remain UNKNOWN")
+	return collapseWarningGroup(out, severityUnscoredPrefix, "advisories; not lookup failures, scored conservatively")
+}
+
+// collapseWarningGroup collapses the warnings that start with prefix into one
+// summary placed where the group started. The summary is
+// prefix + count + " " + tail + " (ids)".
+func collapseWarningGroup(warnings []string, prefix, tail string) []string {
 	var (
-		out       []string
-		failedIDs []string
-		seen      = make(map[string]struct{})
-		firstMsg  string
-		insertAt  = -1
+		out      []string
+		ids      []string
+		seen     = make(map[string]struct{})
+		firstMsg string
+		insertAt = -1
 	)
 
 	for _, w := range warnings {
-		if !strings.HasPrefix(w, severityLookupFailedPrefix) {
+		if !strings.HasPrefix(w, prefix) {
 			out = append(out, w)
 			continue
 		}
 		if insertAt < 0 {
 			// Hold the position of the first collapsed warning so the summary
 			// lands where the group started rather than at the end, and keep
-			// the message itself for the single-failure case below.
+			// the message itself for the single-warning case below.
 			insertAt = len(out)
 			firstMsg = w
 		}
-		id := strings.TrimPrefix(w, severityLookupFailedPrefix)
+		id := strings.TrimPrefix(w, prefix)
 		if i := strings.Index(id, ";"); i >= 0 {
 			id = id[:i]
 		}
 		// The same advisory can be reported under more than one module —
 		// parsing deduplicates by module@osvID, not globally — and the second
-		// enrichment hits the cached failure and re-emits the same warning.
+		// enrichment hits the cache and re-emits the same warning.
 		// Count and list each advisory once so repeats neither inflate the
 		// count nor consume the displayed slots. The list is sorted below
 		// before anything is truncated or displayed.
@@ -669,26 +708,26 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 			continue
 		}
 		seen[id] = struct{}{}
-		failedIDs = append(failedIDs, id)
+		ids = append(ids, id)
 	}
 
-	switch len(failedIDs) {
+	switch len(ids) {
 	case 0:
 		return out
 	case 1:
-		// A single failure reads better as itself than as a summary of one.
+		// A single warning reads better as itself than as a summary of one.
 		// Passed through verbatim rather than rebuilt, so this function owns
 		// no second copy of the message the enricher writes.
 		return slices.Insert(out, insertAt, firstMsg)
 	}
 
-	// failedIDs arrives in the caller's enrichment order (ScanVulns walks
-	// modules in sorted path order). Sort by ID anyway before truncating, so
-	// the summary — which consumers diff between runs — lists IDs in ID order
-	// whatever order the caller uses. GO/CVE IDs sort by year, then number.
-	sort.Strings(failedIDs)
+	// ids arrives in the caller's enrichment order (ScanVulns walks modules in
+	// sorted path order). Sort by ID anyway before truncating, so the summary —
+	// which consumers diff between runs — lists IDs in ID order whatever order
+	// the caller uses. GO/CVE IDs sort by year, then number.
+	sort.Strings(ids)
 
-	listed := failedIDs
+	listed := ids
 	ellipsis := ""
 	if len(listed) > maxListedFailedIDs {
 		listed = listed[:maxListedFailedIDs]
@@ -698,8 +737,8 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 	// reword of the constant cannot leave the summary reading the old text
 	// while the matcher above still passes.
 	summary := fmt.Sprintf(
-		"%s%d advisories; severities remain UNKNOWN (%s%s)",
-		severityLookupFailedPrefix, len(failedIDs), strings.Join(listed, ", "), ellipsis,
+		"%s%d %s (%s%s)",
+		prefix, len(ids), tail, strings.Join(listed, ", "), ellipsis,
 	)
 	return slices.Insert(out, insertAt, summary)
 }

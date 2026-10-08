@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +48,7 @@ func main() {
 		scanCI                 bool
 		workflowPath           string
 		githubToken            string
+		nvdAPIKey              string
 		requireGithubToken     bool
 		policyFile             string
 		policyPreset           string
@@ -70,7 +72,8 @@ func main() {
 	flag.BoolVar(&scanWorkflows, "scan-workflows", false, "Scan GitHub Actions workflow files in .github/workflows/")
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
-	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
+	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (prefer set GITHUB_TOKEN env)")
+	flag.StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key for higher CVE severity lookup rate limits (prefer set the NVD_API_KEY env)")
 	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
@@ -98,7 +101,12 @@ func main() {
 
 	// GitHub token from env if not set via flag.
 	if githubToken == "" {
-		githubToken = os.Getenv("GITHUB_TOKEN")
+		githubToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	}
+
+	// NVD API key from env if not set via flag.
+	if nvdAPIKey == "" {
+		nvdAPIKey = strings.TrimSpace(os.Getenv("NVD_API_KEY"))
 	}
 
 	// Determine target path.
@@ -120,6 +128,7 @@ func main() {
 		scanCI:                 scanCI,
 		workflowPath:           workflowPath,
 		githubToken:            githubToken,
+		nvdAPIKey:              nvdAPIKey,
 		requireGithubToken:     requireGithubToken,
 		policyFile:             policyFile,
 		policyPreset:           policyPreset,
@@ -159,6 +168,7 @@ type runConfig struct {
 	scanCI                 bool
 	workflowPath           string
 	githubToken            string
+	nvdAPIKey              string
 	requireGithubToken     bool
 	policyFile             string
 	policyPreset           string
@@ -246,6 +256,7 @@ func run(cfg *runConfig) error {
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
 		GithubToken:            cfg.githubToken,
+		NVDAPIKey:              cfg.nvdAPIKey,
 		RequireGithubToken:     cfg.requireGithubToken,
 		TrustIndexURL:          cfg.trustIndexURL,
 		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,

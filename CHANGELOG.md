@@ -9,6 +9,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### New Features
 
+#### NVD API key for severity lookups
+
+- **`--nvd-api-key` (or `NVD_API_KEY`) raises the NVD rate limit** of the CVE
+  severity fallback from 5 to 50 requests per 30 seconds. The key is sent only
+  as an `apiKey` header to `services.nvd.nist.gov`, with surrounding whitespace
+  trimmed. A key NVD rejects (404 with `message: Invalid apiKey.`, or 401)
+  produces one warning and the scan continues unauthenticated, so a bad key
+  never costs severities that no key would have found. A 403 does not drop
+  the key. `pkg/runner.Options`
+  gains `NVDAPIKey`, and `scanner.ScanVulnsWithOptions` is the new entry point
+  (`ScanVulns` is unchanged).
+
 #### Call path for every reachable vulnerability
 
 - **JSON reports now carry `call_path` on each vulnerability whose
@@ -112,6 +124,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `cve_floor` (reachability already discounts a vulnerability in a module that
   is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
   `replace` directive is a `go.mod`-level signal).
+
+#### Severity resolved from OSV alias records
+
+- **Advisories whose severity was left `UNKNOWN` by NVD or GitHub rate
+  limiting now resolve from OSV itself.** The GHSA and CVE aliases of an
+  advisory are looked up on OSV before NVD and GitHub, which become fallbacks.
+  CVSS v3.0/v3.1 vectors on CVE records are scored locally. The advisory's
+  `severity_alias` JSON field names the alias that supplied the severity.
+  On a cold, unauthenticated scan of a module with 35 reported advisories,
+  NVD requests fell from 84 (68 rate-limited) to 24 (11 rate-limited), and the
+  advisories with a published severity that were left `UNKNOWN` now resolve.
+- **`severity_source: "unscored"` separates "not published yet" from "lookup
+  failed".** When every source consulted (OSV, NVD, GitHub) answered but
+  none has a severity, the advisory is reported as unscored instead of as an
+  enrichment failure. A rate-limited or failed lookup still counts as a
+  failure, because it may have missed a published severity. Scoring
+  is unchanged (MEDIUM, or HIGH when called). The text report labels it
+  `[severity_unpublished]`, the PDF lists it under Data-quality Notes, and its
+  warnings collapse into their own summary line.
 
 #### Time bombs explained in every report; PDF reports now list them
 

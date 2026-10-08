@@ -941,3 +941,47 @@ func TestWriteJSON_Notes(t *testing.T) {
 		}
 	})
 }
+
+// TestWriteJSON_SeverityAliasAndUnscored verifies severity_alias is emitted
+// when set, omitted when empty, and that "unscored" passes through unchanged.
+func TestWriteJSON_SeverityAliasAndUnscored(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{
+		Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+	})
+	ps := &scorer.ProjectScore{
+		OverallScore: 30,
+		OverallLevel: scorer.RiskMedium,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true,
+			RiskScore: 30, RiskLevel: scorer.RiskMedium,
+			Vulns: []scanner.Vulnerability{
+				{ID: "GO-2026-0001", Severity: "CRITICAL", SeveritySource: "osv", SeverityAlias: "GHSA-aaaa-bbbb-cccc"},
+				{ID: "GO-2026-0002", Severity: "UNKNOWN", SeveritySource: "unscored"},
+			},
+		}},
+		TotalVulns: 2,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+	var raw struct {
+		Deps []struct {
+			Vulns []map[string]interface{} `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	vulns := raw.Deps[0].Vulns
+	if vulns[0]["severity_alias"] != "GHSA-aaaa-bbbb-cccc" {
+		t.Errorf("severity_alias = %v, want GHSA-aaaa-bbbb-cccc", vulns[0]["severity_alias"])
+	}
+	if _, present := vulns[1]["severity_alias"]; present {
+		t.Error("empty severity_alias must be omitted")
+	}
+	if vulns[1]["severity_source"] != "unscored" {
+		t.Errorf("severity_source = %v, want unscored", vulns[1]["severity_source"])
+	}
+}

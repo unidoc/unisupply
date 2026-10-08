@@ -174,6 +174,7 @@ unisupply ./ --network-log 2> net.log
 | Var | Purpose |
 |-----|---------|
 | `GITHUB_TOKEN` | GitHub API access (higher rate limits, private repos) |
+| `NVD_API_KEY` | NVD API key (higher rate limit for CVE severity lookups) |
 | `UNIDOC_LICENSE_API_KEY` | UniDoc license key (for PDF generation) |
 
 ## Policy engine

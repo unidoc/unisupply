@@ -79,7 +79,7 @@ var rowMatchers = map[string][]rowMatcher{
 		{name: "GHSA severity enrichment", match: hasPrefix("/advisories")},
 	},
 	"api.osv.dev": {
-		{name: "OSV severity enrichment", match: anyPath},
+		{name: "OSV severity enrichment (advisory and alias records)", match: anyPath},
 	},
 	"services.nvd.nist.gov": {
 		{name: "NVD severity enrichment", match: anyPath},
@@ -222,7 +222,8 @@ func stubServer(t *testing.T) *httptest.Server {
 			}
 
 		case "api.osv.dev":
-			// Unknown to OSV, so enrichment falls through to NVD and then GHSA
+			// Unknown to OSV, for the advisory and for its CVE alias alike, so
+			// enrichment falls through the alias lookups to NVD and then GHSA
 			// — which is how all three enrichment hosts get exercised.
 			http.NotFound(w, r)
 
@@ -319,8 +320,10 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	// proxy.golang.org + api.github.com (governance files)
 	scanner.NewResilienceScanner(timeout).ScanAll(ctx, graph, maintainers)
 
-	// api.osv.dev → services.nvd.nist.gov → api.github.com, in that order:
-	// the fixture vuln is unknown to every tier, so the whole chain runs.
+	// api.osv.dev (advisory, then its CVE alias record) → services.nvd.nist.gov
+	// → api.github.com, in that order: the fixture vuln is unknown to every
+	// tier, so the whole chain runs. Alias lookups share the vulnenrich:osv
+	// purpose and the api.osv.dev README row.
 	v := &scanner.Vulnerability{
 		ID:       "GO-2026-0001",
 		Severity: "UNKNOWN",
@@ -542,5 +545,26 @@ func TestNetworkContract_TrustIndexContactsOnlyConfiguredHost(t *testing.T) {
 	wantHost := strings.TrimPrefix(srv.URL, "http://")
 	if hosts[wantHost] == 0 {
 		t.Errorf("contacted hosts = %v, want %q", hosts, wantHost)
+	}
+}
+
+// TestNetworkContract_OSVAliasBeforeNVD pins the enrichment order documented in
+// the README: the advisory's OSV record, then its alias records on OSV, and
+// only then NVD.
+func TestNetworkContract_OSVAliasBeforeNVD(t *testing.T) {
+	rec := driveNetworkScanners(t)
+
+	got := rec.paths("api.osv.dev")
+	want := []string{"/v1/vulns/GO-2026-0001", "/v1/vulns/CVE-2026-0001"}
+	if len(got) != len(want) {
+		t.Fatalf("OSV paths = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("OSV path[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(rec.paths("services.nvd.nist.gov")) == 0 {
+		t.Error("NVD should be reached after the OSV alias lookup found nothing")
 	}
 }

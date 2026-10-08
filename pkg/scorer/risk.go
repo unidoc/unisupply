@@ -295,6 +295,10 @@ type DebugCVE struct {
 	// EnrichmentFailed mirrors scanner.Vulnerability.EnrichmentFailed so the
 	// reader can tell why an UNKNOWN was treated as MEDIUM in the step function.
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
+	// SeverityUnscored is true when the advisory's severity source is
+	// "unscored": every source consulted answered; none has published a severity.
+	// It is scored exactly like an enrichment failure; only the label differs.
+	SeverityUnscored bool `json:"severity_unscored,omitempty"`
 	// Reachability is the govulncheck reachability tier: "called", "imported",
 	// "required", or "" (non-govulncheck source; see isConfirmedReachable).
 	Reachability string `json:"reachability,omitempty"`
@@ -1036,7 +1040,7 @@ func severityFloor(now time.Time, vulns []scanner.Vulnerability) (floor int, pro
 		default:
 			// UNKNOWN: escalate to HIGH only when reachability is confirmed called;
 			// empty reachability stays MEDIUM (absence of confirmation ≠ reachable).
-			if v.EnrichmentFailed {
+			if v.EnrichmentFailed || v.SeveritySource == "unscored" {
 				if isConfirmedReachable(v) {
 					hasUnknownCalledFailed = true
 				} else {
@@ -1452,6 +1456,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 					DowngradedTier:        "dropped",
 					TestOnly:              ds.IsTestOnly,
 					EnrichmentFailed:      v.EnrichmentFailed,
+					SeverityUnscored:      v.SeveritySource == "unscored",
 					Reachability:          v.Reachability,
 					ReachabilityDowngrade: reachDesc,
 					EPSSScore:             v.EPSSScore,
@@ -1491,6 +1496,7 @@ func severityAdjustedVulnScore(now time.Time, deps []*DependencyScore) severityA
 				OriginalTier:          rawTier,
 				TestOnly:              ds.IsTestOnly,
 				EnrichmentFailed:      v.EnrichmentFailed,
+				SeverityUnscored:      v.SeveritySource == "unscored",
 				Reachability:          v.Reachability,
 				ReachabilityDowngrade: reachDesc,
 				EPSSScore:             v.EPSSScore,

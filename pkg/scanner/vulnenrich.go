@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +31,11 @@ const (
 	// in a backward-incompatible way. Entries with a different version are
 	// treated as cache misses, providing a one-time self-healing invalidation.
 	currentCacheVersion = 1
+
+	// maxAliasLookups caps OSV alias requests per advisory. One OSV CVE record
+	// can list over 150 cross-references, and only v.Aliases is walked, but a
+	// hostile or malformed alias list must still not fan out unbounded.
+	maxAliasLookups = 4
 )
 
 // vulnIDPattern enforces the allowed character set for vulnerability IDs.
@@ -40,6 +49,10 @@ type VulnEnricherOptions struct {
 	// Empty means unauthenticated (OSV does not require auth; GHSA fallback
 	// still works but is rate-limited).
 	GitHubToken string
+
+	// NVDAPIKey is sent as the "apiKey" header to services.nvd.nist.gov only,
+	// raising NVD's rate limit. Empty means unauthenticated.
+	NVDAPIKey string
 
 	// CacheDir overrides the on-disk cache location. Intended for tests.
 	// When empty, the enricher resolves the path via os.UserCacheDir() with
@@ -61,6 +74,11 @@ type VulnEnricher struct {
 	opts     VulnEnricherOptions
 	cacheDir string
 	now      func() time.Time
+
+	// nvdKeyRejected is set when NVD rejected the API key, or the key cannot
+	// be sent as a header value; the rest of the scan queries NVD
+	// unauthenticated, as if no key had been given.
+	nvdKeyRejected atomic.Bool
 }
 
 // NewVulnEnricher creates a new VulnEnricher. The returned enricher is safe
@@ -70,6 +88,7 @@ func NewVulnEnricher(opts VulnEnricherOptions) *VulnEnricher {
 	if now == nil {
 		now = time.Now
 	}
+	opts.NVDAPIKey = strings.TrimSpace(opts.NVDAPIKey)
 
 	e := &VulnEnricher{
 		client: NewClient(ClientOptions{Timeout: 10 * time.Second}),
@@ -136,7 +155,13 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	// Try cache first.
 	if cached, ok := e.loadCache(v.ID); ok {
-		if cached == nil || cached.Source == "none" || cached.Severity == "" {
+		switch {
+		case cached != nil && cached.Source == "unscored":
+			// Checked before the failure test: an unscored entry has an empty
+			// Severity and would otherwise be misread as a cached failure.
+			markUnscored(v)
+			warnings = append(warnings, unscoredMessage(v.ID))
+		case cached == nil || cached.Source == "none" || cached.Severity == "":
 			// Cached failure — restore failure state identically to the live path.
 			markEnrichmentFailed(v)
 			msg := severityLookupFailedPrefix + v.ID + "; severity remains UNKNOWN"
@@ -144,19 +169,46 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 				v.EnrichmentErrors = []string{msg}
 			}
 			warnings = append(warnings, msg)
-		} else {
+		default:
 			e.applyEnrichResult(v, cached)
 		}
 		return warnings
 	}
 
+	// allAnswered records whether every source consulted answered
+	// authoritatively: OSV with 200 or 404, NVD and GitHub with 200. Only then
+	// can "no severity found" be reported as unscored rather than as a lookup
+	// failure. A 429 or 403 from any tier means a published severity may have
+	// been missed, so it stays a failure.
+	allAnswered := true
+
 	// OSV lookup.
-	osvResult, osvWarns := e.fetchOSV(ctx, v.ID)
+	osvResult, ok, osvWarns := e.fetchOSV(ctx, v.ID)
 	warnings = append(warnings, osvWarns...)
+	if !ok {
+		allAnswered = false
+	}
 
 	if osvResult != nil && osvResult.Severity != "" {
 		e.saveCache(v.ID, osvResult)
 		e.applyEnrichResult(v, osvResult)
+		return warnings
+	}
+
+	// OSV alias records (GHSA first, then CVE) before NVD and GitHub.
+	aliasResult, aliasOK, aliasWarns := e.lookupAliases(ctx, v)
+	warnings = append(warnings, aliasWarns...)
+	if !aliasOK {
+		allAnswered = false
+	}
+	if aliasResult != nil {
+		// The primary record's dates are kept: alias hits carry only a tier.
+		if osvResult != nil {
+			aliasResult.PublishedAt = osvResult.PublishedAt
+			aliasResult.ModifiedAt = osvResult.ModifiedAt
+		}
+		e.saveCache(v.ID, aliasResult)
+		e.applyEnrichResult(v, aliasResult)
 		return warnings
 	}
 
@@ -177,8 +229,13 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 
 	if cveID != "" {
 		// NVD lookup (canonical CVSS authority for CVEs).
+		// fetchNVD and fetchGHSAByCVE return nil on failure and a non-nil
+		// (possibly empty) result when the API answered.
 		nvdResult, nvdWarns := e.fetchNVD(ctx, cveID)
 		warnings = append(warnings, nvdWarns...)
+		if nvdResult == nil {
+			allAnswered = false
+		}
 
 		if nvdResult != nil && nvdResult.Severity != "" {
 			e.saveCache(v.ID, nvdResult)
@@ -190,6 +247,9 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		// Covers advisories that have no GHSA alias yet (fresh GO-2026-xxxx).
 		ghsaResult, ghsaWarns := e.fetchGHSAByCVE(ctx, cveID)
 		warnings = append(warnings, ghsaWarns...)
+		if ghsaResult == nil {
+			allAnswered = false
+		}
 
 		if ghsaResult != nil && ghsaResult.Severity != "" {
 			e.saveCache(v.ID, ghsaResult)
@@ -198,7 +258,16 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		}
 	}
 
-	// All tiers failed — cache the failure for 1h so transient outages don't
+	// No tier produced a severity. When every source consulted answered, no
+	// severity is published anywhere we look: report it as unscored.
+	if allAnswered {
+		e.saveCache(v.ID, &enrichResult{Source: "unscored"})
+		markUnscored(v)
+		warnings = append(warnings, unscoredMessage(v.ID))
+		return warnings
+	}
+
+	// A lookup failed — cache the failure for 1h so transient outages don't
 	// hammer three APIs on every scan, and apply the failure state to the vuln.
 	failureResult := &enrichResult{Source: "none"}
 	e.saveCache(v.ID, failureResult)
@@ -207,6 +276,81 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 	v.EnrichmentErrors = []string{msg}
 	warnings = append(warnings, msg)
 	return warnings
+}
+
+// aliasCandidates returns the aliases of v to look up on OSV: GHSA-* first,
+// then CVE-*, each group sorted ascending, skipping v.ID itself, duplicates
+// and malformed IDs, capped at maxAliasLookups. When v has a CVE alias, one
+// slot is kept for it, so many GHSA aliases cannot crowd out the CVE record
+// and its CVSS vector.
+func aliasCandidates(v *Vulnerability) []string {
+	group := func(prefix string) []string {
+		var g []string
+		for _, a := range v.Aliases {
+			if !strings.HasPrefix(a, prefix) || a == v.ID || !validateVulnID(a) || slices.Contains(g, a) {
+				continue
+			}
+			g = append(g, a)
+		}
+		sort.Strings(g)
+		return g
+	}
+	ghsas, cves := group("GHSA-"), group("CVE-")
+	if len(cves) > 0 && len(ghsas) > maxAliasLookups-1 {
+		ghsas = ghsas[:maxAliasLookups-1]
+	}
+	out := slices.Concat(ghsas, cves)
+	if len(out) > maxAliasLookups {
+		out = out[:maxAliasLookups]
+	}
+	return out
+}
+
+// lookupAliases reads the OSV records of v's GHSA and CVE aliases, in that
+// order, and returns the first severity found. allOK is false when any
+// alias fetch failed (error, non-200/404 status, or parse error); a 404 or a
+// cache hit counts as OK. Warnings are emitted for failures only, since a 404
+// on an alias is the normal "no record" answer.
+func (e *VulnEnricher) lookupAliases(ctx context.Context, v *Vulnerability) (res *enrichResult, allOK bool, warnings []string) {
+	allOK = true
+	for _, alias := range aliasCandidates(v) {
+		if sev, hit := e.loadAliasCache(alias); hit {
+			if sev != "" {
+				return &enrichResult{Severity: sev, Source: "osv", SeverityAlias: alias}, allOK, warnings
+			}
+			continue
+		}
+
+		r, ok, w := e.fetchOSV(ctx, alias)
+		if !ok {
+			allOK = false
+			warnings = append(warnings, w...)
+			continue
+		}
+		sev := ""
+		if r != nil {
+			sev = r.Severity
+		}
+		e.saveAliasCache(alias, sev)
+		if sev != "" {
+			return &enrichResult{Severity: sev, Source: "osv", SeverityAlias: alias}, allOK, warnings
+		}
+	}
+	return nil, allOK, warnings
+}
+
+// unscoredMessage is the per-advisory warning for an unscored advisory.
+func unscoredMessage(id string) string {
+	return severityUnscoredPrefix + id + "; severity not yet published"
+}
+
+// markUnscored sets the state for an advisory for which every source consulted
+// answered but none has published a severity. It is deliberately not a
+// failure: EnrichmentFailed stays false and EnrichmentErrors stays empty.
+// Centralised so the live path and the cached path apply identical state.
+func markUnscored(v *Vulnerability) {
+	v.EnrichmentFailed = false
+	v.SeveritySource = "unscored"
 }
 
 // markEnrichmentFailed sets the failure state on v. Centralising this ensures
@@ -218,10 +362,12 @@ func markEnrichmentFailed(v *Vulnerability) {
 
 // enrichResult holds the data extracted from OSV, NVD, or GitHub Advisory responses.
 type enrichResult struct {
-	Severity    string     `json:"severity"`
-	Source      string     `json:"source,omitempty"` // "osv", "nvd", or "ghsa"
-	PublishedAt *time.Time `json:"published_at,omitempty"`
-	ModifiedAt  *time.Time `json:"modified_at,omitempty"`
+	Severity string `json:"severity"`
+	Source   string `json:"source,omitempty"` // "osv", "nvd", "ghsa", "none" (failed) or "unscored"
+	// SeverityAlias is the alias ID whose OSV record supplied the severity.
+	SeverityAlias string     `json:"severity_alias,omitempty"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
+	ModifiedAt    *time.Time `json:"modified_at,omitempty"`
 }
 
 // applyEnrichResult copies enrichResult fields into v. DaysUnpatched is
@@ -234,6 +380,9 @@ func (e *VulnEnricher) applyEnrichResult(v *Vulnerability, r *enrichResult) {
 	}
 	if r.Source != "" {
 		v.SeveritySource = r.Source
+	}
+	if r.SeverityAlias != "" {
+		v.SeverityAlias = r.SeverityAlias
 	}
 	if r.PublishedAt != nil && v.PublishedAt == nil {
 		v.PublishedAt = r.PublishedAt
@@ -286,9 +435,11 @@ type osvResponse struct {
 }
 
 // fetchOSV queries https://api.osv.dev/v1/vulns/{id} and returns an
-// enrichResult. It returns (nil, warnings) on any non-2xx or parse failure
-// without hard-erroring — the caller falls back to GHSA.
-func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichResult, warnings []string) {
+// enrichResult. ok is true when OSV answered authoritatively: HTTP 200 with a
+// parseable body, or HTTP 404 (no such record, result nil). ok is false on a
+// transport error, any other status, or a parse failure; the result is then
+// nil and the caller falls back to the next tier without hard-erroring.
+func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichResult, ok bool, warnings []string) {
 	url := "https://api.osv.dev/v1/vulns/" + id
 	body, resp, err := e.client.Get(ctx, url, GetOptions{
 		Host:     osvHost,
@@ -299,17 +450,17 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: OSV fetch error for %s: %v", id, err))
-		return nil, warnings
+		return nil, false, warnings
 	}
 	if resp.StatusCode != 200 {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: OSV returned HTTP %d for %s", resp.StatusCode, id))
-		return nil, warnings
+		return nil, resp.StatusCode == 404, warnings
 	}
 
 	var osv osvResponse
 	if err := json.Unmarshal(body, &osv); err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: OSV JSON parse error for %s: %v", id, err))
-		return nil, warnings
+		return nil, false, warnings
 	}
 
 	result = &enrichResult{}
@@ -322,7 +473,12 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 	// Fall through to severity[].score if database_specific didn't have it.
 	if result.Severity == "" {
 		for _, s := range osv.Severity {
-			if score, ok := parseCVSSScore(s.Score); ok {
+			// Only CVSS v3 is scored. v4 and v2 entries are skipped so they
+			// never reach the parser, and a 0.0 score ("None") is not a tier.
+			if s.Type != "CVSS_V3" || strings.HasPrefix(s.Score, "CVSS:4") || strings.HasPrefix(s.Score, "AV:") {
+				continue
+			}
+			if score, parsed := parseCVSSScore(s.Score); parsed && score > 0 {
 				result.Severity = cvssScoreToTier(score)
 				break
 			}
@@ -341,7 +497,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 	}
 
 	result.Source = "osv"
-	return result, warnings
+	return result, true, warnings
 }
 
 // ghsaResponse is a partial decode of a single GitHub Advisory API record.
@@ -382,15 +538,38 @@ type nvdResponse struct {
 // failure; returns (&enrichResult{}, nil) when NVD has no data for the CVE.
 func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enrichResult, warnings []string) {
 	url := "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cveID
-	body, resp, err := e.client.Get(ctx, url, GetOptions{
+	getOpts := GetOptions{
 		Host:     nvdHost,
 		MaxBytes: enrichMaxBytes,
 		Accept:   "application/json",
 		Purpose:  "vulnenrich:nvd",
-	})
+	}
+	useKey := e.opts.NVDAPIKey != "" && !e.nvdKeyRejected.Load()
+	if useKey && !validHeaderValue(e.opts.NVDAPIKey) {
+		// net/http would refuse the request before sending it, failing every
+		// NVD lookup in the scan.
+		useKey = false
+		if e.nvdKeyRejected.CompareAndSwap(false, true) {
+			warnings = append(warnings, "vuln enrichment: NVD API key contains characters not allowed in an HTTP header; continuing unauthenticated")
+		}
+	}
+	if useKey {
+		getOpts.APIKeyHeader = "apiKey"
+		getOpts.APIKey = e.opts.NVDAPIKey
+	}
+	body, resp, err := e.client.Get(ctx, url, getOpts)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
 		return nil, warnings
+	}
+	if useKey && nvdRejectsKey(resp) {
+		// A bad key must not cost more than no key: retry this request
+		// unauthenticated, and send no key for the rest of the scan.
+		if e.nvdKeyRejected.CompareAndSwap(false, true) {
+			warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", resp.StatusCode))
+		}
+		result, retryWarns := e.fetchNVD(ctx, cveID)
+		return result, append(warnings, retryWarns...)
 	}
 	if resp.StatusCode != 200 {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD returned HTTP %d for %s", resp.StatusCode, cveID))
@@ -435,6 +614,26 @@ func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enri
 
 	result.Source = "nvd"
 	return result, warnings
+}
+
+// nvdRejectsKey reports whether resp says the API key is bad. NVD answers an
+// invalid key with HTTP 404 and the header "message: Invalid apiKey."; 401 is
+// taken as a rejection too. A 403 or a bare 404 is not: a 403 can come from
+// NVD's CDN under load, and dropping a valid key then would cost the higher
+// rate limit exactly when it is needed.
+func nvdRejectsKey(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	return strings.Contains(strings.ToLower(resp.Header.Get("message")), "invalid apikey")
+}
+
+// validHeaderValue reports whether s can be sent as an HTTP header value:
+// net/http rejects control characters other than horizontal tab.
+func validHeaderValue(s string) bool {
+	return !strings.ContainsFunc(s, func(r rune) bool {
+		return (r < 0x20 && r != '\t') || r == 0x7f
+	})
 }
 
 // fetchGHSAByCVE queries https://api.github.com/advisories?cve_id=<cveID> and
@@ -519,8 +718,13 @@ func cvssStringToTier(s string) string {
 //	7.0–8.9   HIGH
 //	4.0–6.9   MEDIUM
 //	0.1–3.9   LOW
+//
+// A score of 0.0 or below has no tier (CVSS "None") and returns "", the same
+// as an unrecognized label in cvssStringToTier.
 func cvssScoreToTier(score float64) string {
 	switch {
+	case score <= 0:
+		return ""
 	case score >= 9.0:
 		return "CRITICAL"
 	case score >= 7.0:
@@ -533,26 +737,20 @@ func cvssScoreToTier(score float64) string {
 }
 
 // parseCVSSScore extracts a numeric CVSS base score from the string OSV
-// stores under severity[].score. OSV permits two shapes:
+// stores under severity[].score. OSV permits two shapes, both handled here:
 //
-//   - A bare base score ("7.5") — handled here.
-//   - A full CVSS vector ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H") —
-//     NOT handled here. The base score is not encoded in the vector; it must
-//     be computed from the impact and exploitability sub-metrics using the
-//     CVSS v3.1 formula (https://www.first.org/cvss/v3.1/specification-document).
-//     Implementing that formula requires either a CVSS library (none currently
-//     vendored) or ~80 lines of math we have deliberately not added.
+//   - A bare base score ("7.5").
+//   - A CVSS v3.0 or v3.1 vector ("CVSS:3.1/AV:N/AC:L/..."), whose base score
+//     is computed by cvss3BaseScore.
 //
-// When the input is a vector, parseCVSSScore returns (0, false). The caller
-// falls back to OSV's database_specific.severity (text tier) or to the GHSA
-// advisory's numeric CVSS score, both of which already carry the same
-// information for nearly all Go-ecosystem advisories.
+// CVSS v2 and v4 vectors return (0, false); they are not scored.
 func parseCVSSScore(s string) (float64, bool) {
+	s = strings.TrimSpace(s)
 	// Direct numeric value (some OSV entries use just the score).
-	if score, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+	if score, err := strconv.ParseFloat(s, 64); err == nil {
 		return score, true
 	}
-	return 0, false
+	return cvss3BaseScore(s)
 }
 
 // --- On-disk 24h cache ---
@@ -577,9 +775,9 @@ func (e *VulnEnricher) ensureCacheDir() error {
 }
 
 // loadCache returns a cached enrichResult if one exists and is still within its
-// TTL (24h for successes, 1h for failures). Returns (nil, false) on any miss or
-// error, including a version mismatch — which acts as a one-time self-healing
-// invalidation when the on-disk shape changes.
+// TTL (24h for successes, 1h for failures and unscored answers). Returns
+// (nil, false) on any miss or error, including a version mismatch — which acts
+// as a one-time self-healing invalidation when the on-disk shape changes.
 func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 	path := e.cacheFilePath(id)
 	data, err := os.ReadFile(path)
@@ -596,8 +794,11 @@ func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 		return nil, false
 	}
 
+	// Failures and unscored answers share the short TTL. Unscored is an
+	// answer, but a fresh advisory's score is often published within days,
+	// and rechecking hourly picks it up sooner.
 	ttl := cacheTTL
-	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Severity == "" {
+	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Source == "unscored" || entry.Result.Severity == "" {
 		ttl = cacheFailTTL
 	}
 
@@ -627,4 +828,55 @@ func (e *VulnEnricher) saveCache(id string, result *enrichResult) {
 	path := e.cacheFilePath(id)
 	// Write with mode 0600 — cache files may contain API response data.
 	_ = os.WriteFile(path, data, cacheFileMode)
+}
+
+// --- Per-alias OSV cache ---
+
+// aliasCacheEntry is what gets written to each alias cache file. Severity is
+// empty when the alias record had no usable severity (or did not exist).
+type aliasCacheEntry struct {
+	Version   int       `json:"version"`
+	FetchedAt time.Time `json:"fetched_at"`
+	Severity  string    `json:"severity"`
+}
+
+// aliasCacheFilePath returns the cache path for an alias. The "osv-" prefix
+// keeps it disjoint from the per-advisory files, whose names start with the
+// GO/CVE/GHSA prefix. The alias has already passed validateVulnID.
+func (e *VulnEnricher) aliasCacheFilePath(alias string) string {
+	return filepath.Join(e.cacheDir, "osv-"+alias+".json")
+}
+
+// loadAliasCache returns the cached severity for an alias. hit is true for a
+// fresh entry, including one with an empty severity; every entry lives for
+// cacheTTL because only successful (200/404) lookups are stored.
+func (e *VulnEnricher) loadAliasCache(alias string) (severity string, hit bool) {
+	data, err := os.ReadFile(e.aliasCacheFilePath(alias))
+	if err != nil {
+		return "", false
+	}
+	var entry aliasCacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return "", false
+	}
+	if entry.Version != currentCacheVersion || e.now().Sub(entry.FetchedAt) > cacheTTL {
+		return "", false
+	}
+	return entry.Severity, true
+}
+
+// saveAliasCache persists an alias lookup result with mode 0600.
+func (e *VulnEnricher) saveAliasCache(alias, severity string) {
+	if err := e.ensureCacheDir(); err != nil {
+		return
+	}
+	data, err := json.Marshal(aliasCacheEntry{
+		Version:   currentCacheVersion,
+		FetchedAt: e.now(),
+		Severity:  severity,
+	})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(e.aliasCacheFilePath(alias), data, cacheFileMode)
 }
