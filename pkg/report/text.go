@@ -373,7 +373,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
 		if ds.Maintenance.Deprecated {
-			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated\n")
+			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated%s\n", deprecationSuffix(ds.Maintenance.DeprecationMessage))
 		}
 	}
 
@@ -786,6 +786,8 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		switch {
 		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
+		case ds.Maintenance.Deprecated:
+			reasons = append(reasons, "module is deprecated by its maintainers — move to the successor"+deprecationSuffix(ds.Maintenance.DeprecationMessage))
 		case ds.Maintenance.MonthsInactive() >= 24:
 			if ds.Maintenance.HasActivity() {
 				reasons = append(reasons, fmt.Sprintf("no release in %d months and no default-branch commit in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
@@ -935,6 +937,15 @@ func branchSuffix(branch string) string {
 		return ""
 	}
 	return " (" + branch + ")"
+}
+
+// deprecationSuffix renders a deprecation message as ": <message>", or "" when
+// there is none (a deprecation signalled by the proxy carries no message).
+func deprecationSuffix(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
 }
 
 // wrapWords splits s into lines of at most width runes, breaking at spaces.

@@ -79,10 +79,20 @@ func TestWriteJSON_MaintenanceActivity(t *testing.T) {
 
 	t.Run("absent when unknown", func(t *testing.T) {
 		m := jsonMaintenanceOf(t, activityScore(40, -1))
-		for _, k := range []string{"last_activity", "months_since_activity", "activity_source", "activity_branch"} {
+		for _, k := range []string{"last_activity", "months_since_activity", "activity_source", "activity_branch", "deprecation_message"} {
 			if _, ok := m[k]; ok {
-				t.Errorf("%s present with no activity: %v", k, m[k])
+				t.Errorf("%s present with no activity or deprecation: %v", k, m[k])
 			}
+		}
+	})
+
+	t.Run("deprecation message", func(t *testing.T) {
+		ds := activityScore(31, 0)
+		ds.Maintenance.Deprecated = true
+		ds.Maintenance.DeprecationMessage = "Use example.com/new instead."
+		m := jsonMaintenanceOf(t, ds)
+		if m["deprecated"] != true || m["deprecation_message"] != "Use example.com/new instead." {
+			t.Errorf("deprecated = %v, deprecation_message = %v", m["deprecated"], m["deprecation_message"])
 		}
 	})
 }
@@ -100,6 +110,17 @@ func TestWriteDependencyDetail_ActivityAndDeprecation(t *testing.T) {
 	}
 	if out := render(activityScore(40, -1)); strings.Contains(out, "Last commit") {
 		t.Errorf("commit line rendered with no activity:\n%s", out)
+	}
+
+	ds := activityScore(31, 0)
+	ds.Maintenance.Deprecated = true
+	ds.Maintenance.DeprecationMessage = "Use example.com/new instead."
+	if out := render(ds); !strings.Contains(out, "Module deprecated: Use example.com/new instead.") {
+		t.Errorf("deprecation line lacks the message:\n%s", out)
+	}
+	ds.Maintenance.DeprecationMessage = ""
+	if out := render(ds); !strings.Contains(out, "Module deprecated\n") {
+		t.Errorf("plain deprecation line missing:\n%s", out)
 	}
 }
 
@@ -124,5 +145,12 @@ func TestDepExplanation_ActivityAndDeprecation(t *testing.T) {
 				t.Errorf("explanation %q must not mention %q", got, tt.not)
 			}
 		})
+	}
+
+	ds := activityScore(31, 0)
+	ds.Maintenance.Deprecated = true
+	ds.Maintenance.DeprecationMessage = "Use example.com/new instead."
+	if got := depExplanation(ds); !strings.Contains(got, "deprecated by its maintainers") || !strings.Contains(got, "Use example.com/new instead.") {
+		t.Errorf("deprecated explanation = %q", got)
 	}
 }

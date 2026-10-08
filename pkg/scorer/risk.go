@@ -1140,9 +1140,9 @@ func maintenanceScore(maint *scanner.MaintenanceInfo) float64 {
 		return 30 // Unknown maintenance status.
 	}
 
-	// Archived means "move off this module": no date can make up for that, so
-	// it is checked before any activity.
-	if maint.Archived {
+	// Archived and deprecated both mean "move off this module": no date can
+	// make up for that, so they are checked before any activity.
+	if maint.Archived || maint.Deprecated {
 		return 100
 	}
 

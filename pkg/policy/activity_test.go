@@ -69,3 +69,23 @@ func TestEvaluate_NoUnmaintained_DefaultBranchActivity(t *testing.T) {
 		})
 	}
 }
+
+// no_deprecated names the go.mod deprecation message, which usually says what
+// to move to; a proxy-signalled deprecation has none.
+func TestEvaluate_NoDeprecated_Message(t *testing.T) {
+	p := &policy.Policy{NoDeprecated: true}
+	dep := activityDep(31, -1)
+	dep.Maintenance.Deprecated = true
+	dep.Maintenance.DeprecationMessage = `Use the "google.golang.org/protobuf" module instead.`
+
+	result := p.Evaluate(makeEvalInput([]*scorer.DependencyScore{dep}, 20))
+	if len(result.Violations) != 1 || result.Violations[0].Detail != `module is deprecated: Use the "google.golang.org/protobuf" module instead.` {
+		t.Errorf("violations = %v, want the deprecation message in the detail", result.Violations)
+	}
+
+	dep.Maintenance.DeprecationMessage = ""
+	result = p.Evaluate(makeEvalInput([]*scorer.DependencyScore{dep}, 20))
+	if len(result.Violations) != 1 || result.Violations[0].Detail != "module is deprecated" {
+		t.Errorf("violations = %v, want the plain detail without a message", result.Violations)
+	}
+}

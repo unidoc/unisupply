@@ -225,6 +225,9 @@ type JSONMaintenance struct {
 	ActivityBranch string `json:"activity_branch,omitempty"`
 	Archived       bool   `json:"archived"`
 	Deprecated     bool   `json:"deprecated"`
+	// DeprecationMessage is the go.mod `// Deprecated:` notice of the latest
+	// version, which usually names the successor.
+	DeprecationMessage string `json:"deprecation_message,omitempty"`
 }
 
 // JSONMaintainer holds maintainer analysis info.
@@ -508,6 +511,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				MonthsSinceRelease: ds.Maintenance.MonthsSinceRelease,
 				Archived:           ds.Maintenance.Archived,
 				Deprecated:         ds.Maintenance.Deprecated,
+				DeprecationMessage: ds.Maintenance.DeprecationMessage,
 			}
 			if ds.Maintenance.HasActivity() {
 				months := ds.Maintenance.MonthsSinceActivity

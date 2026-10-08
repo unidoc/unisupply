@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -51,6 +53,12 @@ type MaintenanceInfo struct {
 
 	Archived   bool `json:"archived"`
 	Deprecated bool `json:"deprecated"`
+
+	// DeprecationMessage is the text of the `// Deprecated:` notice in the
+	// go.mod of the module's latest version, which usually names the
+	// successor. It is empty when the module is not deprecated that way (a
+	// 410 from the proxy sets Deprecated without a message).
+	DeprecationMessage string `json:"deprecation_message,omitempty"`
 
 	LatestVersion string `json:"latest_version"`
 }
@@ -211,8 +219,12 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 		return nil, fmt.Errorf("maintenance lookup for %s: %w", modPath, versionErr)
 	}
 
-	// Check for deprecation via the @latest endpoint.
+	// Check for deprecation: a 410 on @v/list, or a `// Deprecated:` notice
+	// in the latest version's go.mod.
 	ms.checkDeprecation(ctx, modPath, info)
+	if latestVersion != "" {
+		ms.checkGoModDeprecation(ctx, modPath, latestVersion, info)
+	}
 
 	ms.mu.Lock()
 	ms.cache[modPath] = info
@@ -282,6 +294,41 @@ func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath stri
 	if resp.StatusCode == http.StatusGone {
 		info.Deprecated = true
 	}
+}
+
+// checkGoModDeprecation reads the go.mod of version (the module's latest
+// version) from the proxy and records a `// Deprecated:` notice attached to
+// its module directive, the way `go list -m -u` and `go get` report it. The
+// Go modules reference reads deprecation from the latest version's go.mod, so
+// a notice in an older version does not count, and a comment elsewhere in the
+// file is not a deprecation. A failed fetch or an unparsable go.mod leaves
+// info unchanged: no deprecation is reported rather than a wrong one.
+func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath, version string, info *MaintenanceInfo) {
+	url := fmt.Sprintf("%s/%s/@v/%s.mod", ms.proxyURL, encodeModulePath(modPath), encodeModulePath(version))
+	body, resp, err := ms.client.Get(ctx, url, GetOptions{
+		Host:    proxyHost(ms.proxyURL),
+		Purpose: "maintenance:go-mod",
+	})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return
+	}
+	if msg := goModDeprecation(body); msg != "" {
+		info.Deprecated = true
+		info.DeprecationMessage = msg
+	}
+}
+
+// goModDeprecation returns the deprecation message of a go.mod file, or "" when
+// the module directive carries no `// Deprecated:` notice or the file does not
+// parse. The notice is recognised by golang.org/x/mod/modfile, which applies
+// the Go modules reference rules (a paragraph starting with "Deprecated:" in
+// the comments before the module directive or on its line).
+func goModDeprecation(data []byte) string {
+	f, err := modfile.ParseLax("go.mod", data, nil)
+	if err != nil || f.Module == nil {
+		return ""
+	}
+	return strings.TrimSpace(f.Module.Deprecated)
 }
 
 // encodeModulePath encodes a module path for use with the Go module proxy.

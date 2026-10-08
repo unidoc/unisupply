@@ -40,6 +40,10 @@ func TestScoreDependency_DefaultBranchActivity(t *testing.T) {
 		{"recent release beats an old commit", withActivity(2, 30, false, false), 0, false},
 		{"no activity keeps release-only behaviour", withActivity(40, noCommit, false, false), 90, true},
 		{"archived stays 100 whatever the activity", withActivity(40, 1, true, false), 100, false},
+		// golang/protobuf: deprecated in go.mod, default branch still
+		// edited. Deprecation must not be undone by a recent commit.
+		{"deprecated scores 100 despite a recent commit", withActivity(31, 0, false, true), 100, false},
+		{"deprecated without activity scores 100", withActivity(3, noCommit, false, true), 100, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

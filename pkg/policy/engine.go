@@ -228,7 +228,11 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// No deprecated.
 		if p.NoDeprecated && ds.Maintenance != nil && ds.Maintenance.Deprecated && !isConfirmedOutsideBuild(ds) {
-			result.addError("no_deprecated", ds.Module, "module is deprecated")
+			detail := "module is deprecated"
+			if ds.Maintenance.DeprecationMessage != "" {
+				detail += ": " + ds.Maintenance.DeprecationMessage
+			}
+			result.addError("no_deprecated", ds.Module, detail)
 		}
 
 		// No typosquatting.
