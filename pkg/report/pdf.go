@@ -674,7 +674,7 @@ func writeMethodologyPage(c *creator.Creator, regular, bold *model.PdfFont) {
 	}{
 		{"Risk Scoring", "Each dependency receives a score from 0-100 based on weighted factors: known vulnerabilities (40%), maintenance freshness (25%), dependency depth (15%), maintainer risk (10%), and module maturity (10%)."},
 		{"Vulnerability Scanning", "Dependencies are checked against the Go Vulnerability Database (vuln.go.dev) for known CVEs and security advisories."},
-		{"Maintenance Assessment", "Module release history is obtained from the Go Module Proxy (proxy.golang.org). Archived and deprecated modules receive higher risk scores."},
+		{"Maintenance Assessment", "Module release history and the latest commit on the repository's default branch are obtained from the Go Module Proxy (proxy.golang.org); the newer of the two sets the maintenance age. Archived and deprecated modules receive higher risk scores."},
 		{"Maintainer Analysis", "For GitHub-hosted modules, contributor data is analyzed to determine bus factor and activity patterns."},
 		{"CI/CD Assessment", "GitHub Actions workflows, Dockerfiles, and build scripts are analyzed for security misconfigurations including unpinned actions, excessive permissions, and dangerous command patterns."},
 		{"Risk Levels", "LOW (0-25): Minimal risk, well-maintained. MEDIUM (26-50): Some concerns, monitor. HIGH (51-75): Significant risk, action recommended. CRITICAL (76-100): Immediate action required."},
@@ -904,6 +904,9 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	if ds.Maintenance != nil {
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			addBullet(details, fmt.Sprintf("Last release: %d months ago", ds.Maintenance.MonthsSinceRelease), regular)
+		}
+		if ds.Maintenance.HasActivity() {
+			addBullet(details, fmt.Sprintf("Last commit%s: %d months ago", branchSuffix(ds.Maintenance.ActivityBranch), ds.Maintenance.MonthsSinceActivity), regular)
 		}
 		if ds.Maintenance.Archived {
 			addBullet(details, "Repository archived", regular)

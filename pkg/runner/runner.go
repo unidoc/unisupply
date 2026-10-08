@@ -280,6 +280,20 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
+	// Activity reads the default branch the maintainer scan found, so it runs
+	// after it. The GitHub commits fallback is offered only with a token: the
+	// unauthenticated quota belongs to the maintainer scan.
+	rep.Stage("Checking default-branch activity")
+	var commitFallback scanner.CommitLookup
+	if githubToken != "" && !offlineMode {
+		commitFallback = maintainerScanner
+	}
+	if err := maintScanner.ScanActivity(ctx, graph, maintenance, maintainers, commitFallback); err != nil {
+		maintWarnings = append(maintWarnings, err.Error())
+		rep.Warn("%v", err)
+	}
+	rep.Done("")
+
 	rep.Stage("Detecting typosquats")
 	typosquatScanner := scanner.NewTyposquatScanner()
 	typosquats := typosquatScanner.ScanAll(ctx, graph)

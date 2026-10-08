@@ -437,9 +437,9 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 
 		// Count unmaintained.
 		if ds.Maintenance != nil {
-			if ds.Maintenance.MonthsSinceRelease >= 24 {
+			if months := ds.Maintenance.MonthsInactive(); months >= 24 {
 				ps.Unmaintained2yr++
-			} else if ds.Maintenance.MonthsSinceRelease >= 12 {
+			} else if months >= 12 {
 				ps.Unmaintained1yr++
 			}
 		}
@@ -690,7 +690,7 @@ func scoreDependency(
 		if maint.Deprecated {
 			ds.RiskFactors = append(ds.RiskFactors, "deprecated")
 		}
-		if maint.MonthsSinceRelease >= 24 {
+		if maint.MonthsInactive() >= 24 {
 			ds.RiskFactors = append(ds.RiskFactors, "unmaintained")
 		}
 	}
@@ -1140,11 +1140,16 @@ func maintenanceScore(maint *scanner.MaintenanceInfo) float64 {
 		return 30 // Unknown maintenance status.
 	}
 
+	// Archived means "move off this module": no date can make up for that, so
+	// it is checked before any activity.
 	if maint.Archived {
 		return 100
 	}
 
-	months := maint.MonthsSinceRelease
+	// Band on the newer of the last release and the default branch's last
+	// commit, so a repository that is worked on but rarely tagged is not
+	// scored as abandoned.
+	months := maint.MonthsInactive()
 	switch {
 	case months < 6:
 		return 0

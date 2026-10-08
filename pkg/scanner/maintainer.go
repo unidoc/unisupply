@@ -52,28 +52,35 @@ type MaintainerInfo struct {
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
 
-	OwnerName        string    `json:"owner_name"`     // display name of owner
-	OwnerLocation    string    `json:"owner_location"` // country/city
-	OwnerCompany     string    `json:"owner_company"`  // company affiliation
-	OwnerBio         string    `json:"owner_bio"`      // bio/description
-	OwnerURL         string    `json:"owner_url"`      // website/blog
-	IsOrg            bool      `json:"is_org"`         // org vs personal
-	OwnerVerified    bool      `json:"owner_verified"`
-	BusinessModel    string    `json:"business_model"` // "open_source", "company_backed", "foundation", "unknown"
-	License          string    `json:"license"`        // SPDX license identifier
-	Description      string    `json:"description"`    // repo description
-	ContributorCount int       `json:"contributor_count"`
-	TopContributors  []string  `json:"top_contributors"` // top 5 contributor logins
-	BusFactor        int       `json:"bus_factor"`
-	IsArchived       bool      `json:"is_archived"`
-	IsFork           bool      `json:"is_fork"`
-	ActivityPattern  string    `json:"activity_pattern"` // "active", "sporadic", "inactive"
-	LastCommitDate   time.Time `json:"last_commit_date"`
-	CreatedAt        time.Time `json:"created_at"`
-	Stars            int       `json:"stars"`
-	Forks            int       `json:"forks"`
-	OpenIssues       int       `json:"open_issues"`
-	SubDependencies  int       `json:"sub_dependencies"` // how many deps this dep pulls in
+	OwnerName        string   `json:"owner_name"`     // display name of owner
+	OwnerLocation    string   `json:"owner_location"` // country/city
+	OwnerCompany     string   `json:"owner_company"`  // company affiliation
+	OwnerBio         string   `json:"owner_bio"`      // bio/description
+	OwnerURL         string   `json:"owner_url"`      // website/blog
+	IsOrg            bool     `json:"is_org"`         // org vs personal
+	OwnerVerified    bool     `json:"owner_verified"`
+	BusinessModel    string   `json:"business_model"` // "open_source", "company_backed", "foundation", "unknown"
+	License          string   `json:"license"`        // SPDX license identifier
+	Description      string   `json:"description"`    // repo description
+	ContributorCount int      `json:"contributor_count"`
+	TopContributors  []string `json:"top_contributors"` // top 5 contributor logins
+	BusFactor        int      `json:"bus_factor"`
+	IsArchived       bool     `json:"is_archived"`
+	IsFork           bool     `json:"is_fork"`
+	ActivityPattern  string   `json:"activity_pattern"` // "active", "sporadic", "inactive"
+	// LastCommitDate is GitHub's pushed_at: the last push to any branch of the
+	// repository, bot and Dependabot branches included. It is kept as
+	// evidence and drives ActivityPattern, but the maintenance score does not
+	// use it; see MaintenanceInfo.LastActivity.
+	LastCommitDate time.Time `json:"last_commit_date"`
+	// DefaultBranch is the repository's default branch, which the activity
+	// lookup (MaintenanceScanner.ScanActivity) queries.
+	DefaultBranch   string    `json:"default_branch,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	Stars           int       `json:"stars"`
+	Forks           int       `json:"forks"`
+	OpenIssues      int       `json:"open_issues"`
+	SubDependencies int       `json:"sub_dependencies"` // how many deps this dep pulls in
 	// Takeover analysis.
 	TakeoverCandidate bool   `json:"takeover_candidate"`
 	TakeoverReason    string `json:"takeover_reason,omitempty"`
@@ -182,18 +189,19 @@ func NewMaintainerScanner(timeout time.Duration, githubToken string) *Maintainer
 
 // githubRepo represents relevant fields from the GitHub repos API.
 type githubRepo struct {
-	Name        string `json:"name"`
-	FullName    string `json:"full_name"`
-	Description string `json:"description"`
-	Archived    bool   `json:"archived"`
-	Disabled    bool   `json:"disabled"`
-	Fork        bool   `json:"fork"`
-	Stars       int    `json:"stargazers_count"`
-	Forks       int    `json:"forks_count"`
-	OpenIssues  int    `json:"open_issues_count"`
-	PushedAt    string `json:"pushed_at"`
-	CreatedAt   string `json:"created_at"`
-	License     *struct {
+	Name          string `json:"name"`
+	FullName      string `json:"full_name"`
+	Description   string `json:"description"`
+	Archived      bool   `json:"archived"`
+	Disabled      bool   `json:"disabled"`
+	Fork          bool   `json:"fork"`
+	Stars         int    `json:"stargazers_count"`
+	Forks         int    `json:"forks_count"`
+	OpenIssues    int    `json:"open_issues_count"`
+	PushedAt      string `json:"pushed_at"`
+	CreatedAt     string `json:"created_at"`
+	DefaultBranch string `json:"default_branch"`
+	License       *struct {
 		SPDXID string `json:"spdx_id"`
 		Name   string `json:"name"`
 	} `json:"license"`
@@ -365,6 +373,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			info.LastCommitDate = t
 		}
 	}
+	info.DefaultBranch = repoData.DefaultBranch
 	if repoData.CreatedAt != "" {
 		if t, err := time.Parse(time.RFC3339, repoData.CreatedAt); err == nil {
 			info.CreatedAt = t
@@ -423,6 +432,45 @@ func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) 
 		return nil, err
 	}
 	return &result, nil
+}
+
+// githubCommit is the subset of a GitHub commits API entry LatestCommit reads.
+type githubCommit struct {
+	Commit struct {
+		Committer struct {
+			Date time.Time `json:"date"`
+		} `json:"committer"`
+	} `json:"commit"`
+}
+
+// LatestCommit returns the committer time of the latest commit on the default
+// branch of the GitHub repository behind modPath, from
+// `GET /repos/{owner}/{repo}/commits?per_page=1` (which lists the default
+// branch). It implements CommitLookup, the fallback MaintenanceScanner uses
+// when the module proxy cannot answer a branch query. It returns an error for
+// a module path that is not on github.com, and without a token, so the
+// fallback never spends the unauthenticated quota the maintainer scan needs.
+func (ms *MaintainerScanner) LatestCommit(ctx context.Context, modPath string) (time.Time, error) {
+	if ms.token == "" {
+		return time.Time{}, errors.New("no GitHub token")
+	}
+	owner, repo := parseGitHubPath(modPath)
+	if owner == "" || repo == "" {
+		return time.Time{}, fmt.Errorf("%s is not a GitHub module path", modPath)
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?per_page=1", owner, repo)
+	body, err := ms.githubGet(ctx, url, "maintenance:github-commits")
+	if err != nil {
+		return time.Time{}, err
+	}
+	var commits []githubCommit
+	if err := json.Unmarshal(body, &commits); err != nil {
+		return time.Time{}, err
+	}
+	if len(commits) == 0 || commits[0].Commit.Committer.Date.IsZero() {
+		return time.Time{}, errors.New("no commits reported")
+	}
+	return commits[0].Commit.Committer.Date, nil
 }
 
 func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githubUser {

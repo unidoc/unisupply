@@ -366,6 +366,9 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			fmt.Fprintf(w, "  ├─ Last release: %d months ago\n", ds.Maintenance.MonthsSinceRelease)
 		}
+		if ds.Maintenance.HasActivity() {
+			fmt.Fprintf(w, "  ├─ Last commit%s: %d months ago\n", branchSuffix(ds.Maintenance.ActivityBranch), ds.Maintenance.MonthsSinceActivity)
+		}
 		if ds.Maintenance.Archived {
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
@@ -783,10 +786,18 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		switch {
 		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		case ds.Maintenance.MonthsSinceRelease >= 24:
-			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-		case ds.Maintenance.MonthsSinceRelease >= 12:
-			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
+		case ds.Maintenance.MonthsInactive() >= 24:
+			if ds.Maintenance.HasActivity() {
+				reasons = append(reasons, fmt.Sprintf("no release in %d months and no default-branch commit in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
+			}
+		case ds.Maintenance.MonthsInactive() >= 12:
+			if ds.Maintenance.HasActivity() {
+				reasons = append(reasons, fmt.Sprintf("last release %d months ago and last default-branch commit %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
+			}
 		}
 	}
 
@@ -916,6 +927,15 @@ const timeBombScopeNote = "Any dependency, direct or transitive and not confirme
 	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
 	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
 	"modules with no recent release are counted under Unmaintained."
+
+// branchSuffix renders the branch an activity date was read from, " (main)",
+// or "" when the branch is not known.
+func branchSuffix(branch string) string {
+	if branch == "" {
+		return ""
+	}
+	return " (" + branch + ")"
+}
 
 // wrapWords splits s into lines of at most width runes, breaking at spaces.
 // A single word longer than width gets a line of its own.

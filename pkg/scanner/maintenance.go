@@ -31,9 +31,61 @@ func proxyHost(proxyURL string) string {
 type MaintenanceInfo struct {
 	LastRelease        time.Time `json:"last_release"`
 	MonthsSinceRelease int       `json:"months_since_release"`
-	Archived           bool      `json:"archived"`
-	Deprecated         bool      `json:"deprecated"`
-	LatestVersion      string    `json:"latest_version"`
+
+	// LastActivity is the commit time of the head of the default branch of
+	// the module's repository (see ScanActivity). It is zero when activity is
+	// unknown: offline, archived, no branch resolved, or the lookup failed.
+	// Unlike GitHub's pushed_at it does not move on pushes to other branches,
+	// such as Dependabot's.
+	LastActivity time.Time `json:"last_activity,omitzero"`
+
+	// MonthsSinceActivity is the calendar-month age of LastActivity. It is
+	// meaningful only when LastActivity is non-zero.
+	MonthsSinceActivity int `json:"months_since_activity,omitempty"`
+
+	// ActivitySource says where LastActivity came from (ActivityViaProxy or
+	// ActivityViaGitHub), and ActivityBranch names the branch whose head was
+	// read when it is known. Both are empty when LastActivity is zero.
+	ActivitySource string `json:"activity_source,omitempty"`
+	ActivityBranch string `json:"activity_branch,omitempty"`
+
+	Archived   bool `json:"archived"`
+	Deprecated bool `json:"deprecated"`
+
+	LatestVersion string `json:"latest_version"`
+}
+
+// Values of MaintenanceInfo.ActivitySource.
+const (
+	// ActivityViaProxy means the module proxy resolved a branch query
+	// (`@v/<branch>.info`) to the branch head's commit time.
+	ActivityViaProxy = "proxy_branch"
+
+	// ActivityViaGitHub means the GitHub commits API reported the default
+	// branch's latest commit, used when the proxy query failed.
+	ActivityViaGitHub = "github_commits"
+)
+
+// HasActivity reports whether repository activity is known for the module.
+func (m *MaintenanceInfo) HasActivity() bool {
+	return m != nil && !m.LastActivity.IsZero()
+}
+
+// MonthsInactive returns the months since the module last showed signs of
+// maintenance: the smaller of MonthsSinceRelease and MonthsSinceActivity when
+// activity is known, otherwise MonthsSinceRelease alone. A repository whose
+// default branch is worked on but that rarely tags a release is therefore not
+// mistaken for an abandoned one, while a module with no activity data keeps
+// the release-only behaviour. MonthsSinceRelease stays the right value for
+// statements that are specifically about releases.
+func (m *MaintenanceInfo) MonthsInactive() int {
+	if m == nil {
+		return 0
+	}
+	if !m.HasActivity() {
+		return m.MonthsSinceRelease
+	}
+	return min(m.MonthsSinceRelease, m.MonthsSinceActivity)
 }
 
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
