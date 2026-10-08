@@ -58,13 +58,15 @@ type Dependency struct {
 	//   nil    - unknown: classification was unavailable; or the module was
 	//            found by no list but the verdict is not safe to give (the
 	//            main module requires it directly, so it may be imported only
-	//            under a custom build tag, or a platform could not be listed).
+	//            under a custom build tag; it is reachable in the module graph
+	//            from such a requirement; or a platform could not be listed).
 	//   &true  - at least one package of the module is in a production or test
 	//            package list.
 	//   &false - classification succeeded and no package of the module is in
 	//            any list: it is in the module graph only (for example it is
 	//            required by a dependency that the main module uses only in
-	//            part). Dependencies' own tests do not count.
+	//            part, or only by a go 1.24 `tool` directive). Dependencies'
+	//            own tests do not count.
 	InBuild *bool
 
 	// Platforms lists the GOOS values on which a production module is built,
@@ -420,8 +422,18 @@ func (p *platformList) failure() string {
 // Known limit: a package behind a custom build tag (`//go:build integration`)
 // is in no list. A module the main module requires directly (no `// indirect`)
 // that no list contains may be imported only under such a tag, so it gets
-// InBuild nil rather than &false. An indirect module is not guarded this way:
-// the main module cannot import it directly, so graph-only is the likely cause.
+// InBuild nil rather than &false. Every module reachable from such a
+// requirement in the module graph (graph.Dependencies' UsedBy edges) gets nil
+// too, since the tagged code may import it through that requirement. This is
+// "reachable from", not "reachable only through": for go 1.17 and newer,
+// `go mod tidy` lists every module the tagged code needs as a `// indirect`
+// requirement of the main module, so those modules always have a direct edge
+// from the main module as well. Other indirect modules are not guarded: the
+// main module cannot import them directly, so graph-only is the likely cause.
+//
+// A module needed only by a go 1.24 `tool` directive is in no list either: a
+// tool is built by `go tool`, not linked into the main module, so it is
+// classified like any other module the build does not use.
 //
 // Failure handling. A platform is clean when all of its runs succeed and every
 // package resolves to a module. With -e, a package whose module cannot be
@@ -489,17 +501,40 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 		return "go list returned no module paths; test-only classification unavailable", ""
 	}
 
-	for modPath, dep := range graph.Dependencies {
-		var prodOn []string
-		inTest := false
+	// membership returns the GOOS values on which modPath is in a production
+	// list (sorted, as platforms is ordered by GOOS) and whether it is in any
+	// test list.
+	membership := func(modPath string) (prodOn []string, inTest bool) {
 		for _, p := range platforms {
-			if _, ok := p.prod[modPath]; ok {
+			if _, ok := p.prod[modPath]; ok && !slices.Contains(prodOn, p.goos) {
 				prodOn = append(prodOn, p.goos)
 			}
 			if _, ok := p.test[modPath]; ok {
 				inTest = true
 			}
 		}
+		return prodOn, inTest
+	}
+
+	// Modules reachable from a direct requirement that no list found (see the
+	// build-tag note above). With a failed platform every unfound module is
+	// already unknown, so this only matters when all platforms were listed.
+	var belowUnknown map[string]bool
+	if !partial {
+		var seeds []string
+		for modPath, dep := range graph.Dependencies {
+			if !dep.Direct {
+				continue
+			}
+			if prodOn, inTest := membership(modPath); len(prodOn) == 0 && !inTest {
+				seeds = append(seeds, modPath)
+			}
+		}
+		belowUnknown = reachableFrom(graph, seeds)
+	}
+
+	for modPath, dep := range graph.Dependencies {
+		prodOn, inTest := membership(modPath)
 
 		inBuild := true
 		switch {
@@ -516,7 +551,7 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 				testOnly := true
 				dep.IsTestOnly = &testOnly
 			}
-		case partial || dep.Direct:
+		case partial || dep.Direct || belowUnknown[modPath]:
 			// Not provably absent: see the failure handling and build-tag
 			// notes above.
 			continue
@@ -535,6 +570,40 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 		note = "go list reported package errors that do not affect module classification: " + strings.Join(tolerated, "; ")
 	}
 	return warning, note
+}
+
+// reachableFrom returns every module reachable from seeds in the module graph,
+// following the edges recorded in Dependency.UsedBy, seeds included. The main
+// module is never entered: `go mod graph` can list an edge back to it (a
+// dependency that requires an older version of the main module), and walking
+// through it would reach every module in the graph.
+func reachableFrom(graph *Graph, seeds []string) map[string]bool {
+	if len(seeds) == 0 {
+		return nil
+	}
+	children := make(map[string][]string)
+	for modPath, dep := range graph.Dependencies {
+		for _, parent := range dep.UsedBy {
+			children[parent] = append(children[parent], modPath)
+		}
+	}
+	seen := make(map[string]bool, len(seeds))
+	queue := slices.Clone(seeds)
+	for _, s := range seeds {
+		seen[s] = true
+	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, child := range children[current] {
+			if child == graph.Root || seen[child] {
+				continue
+			}
+			seen[child] = true
+			queue = append(queue, child)
+		}
+	}
+	return seen
 }
 
 // listPlatforms runs the production and test lists for every GOOS in listGOOS

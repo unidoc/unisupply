@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -321,8 +322,98 @@ import _ "example.com/tagonly"
 		t.Errorf("unexpected warning: %q", warn)
 	}
 	wantState(t, g, "tagonly", "nil", "nil")
-	// The guard covers direct requirements only.
+	// graphonly is not reachable from tagonly, so the guard does not cover it.
 	wantState(t, g, "graphonly", "nil", "false")
+}
+
+// The modules a tag-gated direct requirement pulls in stay unknown as well:
+// the tagged build compiles them. go mod tidy lists them as // indirect
+// requirements of the main module, so they also have an edge from the main
+// module, and the guard must not be limited to modules reachable only through
+// the tagged requirement (gin with -tags=sonic: bytedance/sonic/loader,
+// cloudwego/base64x, klauspost/cpuid/v2, ...). A module reachable both from
+// the tagged requirement and from a built one is unknown too. A graph-only
+// module whose only parent is built stays outside the build.
+func TestResolve_TagGatedDirectRequirementKeepsItsSubtreeUnknown(t *testing.T) {
+	setGoEnv(t)
+	root := t.TempDir()
+	writeStub(t, root, "prod", stubOpts{requires: []string{"shared", "graphonly"}})
+	writeStub(t, root, "tagged", stubOpts{requires: []string{"deep", "shared"}})
+	writeStub(t, root, "deep", stubOpts{requires: []string{"deeper"}})
+	for _, name := range []string{"deeper", "shared", "graphonly"} {
+		writeStub(t, root, name, stubOpts{})
+	}
+	mainDir := filepath.Join(root, "main")
+	write(t, filepath.Join(mainDir, "go.mod"), `module example.com/main
+
+go 1.21
+
+require (
+	example.com/prod v0.0.0
+	example.com/tagged v0.0.0
+)
+
+require (
+	example.com/deep v0.0.0 // indirect
+	example.com/deeper v0.0.0 // indirect
+	example.com/graphonly v0.0.0 // indirect
+	example.com/shared v0.0.0 // indirect
+)
+
+replace example.com/prod => ../prod
+
+replace example.com/tagged => ../tagged
+
+replace example.com/deep => ../deep
+
+replace example.com/deeper => ../deeper
+
+replace example.com/graphonly => ../graphonly
+
+replace example.com/shared => ../shared
+`)
+	write(t, filepath.Join(mainDir, "main.go"), "package main\n\nimport _ \"example.com/prod\"\n\nfunc main() {}\n")
+	write(t, filepath.Join(mainDir, "tagged.go"), "//go:build customtag\n\npackage main\n\nimport _ \"example.com/tagged\"\n")
+
+	g, warnings, err := Resolve(context.Background(), filepath.Join(mainDir, "go.mod"), false)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("unexpected warnings: %q", warnings)
+	}
+	// The case that makes "reachable only through" insufficient: deep has an
+	// edge from the main module as well as from tagged.
+	if used := dep(t, g, "deep").UsedBy; !slices.Contains(used, g.Root) || !slices.Contains(used, "example.com/tagged") {
+		t.Fatalf("deep.UsedBy = %v, want both %s and example.com/tagged", used, g.Root)
+	}
+
+	wantState(t, g, "prod", "false", "true")
+	wantState(t, g, "tagged", "nil", "nil")
+	wantState(t, g, "deep", "nil", "nil")
+	wantState(t, g, "deeper", "nil", "nil")
+	wantState(t, g, "shared", "nil", "nil")
+	wantState(t, g, "graphonly", "nil", "false")
+}
+
+// reachableFrom must not walk through the main module: an edge back to it
+// would reach every module in the graph.
+func TestReachableFrom_SkipsMainModule(t *testing.T) {
+	g := &Graph{Root: "example.com/main", Dependencies: map[string]*Dependency{
+		"example.com/seed":  {UsedBy: []string{"example.com/main"}},
+		"example.com/child": {UsedBy: []string{"example.com/seed"}},
+		"example.com/other": {UsedBy: []string{"example.com/main"}},
+		// seed requires an older version of the main module.
+		"example.com/main": {UsedBy: []string{"example.com/seed"}},
+	}}
+	got := reachableFrom(g, []string{"example.com/seed"})
+	want := map[string]bool{"example.com/seed": true, "example.com/child": true}
+	if !maps.Equal(got, want) {
+		t.Errorf("reachableFrom = %v, want %v", got, want)
+	}
+	if got := reachableFrom(g, nil); got != nil {
+		t.Errorf("reachableFrom(no seeds) = %v, want nil", got)
+	}
 }
 
 // A module imported only on some GOOS is production, and Platforms says where.
