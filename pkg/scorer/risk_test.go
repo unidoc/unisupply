@@ -3304,3 +3304,48 @@ func TestMeanDepRiskScore_Retained(t *testing.T) {
 		t.Errorf("MeanDepRiskScore = %d, want in [0, 100]", ps.MeanDepRiskScore)
 	}
 }
+
+// TestUnscoredScoresLikeEnrichmentFailed pins the invariant that an advisory
+// with no published severity (SeveritySource "unscored") is scored exactly like
+// one whose lookup failed: only the label differs, not the score.
+func TestUnscoredScoresLikeEnrichmentFailed(t *testing.T) {
+	headline := testutil.DepSpec{
+		Path: "github.com/unscored/pkg", Version: "v1.0.0",
+		Direct: true, Depth: 0, IsTestOnly: testutil.BoolPtr(false),
+	}
+
+	score := func(reachability string, unscored bool) *ProjectScore {
+		graph := testutil.MakeGraph(twoAxisCleanDeps(50, headline)...)
+		input := twoAxisEmptyInput(graph)
+		v := testutil.MakeVulnWithDates("CVE-2024-0003", "UNKNOWN", 90, 0, true)
+		v.Reachability = reachability
+		if unscored {
+			v.EnrichmentFailed = false
+			v.SeveritySource = "unscored"
+		} else {
+			v.EnrichmentFailed = true
+			v.SeveritySource = "none"
+		}
+		input.Vulns["github.com/unscored/pkg"] = []scanner.Vulnerability{v}
+		return ScoreAll(input)
+	}
+
+	for _, reach := range []string{"called", ""} {
+		t.Run("reachability_"+reach, func(t *testing.T) {
+			failed := score(reach, false)
+			unscored := score(reach, true)
+			if failed.OverallScore != unscored.OverallScore || failed.OverallLevel != unscored.OverallLevel {
+				t.Errorf("failed=(%d,%s) unscored=(%d,%s); want identical",
+					failed.OverallScore, failed.OverallLevel, unscored.OverallScore, unscored.OverallLevel)
+			}
+			for i := range failed.Dependencies {
+				if failed.Dependencies[i].RiskScore != unscored.Dependencies[i].RiskScore ||
+					failed.Dependencies[i].RiskLevel != unscored.Dependencies[i].RiskLevel {
+					t.Errorf("dep %s differs: failed=(%d,%s) unscored=(%d,%s)", failed.Dependencies[i].Module,
+						failed.Dependencies[i].RiskScore, failed.Dependencies[i].RiskLevel,
+						unscored.Dependencies[i].RiskScore, unscored.Dependencies[i].RiskLevel)
+				}
+			}
+		})
+	}
+}

@@ -162,9 +162,13 @@ type JSONVuln struct {
 	// function (outermost frame first). Set only when Reachability is "called".
 	// Static-analysis evidence of reachability, not proof of exploitability.
 	CallPath []string `json:"call_path,omitempty"`
-	// SeveritySource is "osv", "nvd", "ghsa", or "none" (all tiers failed).
+	// SeveritySource is "osv", "nvd", "ghsa", "none" (a lookup failed), or
+	// "unscored" (every source consulted answered; none has published a severity).
 	// Empty when enrichment was not attempted (severity was known from govulncheck).
 	SeveritySource string `json:"severity_source,omitempty"`
+	// SeverityAlias is the alias ID (GHSA-* or CVE-*) whose OSV record supplied
+	// the severity, when it did not come from the advisory's own ID.
+	SeverityAlias string `json:"severity_alias,omitempty"`
 	// SeverityScored is the tier the scorer assigns: UNKNOWN is promoted to
 	// MEDIUM by default, or HIGH when reachability is confirmed "called".
 	SeverityScored string `json:"severity_scored,omitempty"`
@@ -441,6 +445,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				Reachability:        v.Reachability,
 				CallPath:            v.CallPath,
 				SeveritySource:      v.SeveritySource,
+				SeverityAlias:       v.SeverityAlias,
 				SeverityScored:      scorer.ScoredSeverity(v),
 				EnrichmentErrors:    v.EnrichmentErrors,
 				EPSSScore:           v.EPSSScore,

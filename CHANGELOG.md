@@ -39,6 +39,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
+#### Severity resolved from OSV alias records
+
+- **Advisories whose severity was left `UNKNOWN` by NVD or GitHub rate
+  limiting now resolve from OSV itself.** The GHSA and CVE aliases of an
+  advisory are looked up on OSV before NVD and GitHub, which become fallbacks.
+  CVSS v3.0/v3.1 vectors on CVE records are scored locally. The advisory's
+  `severity_alias` JSON field names the alias that supplied the severity.
+  On a cold, unauthenticated scan of a module with 35 reported advisories,
+  NVD requests fell from 84 (68 rate-limited) to 24 (11 rate-limited), and the
+  advisories with a published severity that were left `UNKNOWN` now resolve.
+- **`severity_source: "unscored"` separates "not published yet" from "lookup
+  failed".** When every source consulted (OSV, NVD, GitHub) answered but
+  none has a severity, the advisory is reported as unscored instead of as an
+  enrichment failure. A rate-limited or failed lookup still counts as a
+  failure, because it may have missed a published severity. Scoring
+  is unchanged (MEDIUM, or HIGH when called). The text report labels it
+  `[severity_unpublished]`, the PDF lists it under Data-quality Notes, and its
+  warnings collapse into their own summary line.
+
 #### Time bombs explained in every report; PDF reports now list them
 
 - **The text report, PDF report and weekly security issue now say what a

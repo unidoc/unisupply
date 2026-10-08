@@ -272,39 +272,58 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 
 	writeTimeBombsSection(c, ps, regular, bold)
 
-	// Data-quality notes: list vulns where enrichment was attempted but failed.
-	var failedVulns []*scanner.Vulnerability
+	// Data-quality notes: list vulns where enrichment failed, and separately
+	// those whose severity is simply not published yet.
+	var failedVulns, unscoredVulns []*scanner.Vulnerability
 	for _, ds := range ps.Dependencies {
 		for i := range ds.Vulns {
-			if ds.Vulns[i].EnrichmentFailed {
+			switch {
+			case ds.Vulns[i].EnrichmentFailed:
 				failedVulns = append(failedVulns, &ds.Vulns[i])
+			case ds.Vulns[i].SeveritySource == "unscored":
+				unscoredVulns = append(unscoredVulns, &ds.Vulns[i])
 			}
 		}
 	}
-	if len(failedVulns) > 0 {
+	if len(failedVulns) > 0 || len(unscoredVulns) > 0 {
 		subheading(c, "Data-quality Notes", bold)
-		notePara := c.NewStyledParagraph()
-		notePara.SetMargins(0, 0, 5, 0)
-		notePara.SetLineHeight(1.6)
-		noteIntro := notePara.Append(fmt.Sprintf(
+	}
+	if len(failedVulns) > 0 {
+		writeDataQualityList(c, regular, failedVulns, fmt.Sprintf(
 			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
 				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
 			len(failedVulns),
-		))
-		noteIntro.Style.Font = regular
-		noteIntro.Style.FontSize = 11
-		for _, v := range failedVulns {
-			scored := scorer.ScoredSeverity(v)
-			line := fmt.Sprintf("  • %s — scored %s", v.ID, scored)
-			if len(v.EnrichmentErrors) > 0 {
-				line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
-			}
-			chunk := notePara.Append(line + "\n")
-			chunk.Style.Font = regular
-			chunk.Style.FontSize = 10
-		}
-		_ = c.Draw(notePara)
+		), true)
 	}
+	if len(unscoredVulns) > 0 {
+		writeDataQualityList(c, regular, unscoredVulns, fmt.Sprintf(
+			"%d advisory(ies) have no published severity. "+
+				"No public CVSS severity has been published yet for these advisories; they are scored conservatively as MEDIUM (HIGH when called).\n",
+			len(unscoredVulns),
+		), false)
+	}
+}
+
+// writeDataQualityList draws one data-quality paragraph: an intro sentence
+// followed by one bullet per vulnerability. withErrors appends the first
+// enrichment error to each bullet, which only failed lookups have.
+func writeDataQualityList(c *creator.Creator, regular *model.PdfFont, vulns []*scanner.Vulnerability, intro string, withErrors bool) {
+	notePara := c.NewStyledParagraph()
+	notePara.SetMargins(0, 0, 5, 0)
+	notePara.SetLineHeight(1.6)
+	noteIntro := notePara.Append(intro)
+	noteIntro.Style.Font = regular
+	noteIntro.Style.FontSize = 11
+	for _, v := range vulns {
+		line := fmt.Sprintf("  • %s — scored %s", v.ID, scorer.ScoredSeverity(v))
+		if withErrors && len(v.EnrichmentErrors) > 0 {
+			line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
+		}
+		chunk := notePara.Append(line + "\n")
+		chunk.Style.Font = regular
+		chunk.Style.FontSize = 10
+	}
+	_ = c.Draw(notePara)
 }
 
 // filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).

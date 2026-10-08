@@ -436,12 +436,12 @@ the same data already public in your `go.mod`.
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
-| `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*) | Severity enrichment when a vuln has unknown severity | always runs (no-op when no vulns) |
-| `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV has no data | always runs (no-op if no CVE alias) |
+| `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*), and its GHSA/CVE alias IDs (at most 4 aliases per advisory) | Severity enrichment when a vuln has unknown severity: the advisory's own record, then its alias records (GHSA first, then CVE; CVSS v3 vectors are scored locally) | always runs (no-op when no vulns) |
+| `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV and its alias records have no severity | always runs (no-op if no CVE alias) |
 | `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; a token raises rate limits |
 | `api.github.com` | The GitHub token only; no module data | Token validation: one request to `/rate_limit` (retried up to twice on a network error or 5xx), after the dependency graph is resolved and before any scanner runs | only when a GitHub token is supplied, the project has dependencies (or `--require-github-token` is set), and `--offline` is not set; omit the token to skip |
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
-| `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV + NVD have no data) | always runs (no-op if no CVE alias) |
+| `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV, its alias records and NVD have no severity) | always runs (no-op if no CVE alias) |
 | `api.first.org` | CVE IDs (batched) | EPSS exploitation-probability lookup for flagged CVEs | always runs (no-op if no CVE alias); 24h cache |
 | `www.cisa.gov` | Nothing (bulk catalog download, no identifiers sent) | CISA KEV known-exploited lookup | always runs (no-op when no vulns); 24h cache |
 | `<trust-index-url>` | Module paths (no versions, no source) | Trust Index lookup | opt-in — omit `--trust-index-url` |
