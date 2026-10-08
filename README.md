@@ -99,7 +99,7 @@ path that pulled the module in.
 | Scanner          | What it checks                                          | Data source                |
 | ---------------- | ------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs in dependencies                              | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, archive status, deprecation               | Go Module Proxy            |
+| Maintenance      | Last release, default-branch activity, archive status, deprecation (incl. go.mod `// Deprecated:`) | Go Module Proxy (GitHub commits API as a fallback) |
 | Maintainer       | Contributors, bus factor, activity, org verification    | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules        | Built-in list              |
 | Resilience       | Release cadence, governance files, version scheme       | GitHub API                 |
@@ -455,11 +455,11 @@ the same data already public in your `go.mod`.
 
 | Host | What is sent | When | Disable |
 | ---- | ------------ | ---- | ------- |
-| `proxy.golang.org` | Module path + version | Maintenance and resilience scanners | always runs |
+| `proxy.golang.org` | Module path + version, or a branch name (the GitHub default branch, else `main`, then `master`) | Maintenance and resilience scanners: release history, the latest version's `go.mod` (deprecation notice), and the default branch's head commit | always runs |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
 | `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*), and its GHSA/CVE alias IDs (at most 4 aliases per advisory) | Severity enrichment when a vuln has unknown severity: the advisory's own record, then its alias records (GHSA first, then CVE; CVSS v3 vectors are scored locally) | always runs (no-op when no vulns) |
 | `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV and its alias records have no severity | always runs (no-op if no CVE alias); the NVD API key, when set, is sent as the `apiKey` header to this host only |
-| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list) | always runs; a token raises rate limits |
+| `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list); with a token, also the default branch's latest commit when the module proxy cannot answer the branch query | always runs; a token raises rate limits |
 | `api.github.com` | The GitHub token only; no module data | Token validation: one request to `/rate_limit` (retried up to twice on a network error or 5xx), after the dependency graph is resolved and before any scanner runs | only when a GitHub token is supplied, the project has dependencies (or `--require-github-token` is set), and `--offline` is not set; omit the token to skip |
 | `api.github.com` | Repo owner/name | Resilience scanner (governance file checks, unauthenticated) | always runs for GitHub-hosted deps |
 | `api.github.com` | CVE ID | GHSA severity enrichment (only when a CVE alias exists and OSV, its alias records and NVD have no severity) | always runs (no-op if no CVE alias) |

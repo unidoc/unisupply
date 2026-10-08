@@ -125,6 +125,40 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
   `replace` directive is a `go.mod`-level signal).
 
+#### Maintenance uses the default branch's last commit
+
+- **Scores can change in both directions.** A repository whose default branch
+  is worked on but that rarely tags a release is no longer scored as abandoned,
+  and a deprecated module is no longer scored by its dates at all (see below).
+- **The maintenance score, the `unmaintained` risk factor, the unmaintained
+  counts and the `no_unmaintained_months` policy rule use the newer of the last
+  release and the last commit on the default branch.** The commit time comes
+  from the module proxy (`@v/<branch>.info`, with the GitHub default branch,
+  else `main`, then `master`), so it needs no token or GitHub quota and covers
+  modules outside GitHub. With a token, the GitHub commits API is the fallback
+  when the proxy query fails. GitHub's `pushed_at` is not used: it moves on
+  pushes to any branch, Dependabot's included. The JSON `maintenance` object
+  gains `last_activity`, `months_since_activity`, `activity_source` and
+  `activity_branch`, and the text and PDF reports show "Last commit". Without
+  activity data the release age alone is used, as before.
+- **`no_unmaintained_months` is more lenient for repositories with recent
+  default-branch commits:** a dependency passes when it was released or
+  committed to within the limit, and the violation names both ages.
+
+#### go.mod deprecation notices are read (#138)
+
+- **A module is now deprecated when the `go.mod` of its latest version carries
+  a `// Deprecated:` notice,** the way `go list -m -u` and `go get` report it.
+  Before, only a 410 from the proxy counted, which almost never happens, so
+  modules such as `github.com/golang/protobuf` were not reported. The message,
+  which usually names the successor, is reported as
+  `maintenance.deprecation_message`, in the text and PDF reports and in the
+  `no_deprecated` violation.
+- **A deprecated module's maintenance component is 100, like an archived
+  one,** whatever its release or commit dates. `no_deprecated` is not enabled
+  by either preset, so a custom policy that enables it can now fail on modules
+  it previously passed.
+
 #### Severity resolved from OSV alias records
 
 - **Advisories whose severity was left `UNKNOWN` by NVD or GitHub rate
