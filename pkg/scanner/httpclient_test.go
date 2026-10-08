@@ -260,3 +260,62 @@ func TestHTTPClient_NoLogWhenNetlogDisabled(t *testing.T) {
 		t.Errorf("http.DefaultTransport was replaced without --network-log: %T", http.DefaultTransport)
 	}
 }
+
+func TestHTTPClient_APIKeySentWhenHostMatches(t *testing.T) {
+	capture := &captureTransport{}
+	c := NewClient(ClientOptions{})
+	c.Transport = capture
+
+	_, _, err := c.Get(context.Background(), "https://trusted.example.com/data", GetOptions{
+		Host:         "trusted.example.com",
+		APIKeyHeader: "apiKey",
+		APIKey:       "key-abc",
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(capture.requests) != 1 {
+		t.Fatalf("inner transport called %d times, want 1", len(capture.requests))
+	}
+	if got := capture.requests[0].Header.Get("apiKey"); got != "key-abc" {
+		t.Fatalf("apiKey header = %q, want key-abc", got)
+	}
+	if got := capture.requests[0].Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization header = %q, want empty", got)
+	}
+}
+
+func TestHTTPClient_APIKeyNotSentOnHostMismatch(t *testing.T) {
+	capture := &captureTransport{}
+	c := NewClient(ClientOptions{})
+	c.Transport = capture
+
+	_, _, err := c.Get(context.Background(), "https://attacker.example.com/secret", GetOptions{
+		Host:         "trusted.example.com",
+		APIKeyHeader: "apiKey",
+		APIKey:       "key-abc",
+	})
+	if err == nil {
+		t.Fatal("expected host pin mismatch error, got nil")
+	}
+	if len(capture.requests) != 0 {
+		t.Fatalf("inner transport was called %d times — API key would have leaked", len(capture.requests))
+	}
+}
+
+func TestHTTPClient_EmptyAPIKeySendsNoHeader(t *testing.T) {
+	capture := &captureTransport{}
+	c := NewClient(ClientOptions{})
+	c.Transport = capture
+
+	_, _, err := c.Get(context.Background(), "https://trusted.example.com/data", GetOptions{
+		Host:         "trusted.example.com",
+		APIKeyHeader: "apiKey",
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := capture.requests[0].Header.Get("apiKey"); got != "" {
+		t.Fatalf("apiKey header = %q, want empty", got)
+	}
+}

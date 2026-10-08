@@ -48,6 +48,10 @@ type VulnEnricherOptions struct {
 	// still works but is rate-limited).
 	GitHubToken string
 
+	// NVDAPIKey is sent as the "apiKey" header to services.nvd.nist.gov only,
+	// raising NVD's rate limit. Empty means unauthenticated.
+	NVDAPIKey string
+
 	// CacheDir overrides the on-disk cache location. Intended for tests.
 	// When empty, the enricher resolves the path via os.UserCacheDir() with
 	// a TempDir() fallback.
@@ -68,6 +72,11 @@ type VulnEnricher struct {
 	opts     VulnEnricherOptions
 	cacheDir string
 	now      func() time.Time
+
+	// nvdKeyRejected is set when NVD rejected the API key; the rest of the
+	// scan queries NVD unauthenticated, as if no key had been given. Enrich
+	// runs sequentially, so no lock is needed.
+	nvdKeyRejected bool
 }
 
 // NewVulnEnricher creates a new VulnEnricher. The returned enricher is safe
@@ -520,15 +529,29 @@ type nvdResponse struct {
 // failure; returns (&enrichResult{}, nil) when NVD has no data for the CVE.
 func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enrichResult, warnings []string) {
 	url := "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cveID
-	body, resp, err := e.client.Get(ctx, url, GetOptions{
+	getOpts := GetOptions{
 		Host:     nvdHost,
 		MaxBytes: enrichMaxBytes,
 		Accept:   "application/json",
 		Purpose:  "vulnenrich:nvd",
-	})
+	}
+	useKey := e.opts.NVDAPIKey != "" && !e.nvdKeyRejected
+	if useKey {
+		getOpts.APIKeyHeader = "apiKey"
+		getOpts.APIKey = e.opts.NVDAPIKey
+	}
+	body, resp, err := e.client.Get(ctx, url, getOpts)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
 		return nil, warnings
+	}
+	if useKey && (resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 404) {
+		// A bad key must not cost more than no key: retry this request
+		// unauthenticated, and send no key for the rest of the scan.
+		e.nvdKeyRejected = true
+		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", resp.StatusCode))
+		result, retryWarns := e.fetchNVD(ctx, cveID)
+		return result, append(warnings, retryWarns...)
 	}
 	if resp.StatusCode != 200 {
 		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD returned HTTP %d for %s", resp.StatusCode, cveID))

@@ -42,6 +42,11 @@ type Options struct {
 
 	GithubToken string
 
+	// NVDAPIKey is sent as the apiKey header to services.nvd.nist.gov only,
+	// raising the rate limit of the CVE severity fallback. Empty means
+	// unauthenticated. It is never written to reports, logs or the cache.
+	NVDAPIKey string
+
 	// RequireGithubToken makes Run fail with an error wrapping
 	// ErrGithubTokenPrecondition when GithubToken is empty, rejected by GitHub
 	// (401), or cannot be validated (network error, or any status other than
@@ -220,7 +225,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, githubToken)
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey})
 	// The scanner reports availability directly: govulncheck failures come back
 	// as a warning with a nil error, so err alone reads a failed scan as clean.
 	vulnScanUnavailable := !vulnScanned

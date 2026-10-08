@@ -1091,3 +1091,193 @@ func TestVulnEnrich_AliasLookupCap(t *testing.T) {
 		t.Errorf("alias requests = %d, want %d", aliasReqs, maxAliasLookups)
 	}
 }
+
+// nvdKeyTransport records every request and answers per host. NVD answers with
+// nvdStatus and an empty result set; OSV answers 404; GitHub answers an empty
+// array.
+type nvdKeyTransport struct {
+	nvdStatus int
+	// keylessBody, when set, is served with HTTP 200 to NVD requests that
+	// carry no apiKey header; keyed requests still get nvdStatus.
+	keylessBody string
+	reqs        []*http.Request
+}
+
+func (n *nvdKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	n.reqs = append(n.reqs, req)
+	status, body := 200, `[]`
+	switch {
+	case strings.Contains(req.URL.Host, "osv.dev"):
+		status, body = 404, `{"code":5}`
+	case strings.Contains(req.URL.Host, "nvd.nist.gov") && n.keylessBody != "" && req.Header.Get("apiKey") == "":
+		status, body = 200, n.keylessBody
+	case strings.Contains(req.URL.Host, "nvd.nist.gov"):
+		status, body = n.nvdStatus, `{"totalResults":0,"vulnerabilities":[]}`
+	}
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func (n *nvdKeyTransport) count(hostPart string) int {
+	c := 0
+	for _, r := range n.reqs {
+		if strings.Contains(r.URL.Host, hostPart) {
+			c++
+		}
+	}
+	return c
+}
+
+func newNVDKeyEnricher(t *testing.T, tr *nvdKeyTransport, key string) (*VulnEnricher, string) {
+	t.Helper()
+	dir := t.TempDir()
+	e := NewVulnEnricher(VulnEnricherOptions{NVDAPIKey: key, GitHubToken: "ghp_tok", CacheDir: dir})
+	e.client.Transport = tr
+	return e, dir
+}
+
+func TestVulnEnrich_NVDKeySentAsHeader(t *testing.T) {
+	tr := &nvdKeyTransport{nvdStatus: 200}
+	e, _ := newNVDKeyEnricher(t, tr, "k123")
+	e.Enrich(context.Background(), &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"})
+
+	sawNVD := false
+	for _, r := range tr.reqs {
+		isNVD := strings.Contains(r.URL.Host, "nvd.nist.gov")
+		if isNVD {
+			sawNVD = true
+			if got := r.Header.Get("apiKey"); got != "k123" {
+				t.Errorf("NVD apiKey = %q, want k123", got)
+			}
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("NVD Authorization = %q, want empty", got)
+			}
+			if strings.Contains(r.URL.RawQuery, "k123") {
+				t.Errorf("key in NVD query: %q", r.URL.RawQuery)
+			}
+		} else if r.Header.Get("apiKey") != "" {
+			t.Errorf("apiKey sent to %s", r.URL.Host)
+		}
+	}
+	if !sawNVD {
+		t.Fatal("no NVD request observed")
+	}
+}
+
+func TestVulnEnrich_NoNVDKeyNoHeader(t *testing.T) {
+	tr := &nvdKeyTransport{nvdStatus: 200}
+	e, _ := newNVDKeyEnricher(t, tr, "")
+	e.Enrich(context.Background(), &Vulnerability{ID: "CVE-2024-23653", Severity: "UNKNOWN"})
+
+	if tr.count("nvd.nist.gov") == 0 {
+		t.Fatal("no NVD request observed")
+	}
+	for _, r := range tr.reqs {
+		if r.Header.Get("apiKey") != "" {
+			t.Errorf("apiKey header sent to %s without a key", r.URL.Host)
+		}
+	}
+}
+
+func TestVulnEnrich_NVDKeyRejectedFallsBackUnauthenticated(t *testing.T) {
+	nvdBody, err := os.ReadFile(filepath.Join("testdata", "vulnenrich", "nvd-CVE-2024-23653.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []int{401, 403, 404} {
+		t.Run(fmt.Sprintf("HTTP_%d", status), func(t *testing.T) {
+			tr := &nvdKeyTransport{nvdStatus: status, keylessBody: string(nvdBody)}
+			e, _ := newNVDKeyEnricher(t, tr, "k123")
+
+			var warns []string
+			var vulns []*Vulnerability
+			for _, id := range []string{"CVE-2024-23653", "CVE-2024-23654"} {
+				v := &Vulnerability{ID: id, Severity: "UNKNOWN"}
+				vulns = append(vulns, v)
+				warns = append(warns, e.Enrich(context.Background(), v)...)
+			}
+
+			rejected := 0
+			for _, w := range warns {
+				if strings.Contains(w, "NVD rejected the API key") {
+					rejected++
+					want := fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", status)
+					if w != want {
+						t.Errorf("warning = %q, want %q", w, want)
+					}
+				}
+			}
+			if rejected != 1 {
+				t.Errorf("rejected-key warnings = %d, want 1; all: %v", rejected, warns)
+			}
+
+			// One keyed request (rejected), its keyless retry, then one
+			// keyless request for the second advisory.
+			var keyed, keyless int
+			for _, r := range tr.reqs {
+				if !strings.Contains(r.URL.Host, "nvd.nist.gov") {
+					continue
+				}
+				if r.Header.Get("apiKey") != "" {
+					keyed++
+				} else {
+					keyless++
+				}
+			}
+			if keyed != 1 || keyless != 2 {
+				t.Errorf("NVD requests keyed=%d keyless=%d, want 1 and 2", keyed, keyless)
+			}
+
+			// A rejected key must not cost severities: both resolve from NVD.
+			for _, v := range vulns {
+				if v.SeveritySource != "nvd" || v.Severity == "UNKNOWN" {
+					t.Errorf("%s: severity=%q source=%q, want resolved from nvd", v.ID, v.Severity, v.SeveritySource)
+				}
+			}
+			if n := tr.count("api.github.com"); n != 0 {
+				t.Errorf("GitHub requests = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestVulnEnrich_NVDKeyNotInOutputs(t *testing.T) {
+	tr := &nvdKeyTransport{nvdStatus: 403}
+	e, dir := newNVDKeyEnricher(t, tr, "k123")
+
+	var all []string
+	for _, id := range []string{"CVE-2024-23653", "CVE-2024-23654"} {
+		v := &Vulnerability{ID: id, Severity: "UNKNOWN"}
+		all = append(all, e.Enrich(context.Background(), v)...)
+		all = append(all, v.EnrichmentErrors...)
+	}
+	for _, s := range all {
+		if strings.Contains(s, "k123") {
+			t.Errorf("key leaked into %q", s)
+		}
+	}
+	files := 0
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		files++
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(b), "k123") {
+			t.Errorf("key leaked into cache file %s", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files == 0 {
+		t.Error("expected cache files to have been written")
+	}
+}

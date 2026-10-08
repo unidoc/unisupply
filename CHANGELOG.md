@@ -9,6 +9,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### New Features
 
+#### NVD API key for severity lookups
+
+- **`--nvd-api-key` (or `NVD_API_KEY`) raises the NVD rate limit** of the CVE
+  severity fallback from 5 to 50 requests per 30 seconds. The key is sent only
+  as an `apiKey` header to `services.nvd.nist.gov`. A rejected key produces one
+  warning and the scan continues unauthenticated, so a bad key never costs
+  severities that no key would have found. `pkg/runner.Options`
+  gains `NVDAPIKey`, and `scanner.ScanVulnsWithOptions` is the new entry point
+  (`ScanVulns` is unchanged).
+
 #### Call path for every reachable vulnerability
 
 - **JSON reports now carry `call_path` on each vulnerability whose

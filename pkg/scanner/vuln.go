@@ -327,6 +327,21 @@ func callPath(trace []traceEntry) []string {
 // failed scan as a clean one. The scorer excludes the 40% vulnerability weight
 // when this is false; see scorer.ScoreInput.VulnScanUnavailable.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
+	return ScanVulnsWithOptions(ctx, projectDir, VulnScanOptions{GitHubToken: githubToken})
+}
+
+// VulnScanOptions carries the credentials ScanVulnsWithOptions forwards to the
+// severity enrichment lookups.
+type VulnScanOptions struct {
+	// GitHubToken is sent as a Bearer token to api.github.com only.
+	GitHubToken string
+	// NVDAPIKey is sent as the apiKey header to services.nvd.nist.gov only.
+	NVDAPIKey string
+}
+
+// ScanVulnsWithOptions is ScanVulns with explicit credentials for the
+// enrichment lookups. It returns the same values as ScanVulns.
+func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanOptions) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
 		// govulncheck runs in-process and reaches vuln.go.dev through
 		// http.DefaultClient, so offline mode would refuse its requests and
@@ -378,7 +393,7 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
-	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: opts.GitHubToken, NVDAPIKey: opts.NVDAPIKey})
 	var enrichWarnings []string
 	// Sorted module order keeps the warning order, and the single-failure path
 	// in collapseSeverityLookupWarnings, stable across runs.

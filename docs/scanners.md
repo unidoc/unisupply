@@ -282,6 +282,14 @@ confirmed called. Only the label differs; the text report marks the two cases
 advisories in a separate Data-quality note. Unscored advisories are rechecked
 after one hour.
 
+**NVD API key.** NVD allows 5 requests per rolling 30 seconds without a key and
+50 with one. Set `--nvd-api-key` (or `NVD_API_KEY`) to make the NVD fallback
+less likely to be rate limited. The key is sent only as an `apiKey` header to
+`services.nvd.nist.gov`, never in a URL, report, warning, cache file or
+`--network-log` line. If NVD answers 401, 403 or 404 while a key is set, one
+warning is emitted, that request is retried without the key and the rest of
+the scan queries NVD unauthenticated, exactly as if no key had been set. The lookup order is unchanged.
+
 ### Threat-intel enrichment (EPSS + CISA KEV)
 
 Every CVE is enriched with two real-world exploitation signals:

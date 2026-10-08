@@ -47,6 +47,7 @@ func main() {
 		scanCI                 bool
 		workflowPath           string
 		githubToken            string
+		nvdAPIKey              string
 		requireGithubToken     bool
 		policyFile             string
 		policyPreset           string
@@ -71,6 +72,7 @@ func main() {
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
 	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
+	flag.StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key for higher CVE severity lookup rate limits (or set NVD_API_KEY env)")
 	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
@@ -101,6 +103,11 @@ func main() {
 		githubToken = os.Getenv("GITHUB_TOKEN")
 	}
 
+	// NVD API key from env if not set via flag.
+	if nvdAPIKey == "" {
+		nvdAPIKey = os.Getenv("NVD_API_KEY")
+	}
+
 	// Determine target path.
 	path := "."
 	if flag.NArg() > 0 {
@@ -120,6 +127,7 @@ func main() {
 		scanCI:                 scanCI,
 		workflowPath:           workflowPath,
 		githubToken:            githubToken,
+		nvdAPIKey:              nvdAPIKey,
 		requireGithubToken:     requireGithubToken,
 		policyFile:             policyFile,
 		policyPreset:           policyPreset,
@@ -159,6 +167,7 @@ type runConfig struct {
 	scanCI                 bool
 	workflowPath           string
 	githubToken            string
+	nvdAPIKey              string
 	requireGithubToken     bool
 	policyFile             string
 	policyPreset           string
@@ -246,6 +255,7 @@ func run(cfg *runConfig) error {
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
 		GithubToken:            cfg.githubToken,
+		NVDAPIKey:              cfg.nvdAPIKey,
 		RequireGithubToken:     cfg.requireGithubToken,
 		TrustIndexURL:          cfg.trustIndexURL,
 		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
@@ -411,6 +421,7 @@ func printUsage() {
 	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
 	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
 	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if token missing or invalid")
+	fmt.Println("  unisupply --nvd-api-key $NVD_API_KEY ./      # Raise the NVD severity lookup rate limit")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
 	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
