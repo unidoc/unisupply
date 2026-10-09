@@ -67,8 +67,8 @@ func TestDependency_IsTestOnly_ThreeStates(t *testing.T) {
 // classifyTestOnlyDeps returns a non-empty warning string and leaves all
 // Dependency.IsTestOnly fields as nil.
 func TestClassifyTestOnlyDeps_GoListFailure(t *testing.T) {
-	// Create a temp dir that is NOT a valid Go module — go list -m -json -test
-	// all will fail because there is no go.mod.
+	// Create a temp dir that is NOT a valid Go module — go list
+	// will fail because there is no go.mod.
 	dir := t.TempDir()
 
 	graph := &Graph{
@@ -81,7 +81,7 @@ func TestClassifyTestOnlyDeps_GoListFailure(t *testing.T) {
 		},
 	}
 
-	warn := classifyTestOnlyDeps(context.Background(), dir, graph)
+	warn, _ := classifyTestOnlyDeps(context.Background(), dir, graph)
 
 	// A warning must be emitted when go list fails.
 	if warn == "" {
@@ -114,7 +114,7 @@ func TestClassifyTestOnlyDeps_NilOnUnknownModules(t *testing.T) {
 	}
 
 	// go list will fail in the empty dir, so IsTestOnly stays nil.
-	_ = classifyTestOnlyDeps(context.Background(), dir, graph)
+	_, _ = classifyTestOnlyDeps(context.Background(), dir, graph)
 	if dep.IsTestOnly != nil {
 		t.Errorf("IsTestOnly = %v, want nil for dep not reached by go list", dep.IsTestOnly)
 	}

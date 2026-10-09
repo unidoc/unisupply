@@ -155,8 +155,8 @@ func (is *IntegrityScanner) ScanDirectives(gm *parser.GoMod) (report *IntegrityR
 // (e.g. pinned to a commit between tags). See docs/scanners.md.
 //
 // Runs after graph resolution (unlike ScanDirectives) because severity
-// depends on dep.Direct and dep.IsTestOnly, which only the resolver
-// populates.
+// depends on dep.Direct, dep.IsTestOnly and dep.InBuild, which only the
+// resolver populates.
 func (is *IntegrityScanner) ScanPseudoVersions(graph *resolver.Graph, report *IntegrityReport) map[string]IntegrityRiskLevel {
 	classes := make(map[string]IntegrityRiskLevel)
 
@@ -166,7 +166,12 @@ func (is *IntegrityScanner) ScanPseudoVersions(graph *resolver.Graph, report *In
 			continue
 		}
 
+		// A pseudo-version pin is a pinning-hygiene signal about code on the
+		// import path. Confirmed test-only and confirmed outside-the-build
+		// (graph-only) modules are not on it, so both are Info; nil (unknown)
+		// on either field keeps the direct/transitive severity.
 		testOnly := dep.IsTestOnly != nil && *dep.IsTestOnly
+		outsideBuild := dep.InBuild != nil && !*dep.InBuild
 
 		var severity IntegrityRiskLevel
 		var detail string
@@ -174,6 +179,9 @@ func (is *IntegrityScanner) ScanPseudoVersions(graph *resolver.Graph, report *In
 		case testOnly:
 			severity = IntegrityInfo
 			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (test-only; no score impact)", path, dep.Module.Version)
+		case outsideBuild:
+			severity = IntegrityInfo
+			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (outside the build; no score impact)", path, dep.Module.Version)
 		case dep.Direct:
 			severity = IntegrityMedium
 			detail = fmt.Sprintf("%s is pinned to pseudo-version %s (direct dependency)", path, dep.Module.Version)

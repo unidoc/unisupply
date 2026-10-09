@@ -612,3 +612,62 @@ func TestVerifyGoSum_MismatchMarkersFail(t *testing.T) {
 		})
 	}
 }
+
+// TestScanPseudoVersions_InBuild verifies that a confirmed outside-the-build
+// (InBuild == &false) pseudo-version pin is Info like a test-only one, while a
+// nil InBuild keeps the direct/transitive severity.
+func TestScanPseudoVersions_InBuild(t *testing.T) {
+	trueVal, falseVal := true, false
+	const pseudo = "v0.0.0-20220702200334-8c7cb25baa11"
+
+	graph := &resolver.Graph{
+		Dependencies: map[string]*resolver.Dependency{
+			"github.com/outside/direct": {
+				Module:  parser.Module{Path: "github.com/outside/direct", Version: pseudo},
+				Direct:  true,
+				InBuild: &falseVal,
+			},
+			"github.com/outside/indirect": {
+				Module:     parser.Module{Path: "github.com/outside/indirect", Version: pseudo},
+				IsTestOnly: nil,
+				InBuild:    &falseVal,
+			},
+			"github.com/built/direct": {
+				Module:     parser.Module{Path: "github.com/built/direct", Version: pseudo},
+				Direct:     true,
+				IsTestOnly: &falseVal,
+				InBuild:    &trueVal,
+			},
+			"github.com/unknown/direct": {
+				Module:  parser.Module{Path: "github.com/unknown/direct", Version: pseudo},
+				Direct:  true,
+				InBuild: nil,
+			},
+			"github.com/unknown/indirect": {
+				Module:  parser.Module{Path: "github.com/unknown/indirect", Version: pseudo},
+				InBuild: nil,
+			},
+		},
+	}
+
+	report := &IntegrityReport{}
+	classes := NewIntegrityScanner().ScanPseudoVersions(graph, report)
+
+	want := map[string]IntegrityRiskLevel{
+		"github.com/outside/direct":   IntegrityInfo,
+		"github.com/outside/indirect": IntegrityInfo,
+		"github.com/built/direct":     IntegrityMedium,
+		"github.com/unknown/direct":   IntegrityMedium,
+		"github.com/unknown/indirect": IntegrityLow,
+	}
+	for path, severity := range want {
+		if got := classes[path]; got != severity {
+			t.Errorf("%s: severity = %q, want %q", path, got, severity)
+		}
+	}
+	for _, f := range report.Findings {
+		if f.Module == "github.com/outside/direct" && !strings.Contains(f.Detail, "outside the build") {
+			t.Errorf("outside-build finding detail = %q, want it to say so", f.Detail)
+		}
+	}
+}

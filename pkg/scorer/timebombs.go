@@ -25,10 +25,15 @@ type TimeBomb struct {
 
 // CollectTimeBombs returns all time-bomb entries for the given project score.
 // It collects:
-//   - Any non-test dependency that is archived.
-//   - Any KEV-listed CVE on a non-test dependency (confirmed exploited in the
-//     wild per CISA), deduped by CVE ID.
-//   - Any CRITICAL CVE on a non-test dependency, deduped by CVE ID.
+//   - Any built, non-test dependency that is archived.
+//   - Any KEV-listed CVE on a built, non-test dependency (confirmed exploited
+//     in the wild per CISA), deduped by CVE ID.
+//   - Any CRITICAL CVE on a built, non-test dependency, deduped by CVE ID.
+//
+// Confirmed test-only (IsTestOnly == &true) and confirmed outside-the-build
+// (InBuild == &false) dependencies are skipped: a time-bomb is something that
+// can detonate in the shipped code, and a module that is never compiled in
+// cannot. Unknown (nil) classifications are kept.
 //
 // A CVE that is both KEV-listed and CRITICAL appears once, as a "kev" entry —
 // confirmed exploitation is the stronger signal.
@@ -39,8 +44,10 @@ func CollectTimeBombs(ps *ProjectScore) []TimeBomb {
 	seenCVE := make(map[string]bool)
 
 	for _, dep := range ps.Dependencies {
-		// Skip confirmed test-only dependencies.
-		if dep.IsTestOnly != nil && *dep.IsTestOnly {
+		// Skip confirmed test-only and confirmed outside-the-build
+		// dependencies; nil (unknown) is kept so an unverified classification
+		// never hides a time-bomb.
+		if isConfirmedTestOnly(dep) || isConfirmedOutsideBuild(dep) {
 			continue
 		}
 

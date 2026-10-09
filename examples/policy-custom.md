@@ -67,11 +67,14 @@ preset:** enabled.
 
 #### `.no_archived` *(bool)*
 Fails any dependency whose repository is marked archived on GitHub.
-**Strict preset:** enabled. **Moderate preset:** enabled.
+Dependencies confirmed to be outside the build (`in_build: false`, in the
+module graph only) are exempt; a dependency whose build membership is
+unknown is not. **Strict preset:** enabled. **Moderate preset:** enabled.
 
 #### `.no_deprecated` *(bool)*
 Fails any dependency whose `go.mod` carries a `// Deprecated:`
-directive.
+directive. Dependencies confirmed to be outside the build (`in_build: false`)
+are exempt; a dependency whose build membership is unknown is not.
 
 #### `.no_typosquatting` *(bool)*
 Fails any dependency the typosquat scanner flags as similar to a
@@ -79,7 +82,9 @@ well-known module. **Strict preset:** enabled.
 
 #### `.no_unmaintained_months` *(int)*
 Fails any dependency whose last release is older than the given number
-of months. **Strict preset:** `24`.
+of months. Dependencies confirmed to be outside the build (`in_build: false`)
+are exempt; a dependency whose build membership is unknown is not.
+**Strict preset:** `24`.
 
 ### Dependency graph rules
 

@@ -133,8 +133,8 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integ
 | Candidate | Description |
 | ------------------- | ----------------------------------------------------------------- |
 | `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
-| `p95_dep_risk` | 95th-percentile of per-dep risk scores (nearest-rank) |
-| `archived_floor` | HIGH floor (51) when any transitive dep is archived; 60 for a direct archived dep |
+| `p95_dep_risk` | 95th-percentile (nearest-rank) of per-dep risk scores over the modules that are built: confirmed test-only and confirmed outside-the-build modules are excluded, and ties are broken by module path so the named module is stable (`tied_with` reports how many others share the score) |
+| `archived_floor` | HIGH floor (51) when any built transitive dep is archived; 60 for a direct archived dep. Modules confirmed test-only or outside the build do not count |
 | `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
 | `integrity_floor` | HIGH floor (51) when any transitive dep has a `replace` directive redirecting to a different module; 60 for a direct dep |
 
@@ -148,6 +148,19 @@ Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integ
 | `cve_floor` | 40 |
 
 Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
+
+**Build membership.** A module can be in your dependency graph without being
+compiled into your binary (it is required by a dependency's `go.mod` but none
+of its packages is imported). `unisupply` classifies each module against the
+main module's own `go list -deps ./...` and `go list -deps -test ./...` for
+linux, darwin and windows on amd64 and arm64, and reports `in_build` (`false`: graph only),
+`test_only` and `platforms` (the GOOS values of a platform-specific module) in
+the JSON output; the text and PDF reports label such modules `outside build` or
+`test-only`. An unknown classification is omitted and never discounts. When the
+vulnerability scan found nothing reachable and the grade is decided by
+dependency health alone, the headline reason says so. See
+[docs/scanners.md](docs/scanners.md#build-membership) for the rules, limits and
+which signals honour build membership.
 
 `MeanDepRiskScore` is still available as the top-level JSON field `mean_dep_risk_score` for trend lines, but is not the headline.
 
@@ -272,6 +285,12 @@ Notable fields:
   same exact-or-prefix matching rule.
 - `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
   `--scan-ci`).
+- `no_unmaintained_months`, `no_archived` and `no_deprecated` skip modules
+  confirmed outside the build (`in_build: false`, in the module graph only). A
+  module whose build membership is unknown is still checked, and so is a
+  test-only module.
+- `forbid_pseudo_versions` — fail on a pseudo-version pin, except for modules
+  confirmed test-only or outside the build.
 - `require_gosum_verified` — fail when `go mod verify` reported a checksum
   mismatch between go.sum and the local module cache. Honest-UNKNOWN outcomes
   (offline, no go.sum, toolchain unavailable) do not fail this rule.

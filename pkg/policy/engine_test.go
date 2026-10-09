@@ -1456,3 +1456,109 @@ func TestEvaluate_NilMaintainerInfo(t *testing.T) {
 		t.Errorf("expected no violations for nil maintainer info, got %d", len(result.Violations))
 	}
 }
+
+// TestEvaluate_ForbidPseudoVersions_InBuild verifies that a confirmed
+// outside-the-build (InBuild == &false) pseudo-version pin is exempted, while a
+// nil (unknown) or &true InBuild is still denied.
+func TestEvaluate_ForbidPseudoVersions_InBuild(t *testing.T) {
+	p := &policy.Policy{ForbidPseudoVersions: true}
+	inBuild, outside := true, false
+
+	tests := []struct {
+		name     string
+		inBuild  *bool
+		wantPass bool
+	}{
+		{"outside the build is exempt", &outside, true},
+		{"in build is denied", &inBuild, false},
+		{"unknown InBuild is denied", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := []*scorer.DependencyScore{{
+				Module:        "github.com/kr/pty",
+				Version:       "v0.0.0-20220101000000-abc123def456",
+				PseudoVersion: true,
+				InBuild:       tt.inBuild,
+			}}
+			result := p.Evaluate(makeEvalInput(deps, 30))
+			if result.Pass != tt.wantPass {
+				t.Errorf("Pass = %v, want %v: %+v", result.Pass, tt.wantPass, result.Violations)
+			}
+		})
+	}
+}
+
+// TestEvaluate_MaintenanceRules_InBuild verifies that no_unmaintained,
+// no_archived and no_deprecated exempt confirmed outside-the-build deps
+// (InBuild == &false) and still fail an in-build (&true) or unknown (nil) dep.
+func TestEvaluate_MaintenanceRules_InBuild(t *testing.T) {
+	unmaintainedMonths := 24
+	rules := []struct {
+		rule   string
+		policy *policy.Policy
+		maint  *scanner.MaintenanceInfo
+	}{
+		{
+			rule:   "no_unmaintained",
+			policy: &policy.Policy{NoUnmaintainedMonths: &unmaintainedMonths},
+			maint:  &scanner.MaintenanceInfo{MonthsSinceRelease: 60},
+		},
+		{
+			rule:   "no_archived",
+			policy: &policy.Policy{NoArchived: true},
+			maint:  &scanner.MaintenanceInfo{Archived: true},
+		},
+		{
+			rule:   "no_deprecated",
+			policy: &policy.Policy{NoDeprecated: true},
+			maint:  &scanner.MaintenanceInfo{Deprecated: true},
+		},
+	}
+	inBuild, outside := true, false
+	states := []struct {
+		name     string
+		inBuild  *bool
+		wantPass bool
+	}{
+		{"outside the build is exempt", &outside, true},
+		{"in build fails", &inBuild, false},
+		{"unknown InBuild fails", nil, false},
+	}
+
+	for _, r := range rules {
+		for _, s := range states {
+			t.Run(r.rule+"/"+s.name, func(t *testing.T) {
+				deps := []*scorer.DependencyScore{{
+					Module:      "github.com/kr/pty",
+					Maintenance: r.maint,
+					InBuild:     s.inBuild,
+				}}
+				result := r.policy.Evaluate(makeEvalInput(deps, 30))
+				if result.Pass != s.wantPass {
+					t.Fatalf("Pass = %v, want %v: %+v", result.Pass, s.wantPass, result.Violations)
+				}
+				if !s.wantPass && (len(result.Violations) != 1 || result.Violations[0].Rule != r.rule) {
+					t.Errorf("violations = %+v, want exactly one %s", result.Violations, r.rule)
+				}
+			})
+		}
+	}
+}
+
+// TestEvaluate_MaintenanceRules_TestOnlyNotExempt pins that the maintenance
+// rules have no test-only exemption: a confirmed test-only dep that is in the
+// build still fails them.
+func TestEvaluate_MaintenanceRules_TestOnlyNotExempt(t *testing.T) {
+	p := &policy.Policy{NoArchived: true}
+	testOnly, inBuild := true, true
+	deps := []*scorer.DependencyScore{{
+		Module:      "github.com/stretchr/objx",
+		Maintenance: &scanner.MaintenanceInfo{Archived: true},
+		IsTestOnly:  &testOnly,
+		InBuild:     &inBuild,
+	}}
+	if result := p.Evaluate(makeEvalInput(deps, 30)); result.Pass {
+		t.Errorf("Pass = true, want a no_archived violation for a test-only dep")
+	}
+}

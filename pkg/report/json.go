@@ -57,7 +57,12 @@ type JSONReport struct {
 
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
-	Warnings          []string             `json:"warnings,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Notes lists informational messages that do not make the results
+	// incomplete, such as go list package errors that leave module
+	// classification unaffected. It is absent when there are none.
+	Notes             []string             `json:"notes,omitempty"`
 	Summary           JSONSummary          `json:"summary"`
 	Deps              []JSONDependency     `json:"dependencies"`
 	CI                *JSONCIReport        `json:"ci_cd_assessment,omitempty"`
@@ -121,10 +126,21 @@ type JSONDependency struct {
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
-	// failed or was not run). When present it reflects the authoritative
-	// go list -m -json -test result: true = confirmed test-only,
-	// false = confirmed production. Never infer "false" from absence.
-	TestOnly       *bool               `json:"test_only,omitempty"`
+	// failed or was not run). When present it reflects the main module's own
+	// go list -deps ./... and go list -deps -test ./... results: true =
+	// confirmed test-only, false = confirmed production. Never infer "false"
+	// from absence.
+	TestOnly *bool `json:"test_only,omitempty"`
+	// InBuild is omitted when nil (classification unavailable or not safe to
+	// give). false = confirmed in the module graph only: no package of the
+	// module is imported by the main module's code or tests. Never infer
+	// "true" from absence.
+	InBuild *bool `json:"in_build,omitempty"`
+	// Platforms lists the GOOS values on which a production module is built,
+	// and is present only when that is a strict subset of the platforms
+	// listed (for example a Windows-only import). Absent means all platforms
+	// or unknown.
+	Platforms      []string            `json:"platforms,omitempty"`
 	RiskScore      int                 `json:"risk_score"`
 	RiskLevel      string              `json:"risk_level"`
 	ScoreBreakdown *JSONScoreBreakdown `json:"score_breakdown"`
@@ -336,6 +352,9 @@ type JSONCandidate struct {
 	Score      float64 `json:"score"`
 	DrivingDep string  `json:"driving_dep,omitempty"`
 	Reason     string  `json:"reason,omitempty"`
+	// TiedWith is the number of other modules sharing the p95_dep_risk
+	// candidate's score; omitted when zero. See scorer.HeadlineCandidate.
+	TiedWith int `json:"tied_with,omitempty"`
 }
 
 // JSONTimeBomb represents a dependency with an immediate, undeniable risk
@@ -402,6 +421,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		DebugScoring:              ps.DebugScoring,
 		Diagnostics:               jsonDiagnostics(ps.Diagnostics),
 		Warnings:                  ps.Warnings,
+		Notes:                     ps.Notes,
 		TimeBombs:                 collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
 			CriticalRiskCount: ps.CriticalRiskCount,
@@ -420,6 +440,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
 			TestOnly:       ds.IsTestOnly,
+			InBuild:        ds.InBuild,
+			Platforms:      ds.Platforms,
 			RiskScore:      ds.RiskScore,
 			RiskLevel:      string(ds.RiskLevel),
 			ScoreBreakdown: buildScoreBreakdown(ds),
@@ -713,6 +735,7 @@ func jsonHeadline(ps *scorer.ProjectScore) JSONHeadline {
 			Score:      hc.Score,
 			DrivingDep: hc.DrivingDep,
 			Reason:     hc.Reason,
+			TiedWith:   hc.TiedWith,
 		}}
 	}
 	return h

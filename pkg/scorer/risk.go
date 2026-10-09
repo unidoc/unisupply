@@ -48,6 +48,13 @@ type HeadlineCandidate struct {
 	Score      float64 `json:"score"`       // raw candidate value (0–100)
 	DrivingDep string  `json:"driving_dep"` // module path of the dep that set the score, e.g. "github.com/gorilla/i18n"
 	Reason     string  `json:"reason"`      // human-readable explanation, e.g. "archived 129 months"
+
+	// TiedWith is set only on p95_dep_risk: the number of OTHER modules in the
+	// p95 population (built, non-test-only dependencies) whose RiskScore equals
+	// the p95 module's. When it is above zero DrivingDep is one of TiedWith+1
+	// equally scored modules, picked by module path so the choice is stable
+	// across runs; consumers must not read it as "the" cause.
+	TiedWith int `json:"tied_with,omitempty"`
 }
 
 // DependencyScore holds the risk assessment for a single dependency.
@@ -85,6 +92,19 @@ type DependencyScore struct {
 	// Task 10's discount logic MUST only apply the discount when this is &true
 	// (confirmed test-only). A nil value (unknown) must not trigger any discount.
 	IsTestOnly *bool `json:"is_test_only,omitempty"`
+
+	// InBuild carries the three-state "compiled into the main module's
+	// production code or tests" classification from the resolver. See
+	// resolver.Dependency.InBuild for the full semantics. Consumers may only
+	// treat the module as outside the build when this is &false (confirmed
+	// graph-only module); a nil value (unknown) must not trigger any skip or
+	// discount.
+	InBuild *bool `json:"in_build,omitempty"`
+
+	// Platforms lists the GOOS values on which a production module is built,
+	// copied from resolver.Dependency.Platforms. Empty means "all listed
+	// platforms" or unknown, not "none".
+	Platforms []string `json:"platforms,omitempty"`
 
 	// Component scores (for verbose output).
 	VulnScore        float64 `json:"-"`
@@ -205,6 +225,13 @@ type ProjectScore struct {
 	// token) so downstream tooling can decide how to act on the scores.
 	// This field lives on the top-level ProjectScore only — NOT per-dep.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Notes carries informational messages that do not make the results
+	// incomplete, for example per-package go list errors that leave module
+	// classification unaffected. Unlike Warnings, a note names no unavailable
+	// signal, so reports render it apart from the scan limitations.
+	// This field lives on the top-level ProjectScore only — NOT per-dep.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // Diagnostics carries tail aggregates retained for debugging.
@@ -213,9 +240,14 @@ type ProjectScore struct {
 // dropped them because empirically they over-promoted healthy projects with
 // long stale-but-inert tails. They remain useful for spot-checking outliers.
 type Diagnostics struct {
-	// MaxDepRiskScore is the maximum per-dep RiskScore across all dependencies.
+	// MaxDepRiskScore is the maximum per-dep RiskScore across ALL dependencies
+	// in the module graph, including test-only and outside-the-build ones: a
+	// spot-check of the worst outlier, not a measure of what is built.
 	MaxDepRiskScore int `json:"max_dep_risk_score"`
-	// P95DepRiskScore is the 95th-percentile per-dep RiskScore.
+	// P95DepRiskScore is the 95th-percentile per-dep RiskScore over the SAME
+	// population as the p95_dep_risk headline candidate (built, non-test-only
+	// dependencies), so the two never disagree. Unlike MaxDepRiskScore and
+	// MeanDepRiskScore it is not over the full graph.
 	P95DepRiskScore int `json:"p95_dep_risk_score"`
 }
 
@@ -361,6 +393,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// top-level warnings so consumers understand the scoring gap. A degraded
 	// scan that reports no gap is indistinguishable from a complete one.
 	maintainerUnavailable := 0
+	maintainerErrored := 0 // subset of maintainerUnavailable that failed with an API error
 	maintenanceUnavailable := 0
 	resilienceUnavailable := 0
 
@@ -416,6 +449,9 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		// attempted but failed (rate-limited, unauthenticated, network error).
 		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable {
 			maintainerUnavailable++
+			if m.UnavailableReason == scanner.UnavailableAPIError {
+				maintainerErrored++
+			}
 		}
 
 		// A missing maintenance entry means the lookup failed — the scanner
@@ -437,7 +473,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// Name the actual cause. Offline is not a rate-limit problem, and telling an
 	// air-gapped user their token is missing sends them after a fix that cannot
 	// work.
-	cause := "GitHub API unauthenticated"
+	cause := maintainerUnavailableCause(maintainerUnavailable, maintainerErrored)
 	// prefix applies to the proxy-sourced axes below. Only the maintainer axis
 	// reads the GitHub API, so `cause` must not be reused for the others —
 	// naming the wrong service sends the user after a fix that cannot work, the
@@ -508,14 +544,33 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		)
 	}
 
+	p95Candidate := p95DepRiskCandidate(ps.Dependencies)
+	cveFloorCandidate := cveFloor(ps.Dependencies)
+	integrityCandidate := integrityFloor(ps.Dependencies, input.GoSumMismatch)
 	candidates := []HeadlineCandidate{
 		sevCandidate,
-		p95DepRiskCandidate(ps.Dependencies),
+		p95Candidate,
 		archivedFloor(ps.Dependencies),
-		cveFloor(ps.Dependencies),
-		integrityFloor(ps.Dependencies, input.GoSumMismatch),
+		cveFloorCandidate,
+		integrityCandidate,
 	}
 	winner := selectHeadline(candidates)
+
+	// When dependency health alone decided the grade, say so. The scan ran
+	// (VulnScanUnavailable is the separate UNKNOWN path below) and every
+	// CVE-derived or integrity candidate is 0, so p95_dep_risk is the sole
+	// decider and a reader would otherwise take the driving module for a
+	// vulnerability finding. Explanation only: score and level are unchanged.
+	if winner.Name == "p95_dep_risk" && !input.VulnScanUnavailable && len(ps.Dependencies) > 0 &&
+		sevCandidate.Score == 0 && cveFloorCandidate.Score == 0 && integrityCandidate.Score == 0 {
+		scope := "of built modules"
+		if !buildClassified(ps.Dependencies) {
+			// With no InBuild verdict on any dependency the p95 population is
+			// the whole graph, so "built" would overstate what was measured.
+			scope = "of all modules in the dependency graph (build classification unavailable)"
+		}
+		winner.Reason = "no reachable vulnerabilities; grade reflects dependency health (maintenance, maturity) " + scope + " — " + winner.Reason
+	}
 	ps.HeadlineCandidate = &winner
 	ps.OverallScore = int(math.Round(winner.Score))
 	ps.HeadlineDriver = winner.Name
@@ -599,6 +654,8 @@ func scoreDependency(
 		Version:        dep.Module.Version,
 		Direct:         dep.Direct,
 		IsTestOnly:     dep.IsTestOnly,
+		InBuild:        dep.InBuild,
+		Platforms:      dep.Platforms,
 		DependencyPath: dep.UsedBy,
 		Vulns:          vulns,
 		Maintenance:    maint,
@@ -1295,7 +1352,10 @@ type severityAdjustedResult struct {
 //     downgrade the tier by one notch (CRITICAL→HIGH, HIGH→MEDIUM,
 //     MEDIUM→LOW, LOW→dropped). IsTestOnly == nil means classification was
 //     unavailable — the discount MUST NOT apply (better to under-discount than
-//     to silently absolve a real risk).
+//     to silently absolve a real risk). InBuild is deliberately NOT consulted:
+//     reachabilityDowngrade already lowers CVEs in modules that
+//     are not linked in (required/imported tiers), so an InBuild discount on
+//     top would count the same fact twice.
 //  3. Count post-downgrade tiers across the whole graph.
 //  4. Run the step function:
 //     - any CRITICAL          → 95
@@ -1698,6 +1758,12 @@ func tierRank(t string) int {
 
 // computeDiagnostics returns tail aggregates that the headline intentionally
 // drops. NON-NORMATIVE — retained for debugging only.
+//
+// MaxDepRiskScore (and ProjectScore.MeanDepRiskScore) stay over the full
+// graph, test-only and outside-the-build modules included: they are
+// non-normative portfolio signals. P95DepRiskScore mirrors the p95_dep_risk
+// headline candidate, so it covers only built, non-test-only modules and
+// always agrees with the headline.
 func computeDiagnostics(deps []*DependencyScore) *Diagnostics {
 	if len(deps) == 0 {
 		return nil
@@ -1718,36 +1784,94 @@ func computeDiagnostics(deps []*DependencyScore) *Diagnostics {
 	}
 }
 
+// buildClassified reports whether the resolver produced a build verdict for at
+// least one dependency (InBuild non-nil). When none did, classification was
+// unavailable and no filtering by build membership took place.
+func buildClassified(deps []*DependencyScore) bool {
+	for _, ds := range deps {
+		if ds.InBuild != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// isConfirmedTestOnly reports whether ds is confirmed test-only. A nil
+// IsTestOnly (unknown) is not confirmed: under-discounting is safer than a
+// silent wrong discount on an unverified classification.
+func isConfirmedTestOnly(ds *DependencyScore) bool {
+	return ds.IsTestOnly != nil && *ds.IsTestOnly
+}
+
+// isConfirmedOutsideBuild reports whether ds is confirmed to be in the module
+// graph only (InBuild == &false). A nil InBuild (unknown) is not confirmed, for
+// the same reason as isConfirmedTestOnly.
+func isConfirmedOutsideBuild(ds *DependencyScore) bool {
+	return ds.InBuild != nil && !*ds.InBuild
+}
+
 // p95DepRiskCandidate computes the nearest-rank 95th-percentile per-dep RiskScore
 // and wraps it as a HeadlineCandidate. The sort operates on a copy of deps so
 // the caller's slice order is preserved (order is load-bearing for
 // severityAdjustedVulnScore's first-wins tie-break).
+//
+// The population is the modules that can affect a shipped binary: confirmed
+// test-only (IsTestOnly == &true) and confirmed outside-the-build
+// (InBuild == &false) modules are dropped, the same "code that never links in
+// must not drive the headline" rule the CVE and archived floors apply. nil
+// classifications keep the module in (unknown means "assume built"). When the
+// filter leaves nothing the result is a zero candidate, as for an empty graph.
+//
+// Scores tie often (isms has a 4-way tie at the p95 index), so the order is
+// total: RiskScore ascending, then module path ascending. The same inputs
+// always name the same module regardless of input order, and TiedWith reports
+// how many other modules share the score.
 func p95DepRiskCandidate(deps []*DependencyScore) HeadlineCandidate {
-	if len(deps) == 0 {
+	built := make([]*DependencyScore, 0, len(deps))
+	for _, ds := range deps {
+		if isConfirmedTestOnly(ds) || isConfirmedOutsideBuild(ds) {
+			continue
+		}
+		built = append(built, ds)
+	}
+	if len(built) == 0 {
 		return HeadlineCandidate{Name: "p95_dep_risk"}
 	}
 
-	sorted := make([]*DependencyScore, len(deps))
-	copy(sorted, deps)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].RiskScore < sorted[j].RiskScore
+	sort.SliceStable(built, func(i, j int) bool {
+		if built[i].RiskScore != built[j].RiskScore {
+			return built[i].RiskScore < built[j].RiskScore
+		}
+		return built[i].Module < built[j].Module
 	})
 
 	// Nearest-rank formula: idx = ceil(0.95 * N) - 1, clamped to [0, N-1].
-	idx := int(math.Ceil(0.95*float64(len(sorted)))) - 1
+	idx := int(math.Ceil(0.95*float64(len(built)))) - 1
 	if idx < 0 {
 		idx = 0
 	}
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
+	if idx >= len(built) {
+		idx = len(built) - 1
 	}
 
-	d := sorted[idx]
+	d := built[idx]
+	tiedWith := 0
+	for i, other := range built {
+		if i != idx && other.RiskScore == d.RiskScore {
+			tiedWith++
+		}
+	}
+
+	reason := "p95 of dep risk scores"
+	if tiedWith > 0 {
+		reason = fmt.Sprintf("p95 of dep risk scores (one of %d modules at %d)", tiedWith+1, d.RiskScore)
+	}
 	return HeadlineCandidate{
 		Name:       "p95_dep_risk",
 		Score:      float64(d.RiskScore),
 		DrivingDep: d.Module,
-		Reason:     "p95 of dep risk scores",
+		Reason:     reason,
+		TiedWith:   tiedWith,
 	}
 }
 
@@ -1756,15 +1880,19 @@ func p95DepRiskCandidate(deps []*DependencyScore) HeadlineCandidate {
 //
 // archived → upstream will never patch a future CVE → unbounded latent risk →
 // HIGH floor (51); direct dependency escalates to 60.
-// "on the import path" approximated as non-test-only in-graph (true call-graph
-// reachability is per-CVE only).
+// "on the import path" approximated as built and non-test-only (true call-graph
+// reachability is per-CVE only): confirmed test-only (IsTestOnly == &true) and
+// confirmed outside-the-build (InBuild == &false) modules are skipped, because
+// an archived module that is never compiled into the main module cannot be an
+// unpatchable risk to it. nil classifications never skip: an unverified
+// classification must not absolve an archived module.
 // HIGH band starts at 51 (levelFromScore), so all HIGH floors use 51, not 50.
 func archivedFloor(deps []*DependencyScore) HeadlineCandidate {
 	best := HeadlineCandidate{Name: "archived_floor"}
 	var bestDs *DependencyScore
 
 	for _, ds := range deps {
-		if ds.IsTestOnly != nil && *ds.IsTestOnly {
+		if isConfirmedTestOnly(ds) || isConfirmedOutsideBuild(ds) {
 			continue
 		}
 		if ds.Maintenance == nil || !ds.Maintenance.Archived {
@@ -1829,6 +1957,10 @@ func cveFloor(deps []*DependencyScore) HeadlineCandidate {
 	best := HeadlineCandidate{Name: "cve_floor"}
 
 	for _, ds := range deps {
+		// Confirmed test-only modules are skipped. InBuild is deliberately NOT
+		// consulted: the reachability tier already encodes "not linked in"
+		// (required < imported < called) and every tier is scored above, so an
+		// InBuild skip on top would discount the same fact twice.
 		if ds.IsTestOnly != nil && *ds.IsTestOnly {
 			continue
 		}
@@ -1892,6 +2024,10 @@ func integrityFloor(deps []*DependencyScore, gosumMismatch bool) HeadlineCandida
 	best := HeadlineCandidate{Name: "integrity_floor"}
 
 	for _, ds := range deps {
+		// Confirmed test-only modules are skipped. InBuild is deliberately NOT
+		// consulted: a replace redirect is a go.mod-level signal that applies
+		// to the module graph whether or not any package of the module is
+		// compiled in, so a graph-only module still counts.
 		if ds.IsTestOnly != nil && *ds.IsTestOnly {
 			continue
 		}
@@ -1941,5 +2077,22 @@ func buildDebugScoring(ps *ProjectScore, sev *severityAdjustedResult) *DebugScor
 		StepFunctionInputs:        sev.stepInputs,
 		EnrichedCVEs:              sev.enrichedCVEs,
 		PerDepInputs:              sev.perDepInputs,
+	}
+}
+
+// maintainerUnavailableCause names why maintainer data is missing, from the
+// per-module MaintainerInfo.UnavailableReason. errored of unavailable modules
+// failed with an API error (scanner.UnavailableAPIError); the rest were
+// rate-limited or carry no reason, which is the unauthenticated case this
+// warning has always described. Naming an API error as "unauthenticated" sends
+// a user who did set a token after a fix that cannot work.
+func maintainerUnavailableCause(unavailable, errored int) string {
+	switch {
+	case errored == 0:
+		return "GitHub API unauthenticated"
+	case errored == unavailable:
+		return "GitHub API error"
+	default:
+		return "GitHub API rate-limited or errored"
 	}
 }

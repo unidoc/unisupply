@@ -302,6 +302,21 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 			len(unscoredVulns),
 		), false)
 	}
+
+	// Scan notes are informational and say nothing is missing, so they are
+	// kept apart from the data-quality notes above.
+	if len(ps.Notes) > 0 {
+		subheading(c, "Scan Notes", bold)
+		scanNotes := c.NewStyledParagraph()
+		scanNotes.SetMargins(0, 0, 5, 0)
+		scanNotes.SetLineHeight(1.6)
+		for _, n := range ps.Notes {
+			chunk := scanNotes.Append("  • " + n + "\n")
+			chunk.Style.Font = regular
+			chunk.Style.FontSize = 10
+		}
+		_ = c.Draw(scanNotes)
+	}
 }
 
 // writeDataQualityList draws one data-quality paragraph: an intro sentence
@@ -832,6 +847,10 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	// a wrong label.
 	if ds.IsTestOnly != nil && *ds.IsTestOnly {
 		classLabel += ", test-only"
+	}
+	// Same rule for [outside build]: only when InBuild is confirmed false.
+	if ds.InBuild != nil && !*ds.InBuild {
+		classLabel += ", outside build"
 	}
 
 	// Module header.

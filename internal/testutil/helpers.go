@@ -24,6 +24,10 @@ type DepSpec struct {
 	// nil = unknown (go list unavailable), &true = confirmed test-only,
 	// &false = confirmed production. See resolver.Dependency.IsTestOnly.
 	IsTestOnly *bool
+	// InBuild carries the three-state "in the main module's build"
+	// classification. nil = unknown, &false = graph-only. See
+	// resolver.Dependency.InBuild.
+	InBuild *bool
 }
 
 // BoolPtr returns a pointer to v. Use it when constructing DepSpec.IsTestOnly
@@ -49,6 +53,7 @@ func MakeGraph(deps ...DepSpec) *resolver.Graph {
 			UsedBy:         spec.UsedBy,
 			TransitiveDeps: spec.TransitiveDeps,
 			IsTestOnly:     spec.IsTestOnly,
+			InBuild:        spec.InBuild,
 		}
 	}
 	return g

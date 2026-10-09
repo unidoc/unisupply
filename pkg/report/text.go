@@ -265,6 +265,15 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			fmt.Fprintf(w, "  ! %s\n", warning)
 		}
 	}
+	// Notes are informational: they say nothing is missing, so they get their
+	// own heading rather than sitting under SCAN LIMITATIONS.
+	if len(ps.Notes) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN NOTES — informational, results unaffected\n")
+		for _, note := range ps.Notes {
+			fmt.Fprintf(w, "  - %s\n", note)
+		}
+	}
 
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Report generated: %s\n", time.Now().UTC().Format(time.RFC3339))
@@ -285,6 +294,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	// a wrong label.
 	if ds.IsTestOnly != nil && *ds.IsTestOnly {
 		label += ", test-only"
+	}
+	// Same rule for [outside build]: only when InBuild is confirmed false (a
+	// module in the graph that no package of the main module imports); nil
+	// shows nothing.
+	if ds.InBuild != nil && !*ds.InBuild {
+		label += ", outside build"
 	}
 
 	fmt.Fprintf(w, "● %s %s  %s  (%s)\n",
@@ -897,7 +912,7 @@ func reachabilityTag(r string) string {
 // would fix. Shared by the text and PDF reports; the weekly issue renderer
 // (.github/scripts/render-scan-report.sh) keeps its own copy, which also
 // relates it to the workflow's stale-dependency check.
-const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only, that is " +
+const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only or outside the build, that is " +
 	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
 	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
 	"modules with no recent release are counted under Unmaintained."

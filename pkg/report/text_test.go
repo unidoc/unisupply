@@ -761,7 +761,7 @@ func TestWriteText_TimeBombScopeNote(t *testing.T) {
 	out := opts.Writer.(*bytes.Buffer).String()
 
 	for _, want := range []string{
-		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only,",
+		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only",
 		"github.com/google/go-cmdtest — archived 53 months",
 	} {
 		if !strings.Contains(out, want) {
@@ -814,6 +814,107 @@ func TestWrapWords(t *testing.T) {
 	}
 	if got := wrapWords("", 10); len(got) != 0 {
 		t.Errorf("wrapWords(\"\") = %q, want no lines", got)
+	}
+}
+
+// TestWriteDependencyDetail_OutsideBuildLabel verifies that the "outside
+// build" label is shown only for a confirmed InBuild == &false, never for nil
+// or &true.
+func TestWriteDependencyDetail_OutsideBuildLabel(t *testing.T) {
+	trueVal, falseVal := true, false
+	noColor := func(_, s string) string { return s }
+
+	tests := []struct {
+		name    string
+		inBuild *bool
+		want    bool
+	}{
+		{"confirmed outside the build", &falseVal, true},
+		{"in build", &trueVal, false},
+		{"unknown", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := &scorer.DependencyScore{
+				Module: "github.com/charmbracelet/harmonica", Version: "v0.2.0",
+				RiskScore: 32, RiskLevel: scorer.RiskMedium, InBuild: tt.inBuild,
+			}
+			var buf bytes.Buffer
+			writeDependencyDetail(&buf, ds, noColor, false)
+			if got := strings.Contains(buf.String(), "outside build"); got != tt.want {
+				t.Errorf("label present = %v, want %v:\n%s", got, tt.want, buf.String())
+			}
+		})
+	}
+}
+
+// scanNotesScore returns a one-dependency score for the scan limitations and
+// scan notes tests.
+func scanNotesScore(warnings, notes []string) *scorer.ProjectScore {
+	return &scorer.ProjectScore{
+		OverallScore: 20,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 20, RiskLevel: scorer.RiskLow},
+		},
+		Warnings: warnings,
+		Notes:    notes,
+	}
+}
+
+func renderScanNotes(t *testing.T, warnings, notes []string) string {
+	t.Helper()
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	ps := scanNotesScore(warnings, notes)
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	return opts.Writer.(*bytes.Buffer).String()
+}
+
+// TestWriteText_ScanNotes verifies that informational notes render under their
+// own heading, after the scan limitations, and are not listed as limitations.
+func TestWriteText_ScanNotes(t *testing.T) {
+	out := renderScanNotes(t,
+		[]string{"vulnerability scan did not run"},
+		[]string{"go list reported package errors that do not affect module classification: x"})
+
+	limits := strings.Index(out, "SCAN LIMITATIONS")
+	notes := strings.Index(out, "SCAN NOTES — informational, results unaffected")
+	if limits < 0 || notes < 0 || notes < limits {
+		t.Fatalf("want SCAN LIMITATIONS then SCAN NOTES, got indexes %d and %d:\n%s", limits, notes, out)
+	}
+	if !strings.Contains(out[notes:], "  - go list reported package errors") {
+		t.Errorf("note not rendered under SCAN NOTES with a '  - ' prefix:\n%s", out[notes:])
+	}
+	if strings.Contains(out[limits:notes], "do not affect module classification") {
+		t.Errorf("note rendered under SCAN LIMITATIONS:\n%s", out[limits:notes])
+	}
+	if !strings.Contains(out[limits:notes], "  ! vulnerability scan did not run") {
+		t.Errorf("warning missing from SCAN LIMITATIONS:\n%s", out[limits:notes])
+	}
+}
+
+// TestWriteText_OnlyNotesHasNoLimitations verifies the SCAN LIMITATIONS block
+// appears only when there are warnings.
+func TestWriteText_OnlyNotesHasNoLimitations(t *testing.T) {
+	out := renderScanNotes(t, nil, []string{"a note"})
+	if strings.Contains(out, "SCAN LIMITATIONS") {
+		t.Errorf("SCAN LIMITATIONS rendered with only notes:\n%s", out)
+	}
+	if !strings.Contains(out, "SCAN NOTES") {
+		t.Errorf("SCAN NOTES missing:\n%s", out)
+	}
+
+	out = renderScanNotes(t, []string{"a warning"}, nil)
+	if strings.Contains(out, "SCAN NOTES") {
+		t.Errorf("SCAN NOTES rendered with no notes:\n%s", out)
+	}
+	if !strings.Contains(out, "SCAN LIMITATIONS") {
+		t.Errorf("SCAN LIMITATIONS missing:\n%s", out)
 	}
 }
 

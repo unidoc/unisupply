@@ -58,6 +58,14 @@ Maturity never are, so the denominator floors at 0.25. Scoring an unmeasured
 axis as 0 would report a clean bill of health nobody earned; scoring it with an
 "unknown" constant reports a fabricated measurement as a finding.
 
+**p95 and the archived floor count only modules in the build.** A module
+confirmed outside the build (`in_build: false`, in the module graph only) or
+confirmed test-only never sets `p95_dep_risk` or `archived_floor`; a nil
+classification (unavailable, a direct requirement no `go list` found, or a
+module reachable from one in the module graph) is assumed built and still
+counts. Ties at the p95 index resolve by module path
+and are reported as `tied_with`.
+
 **A headline band requires enough measurement to earn one.** If the
 vulnerability scan did not run, three of the five headline candidates are
 CVE-derived and score 0, leaving the headline to rest on graph position and

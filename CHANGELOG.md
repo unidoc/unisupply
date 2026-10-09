@@ -51,6 +51,80 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Improvements
 
+#### Scores can change in this release
+
+- **Scores and policy results can change for existing projects, in both
+  directions.** Scores can drop for repositories whose p95 or archived floor was
+  set by a module that is only in the module graph and never built. Test-only
+  classification now works for the first time, so every test-only discount (CVE
+  tier, archived and CVE floors, time bombs, pseudo-version checks and the
+  `forbid_pseudo_versions` exemption) applies to real scans; scores and policy
+  results can change for repositories with test-only dependencies. Example from
+  a real scan: `spf13/cobra` at `adbc881` went from 34 (driven by
+  `gopkg.in/check.v1`, which is never built) to 26 (#135).
+
+#### Build membership: `in_build` and `platforms`
+
+- **JSON dependencies now carry `in_build` and `platforms`.** `in_build: false`
+  marks a module that is in the module graph only: no package of it is imported
+  by your code or your tests. `platforms` lists the operating systems
+  (`linux`, `darwin`, `windows`) of a module built on only some of them, such as
+  `github.com/inconshreveable/mousetrap` in `spf13/cobra`, which is imported
+  only on Windows. Both are omitted when unknown, and an unknown value never
+  discounts anything. The text and PDF reports label confirmed graph-only
+  modules `outside build`, next to `test-only`.
+- **Classification uses the main module's own package lists** (`go list -e
+  -deps ./...` and `-deps -test ./...`, for each of linux, darwin and windows
+  on amd64 and arm64, with `CGO_ENABLED` 0 and 1) instead of `go list all`.
+  Every target is listed whatever the host, so the result does not depend on
+  the machine the scan runs on. A package behind a custom build tag is not
+  seen, so a module that `go.mod` requires directly but that no list contains
+  is left unclassified rather than called graph-only, and so is every module
+  reachable from it in the module graph (gin's `sonic` dependencies under
+  `-tags=sonic`, for example). If one platform fails to list, the others still
+  classify, and the warning names the one that failed. A module needed only by
+  a go 1.24 `tool` directive is classified as outside the build. Under `--offline` these lists run with `-mod=readonly`,
+  so the scanned project's `go.mod` and `go.sum` are never rewritten; when they
+  need updating, classification is unavailable and the warning names that cause.
+  See [docs/scanners.md](docs/scanners.md#build-membership).
+
+#### The headline counts only modules in the build
+
+- **`p95_dep_risk` and `archived_floor` ignore modules that are confirmed
+  test-only or outside the build.** A module with an unknown classification is
+  still counted. Previously an unmaintained module that was only in the graph
+  could set the headline, or a HIGH archived floor, for code that is never
+  compiled in.
+- **The p95 driver is now deterministic and says when it is one of several.**
+  Modules at the same score are ordered by module path, so repeated scans name
+  the same module. When others share the score, the headline candidate carries
+  `tied_with` (the number of other modules at that score) and its reason reads
+  "one of N modules at S".
+- **The headline says when dependency health alone decided it.** When the
+  vulnerability scan ran and no vulnerability or integrity candidate scored,
+  the reason now reads "no reachable vulnerabilities; grade reflects dependency
+  health (maintenance, maturity) of built modules" before the driving module,
+  so it is not mistaken for a vulnerability finding. Score and level are
+  unchanged.
+
+#### Modules outside the build are exempt from time bombs, pseudo-version checks and policy
+
+- **Time bombs skip modules that are outside the build.** An archived or
+  CRITICAL-CVE module that no package imports cannot detonate in the shipped
+  code, so it is no longer listed.
+- **A pseudo-version pin on a module outside the build is INFO with no score
+  penalty**, as for a test-only module, and the `forbid_pseudo_versions` policy
+  rule no longer fails on it.
+- **The `no_unmaintained_months`, `no_archived` and `no_deprecated` policy rules
+  skip modules that are outside the build.** `--policy-preset strict` no longer
+  fails on an archived or unmaintained module that is only in the module graph,
+  which the scorer already did not count. A module with an unknown classification
+  is still checked, and so is a test-only module.
+- **Some checks deliberately still apply to such modules:** CVE severity and
+  `cve_floor` (reachability already discounts a vulnerability in a module that
+  is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
+  `replace` directive is a `go.mod`-level signal).
+
 #### Severity resolved from OSV alias records
 
 - **Advisories whose severity was left `UNKNOWN` by NVD or GitHub rate
@@ -74,8 +148,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **The text report, PDF report and weekly security issue now say what a
   time bomb is:** any dependency, direct or transitive and not confirmed as
-  test-only, that is archived upstream or has a CISA KEV-listed or CRITICAL
-  CVE. An archived
+  test-only or outside the build, that is archived upstream or has a CISA
+  KEV-listed or CRITICAL CVE. An archived
   module cannot be fixed by updating — it has to be replaced or removed — and
   age alone does not make a time bomb (modules with no recent release are
   counted under Unmaintained).
@@ -133,6 +207,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **The CI/CD write-all permissions finding names unnamed jobs by their job
   ID.** A job without a `name:` key was reported as "Job '' has write-all
   permissions".
+- **Test-only classification could never report a test-only module (#135).**
+  It compared `go list all` with `go list -test all`, which list the same
+  modules, so no module was ever marked test-only and every test-only discount
+  was inactive. For a `go.mod` below go 1.16 it also counted modules used only
+  by the tests of your dependencies as production: `gopkg.in/check.v1` drove the
+  headline of `spf13/cobra` this way. Modules are now classified from
+  `go list -deps ./...` and `-deps -test ./...`.
+- **Classification failed outright for repositories that `//go:embed` a
+  directory that is not in the checkout.** A build output such as `web/dist` is
+  usually gitignored, so a fresh clone made `go list` exit with `pattern
+  web/dist: no matching files found` and every dependency went unclassified. The
+  listing now tolerates per-package errors that do not hide a module, and a scan
+  note names the failing package. Notes are shown apart from the scan
+  limitations (text report heading "SCAN NOTES", JSON `notes`) because they do
+  not make the results incomplete. Errors that do hide a module (an import no
+  module provides, a missing `go.sum` entry) still make that platform
+  unavailable instead of producing a wrong answer.
+- **Platform-specific dependencies were unclassified (#135).** A module imported
+  only on another operating system, such as `mousetrap` on Windows, was in
+  neither list on a macOS or Linux host. It is now classified as production and
+  its `platforms` are reported.
+- **The module named as the p95 headline driver was arbitrary when several
+  modules had the same score.** It now follows module-path order, and
+  `tied_with` reports the tie.
+- **Maintainer data was lost for renamed GitHub repositories.** GitHub answers a
+  renamed or transferred repository with a redirect, which the scanner treated
+  as an error. It now follows one redirect on `api.github.com` and reports the
+  repository under its canonical name.
+- **The "maintainer data unavailable" warning blamed a missing token when the
+  GitHub API had returned errors.** The warning now says "GitHub API error" (or
+  "rate-limited or errored" when both happened), so a user who did set a token
+  is not sent after a fix that cannot work.
 
 ## [0.6.0] - 2026-09-29
 
