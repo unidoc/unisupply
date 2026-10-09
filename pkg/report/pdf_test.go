@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -318,11 +319,23 @@ func TestWriteDependencyBlock_CallTraceSmoke(t *testing.T) {
 	writeDependencyBlock(c, ds, regular, bold, true)
 }
 
+// requirePDFLicense skips a test that writes a PDF when no UniPDF license key
+// is set: unipdf v5 refuses to write without one ("unipdf license code
+// required"), and CI runs without the key. Tests that only draw onto the
+// creator do not need it.
+func requirePDFLicense(t *testing.T) {
+	t.Helper()
+	if os.Getenv("UNIDOC_LICENSE_API_KEY") == "" {
+		t.Skip("UNIDOC_LICENSE_API_KEY is not set: unipdf cannot write a PDF without a license")
+	}
+}
+
 // TestWriteDependencyBlock_ReachedViaExtraction renders a dependency block to a
 // PDF, reads it back and checks the extracted page text carries the call path
 // with the ASCII separator. Extracted text is whitespace-normalized because the
 // extractor may break the line at a wrap point.
 func TestWriteDependencyBlock_ReachedViaExtraction(t *testing.T) {
+	requirePDFLicense(t)
 	// initLicense returns "license key already set" on every call after the
 	// first in the test binary; that is not a failure, so the error is ignored
 	// like the other PDF tests do.
@@ -410,6 +423,7 @@ func stdlibTestVulns() []scanner.Vulnerability {
 // reads it back and checks the heading, advisory IDs, summaries and the call
 // path are in the extracted text.
 func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
+	requirePDFLicense(t)
 	_ = initLicense()
 
 	c := creator.New()
