@@ -263,6 +263,29 @@ See the upstream documentation for further precision-limit details:
 [Go Vulnerability Management](https://go.dev/security/vuln/) ·
 [govulncheck reference](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
 
+### Standard-library vulnerabilities in reports
+
+Vulnerabilities in the Go standard library of the project's toolchain (see
+`Files are module-relative` above for how the toolchain is chosen) belong to no
+dependency, so each report lists them separately, in the same order (sorted by
+advisory ID) and with the same evidence as a dependency vulnerability:
+
+- **Text report:** the `STDLIB VULNERABILITIES` section, with `Fixed in:`,
+  `Reached via:` and, when more than one symbol is called,
+  `Vulnerable symbols called:` lines.
+- **JSON report:** a top-level `stdlib_vulnerabilities` array after
+  `dependencies`, omitted when there are none. Entries have the shape of a
+  dependency's `vulnerabilities` entries, including `reachability`,
+  `call_path`, `call_trace`, `called_symbols` and the EPSS and KEV fields, but
+  never `severity_scored`.
+- **PDF report:** a "Standard Library Vulnerabilities" section on its own page,
+  before the vulnerability ID alias appendix, with the same per-vulnerability
+  lines as a dependency block.
+
+They are not scored: the scorer does not read standard-library
+vulnerabilities, so they do not change any risk score, the `summary` counts or
+the headline.
+
 ### Vulnerability identifiers in report output
 
 Human-facing output — text and PDF — identifies every advisory by its **Go
@@ -275,7 +298,8 @@ CVE and GHSA identifiers are not dropped — they are collected into one place:
 
 - **Text report:** a `VULNERABILITY ID ALIASES` section between the stdlib
   vulnerabilities and the summary.
-- **PDF report:** an "Appendix: Vulnerability ID Aliases" table.
+- **PDF report:** an "Appendix: Vulnerability ID Aliases" table, which also
+  covers standard-library advisories.
 
 Advisories with no aliases are omitted from both, and the section disappears
 entirely when nothing in the report has an alias.

@@ -199,6 +199,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   summary now carry a note stating their scope, and the renderer has bats
   tests in CI.
 
+#### Standard-library vulnerabilities in JSON and PDF reports
+
+- **JSON and PDF reports now include standard-library vulnerabilities,** which
+  only the text report listed before. JSON gains a top-level
+  `stdlib_vulnerabilities` array after `dependencies` (omitted when there are
+  none); the PDF gains a "Standard Library Vulnerabilities" section before the
+  vulnerability ID alias appendix, and that appendix now covers
+  standard-library aliases. Entries carry the same evidence as a dependency
+  vulnerability (`reachability`, `call_path`, `call_trace`, `called_symbols`,
+  EPSS and KEV fields in JSON; severity, fix version, `Reached via:` and
+  `Vulnerable symbols called:` in the PDF), except that JSON never sets
+  `severity_scored`.
+- **All three reports list them in the same order, sorted by advisory ID**,
+  instead of govulncheck's finding order. The text report's
+  `STDLIB VULNERABILITIES` section now also prints `Reached via:` and, when more
+  than one symbol is called, `Vulnerable symbols called:`.
+- **They are not scored.** The scorer does not read standard-library
+  vulnerabilities, so they are not counted in `summary` and change no risk
+  score or the headline.
+
 ### Bug Fixes
 
 - **`--require-github-token` now fails (exit 3) when GitHub rejects the

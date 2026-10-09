@@ -62,9 +62,17 @@ type JSONReport struct {
 	// Notes lists informational messages that do not make the results
 	// incomplete, such as go list package errors that leave module
 	// classification unaffected. It is absent when there are none.
-	Notes             []string             `json:"notes,omitempty"`
-	Summary           JSONSummary          `json:"summary"`
-	Deps              []JSONDependency     `json:"dependencies"`
+	Notes   []string         `json:"notes,omitempty"`
+	Summary JSONSummary      `json:"summary"`
+	Deps    []JSONDependency `json:"dependencies"`
+
+	// StdlibVulns lists vulnerabilities in the Go standard library of the
+	// project's toolchain, sorted by advisory ID. They are not part of any
+	// dependency's risk score or of the summary counts, and carry no
+	// severity_scored because the scorer does not score them. Absent when
+	// there are none.
+	StdlibVulns []JSONVuln `json:"stdlib_vulnerabilities,omitempty"`
+
 	CI                *JSONCIReport        `json:"ci_cd_assessment,omitempty"`
 	CIFindings        []JSONFlatFinding    `json:"ci_findings"`
 	BuildFileFindings []JSONFlatFinding    `json:"build_file_findings"`
@@ -398,6 +406,47 @@ type JSONOptions struct {
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
 	Takeovers       []*scanner.MaintainerInfo
+
+	// StdlibVulns are the standard library vulnerabilities, already sorted by
+	// the caller. They are reported as given.
+	StdlibVulns []scanner.Vulnerability
+}
+
+// toJSONVuln maps a scanned vulnerability to its JSON form. Dependency and
+// standard library vulnerabilities share it so the two cannot drift.
+func toJSONVuln(v *scanner.Vulnerability) JSONVuln {
+	jv := JSONVuln{
+		ID:                  v.ID,
+		Aliases:             v.Aliases,
+		Summary:             v.Summary,
+		Severity:            v.Severity,
+		FixedVersion:        v.FixedVersion,
+		EnrichmentAttempted: v.EnrichmentAttempted,
+		EnrichmentFailed:    v.EnrichmentFailed,
+		PublishedAt:         v.PublishedAt,
+		FixPublishedAt:      v.FixPublishedAt,
+		DaysUnpatched:       v.DaysUnpatched,
+		Reachability:        v.Reachability,
+		CallPath:            v.CallPath,
+		CallTrace:           v.CallTrace,
+		CalledSymbols:       v.CalledSymbols,
+		SeveritySource:      v.SeveritySource,
+		SeverityAlias:       v.SeverityAlias,
+		SeverityScored:      scorer.ScoredSeverity(v),
+		EnrichmentErrors:    v.EnrichmentErrors,
+		EPSSScore:           v.EPSSScore,
+		EPSSPercentile:      v.EPSSPercentile,
+		EPSSDate:            v.EPSSDate,
+		KEVDateAdded:        v.KEVDateAdded,
+		KEVRansomware:       v.KEVRansomware,
+	}
+	// in_kev is serialized only when the KEV catalog was actually
+	// consulted: absent = "not checked", false = "checked, not listed".
+	if v.KEVChecked {
+		inKEV := v.InKEV
+		jv.InKEV = &inKEV
+	}
+	return jv
 }
 
 // WriteJSON generates JSON output.
@@ -460,37 +509,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 
 		for i := range ds.Vulns {
 			v := &ds.Vulns[i]
-			jv := JSONVuln{
-				ID:                  v.ID,
-				Aliases:             v.Aliases,
-				Summary:             v.Summary,
-				Severity:            v.Severity,
-				FixedVersion:        v.FixedVersion,
-				EnrichmentAttempted: v.EnrichmentAttempted,
-				EnrichmentFailed:    v.EnrichmentFailed,
-				PublishedAt:         v.PublishedAt,
-				FixPublishedAt:      v.FixPublishedAt,
-				DaysUnpatched:       v.DaysUnpatched,
-				Reachability:        v.Reachability,
-				CallPath:            v.CallPath,
-				CallTrace:           v.CallTrace,
-				CalledSymbols:       v.CalledSymbols,
-				SeveritySource:      v.SeveritySource,
-				SeverityAlias:       v.SeverityAlias,
-				SeverityScored:      scorer.ScoredSeverity(v),
-				EnrichmentErrors:    v.EnrichmentErrors,
-				EPSSScore:           v.EPSSScore,
-				EPSSPercentile:      v.EPSSPercentile,
-				EPSSDate:            v.EPSSDate,
-				KEVDateAdded:        v.KEVDateAdded,
-				KEVRansomware:       v.KEVRansomware,
-			}
-			// in_kev is serialized only when the KEV catalog was actually
-			// consulted: absent = "not checked", false = "checked, not listed".
-			if v.KEVChecked {
-				inKEV := v.InKEV
-				jv.InKEV = &inKEV
-			}
+			jv := toJSONVuln(v)
 			jd.Vulns = append(jd.Vulns, jv)
 		}
 
@@ -563,6 +582,17 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		}
 
 		report.Deps = append(report.Deps, jd)
+	}
+
+	if len(opts.StdlibVulns) > 0 {
+		report.StdlibVulns = make([]JSONVuln, 0, len(opts.StdlibVulns))
+		for i := range opts.StdlibVulns {
+			jv := toJSONVuln(&opts.StdlibVulns[i])
+			// The scorer does not score standard library vulnerabilities, so a
+			// scored tier here would claim a measurement nobody made.
+			jv.SeverityScored = ""
+			report.StdlibVulns = append(report.StdlibVulns, jv)
+		}
 	}
 
 	// CI/CD assessment. When the scanner ran (opts.CIReport != nil) we emit the

@@ -1019,3 +1019,33 @@ func TestWriteDependencyDetail_ReachedVia(t *testing.T) {
 		}
 	})
 }
+
+// TestWriteText_StdlibReachedVia verifies the stdlib section prints the call
+// path and symbols for a called advisory and nothing extra for an imported one.
+func TestWriteText_StdlibReachedVia(t *testing.T) {
+	out := renderAliasReport(t, aliasReport(), stdlibTestVulns())
+
+	for _, want := range []string{
+		"STDLIB VULNERABILITIES (2 found)",
+		"    Fixed in: go1.26.3\n    Reached via: example.com/app.main (main.go:21) → net/http.ListenAndServe\n" +
+			"    Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// The imported advisory is the last entry; nothing may follow its summary
+	// line except the section's closing blank line.
+	idx := strings.Index(out, "GO-2026-4002 Parser panic in encoding/asn1")
+	if idx < 0 {
+		t.Fatalf("imported stdlib advisory missing:\n%s", out)
+	}
+	rest := out[idx:]
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	if strings.Contains(rest, "Reached via") || strings.Contains(rest, "Vulnerable symbols") {
+		t.Errorf("imported stdlib advisory must not print call evidence:\n%s", rest)
+	}
+}

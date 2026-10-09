@@ -379,3 +379,108 @@ func TestWriteDependencyBlock_ReachedViaExtraction(t *testing.T) {
 		t.Errorf("dependency position must not be shown in the PDF:\n%s", got)
 	}
 }
+
+// stdlibTestVulns returns two stdlib advisories: one called with a path and
+// two symbols, one merely imported.
+func stdlibTestVulns() []scanner.Vulnerability {
+	called := scanner.Vulnerability{
+		ID:           "GO-2026-4001",
+		Aliases:      []string{"CVE-2026-11111"},
+		Summary:      "Unbounded allocation in net/http",
+		Severity:     "HIGH",
+		FixedVersion: "go1.26.3",
+		Reachability: "called",
+		CallPath:     []string{"example.com/app.main", "net/http.ListenAndServe"},
+		CallTrace: []scanner.CallFrame{
+			{Name: "example.com/app.main", Module: "example.com/app", File: "main.go", Line: 21, Project: true},
+			{Name: "net/http.ListenAndServe", Module: "stdlib", File: "net/http/server.go", Line: 3500},
+		},
+		CalledSymbols: []string{"net/http.ListenAndServe", "net/http.Serve"},
+	}
+	imported := scanner.Vulnerability{
+		ID:           "GO-2026-4002",
+		Summary:      "Parser panic in encoding/asn1",
+		Severity:     "MEDIUM",
+		Reachability: "imported",
+	}
+	return []scanner.Vulnerability{called, imported}
+}
+
+// TestWriteStdlibVulnSection_Extraction renders the stdlib section to a PDF,
+// reads it back and checks the heading, advisory IDs, summaries and the call
+// path are in the extracted text.
+func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	writeStdlibVulnSection(c, stdlibTestVulns(), regular, bold)
+
+	var buf bytes.Buffer
+	if err := c.Write(&buf); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	reader, err := model.NewPdfReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("read PDF: %v", err)
+	}
+	numPages, err := reader.GetNumPages()
+	if err != nil {
+		t.Fatalf("page count: %v", err)
+	}
+	var all strings.Builder
+	for i := 1; i <= numPages; i++ {
+		page, err := reader.GetPage(i)
+		if err != nil {
+			t.Fatalf("get page %d: %v", i, err)
+		}
+		ex, err := extractor.New(page)
+		if err != nil {
+			t.Fatalf("extractor: %v", err)
+		}
+		text, err := ex.ExtractText()
+		if err != nil {
+			t.Fatalf("extract text: %v", err)
+		}
+		all.WriteString(text)
+		all.WriteString("\n")
+	}
+	got := strings.Join(strings.Fields(all.String()), " ")
+
+	for _, want := range []string{
+		"Standard Library Vulnerabilities",
+		"These affect the Go standard library used to build dependencies.",
+		"Vulnerability: GO-2026-4001 (HIGH)",
+		"Summary: Unbounded allocation in net/http",
+		"Fix available: go1.26.3",
+		"Reached via: example.com/app.main (main.go:21) > net/http.ListenAndServe",
+		"Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve",
+		"Vulnerability: GO-2026-4002 (MEDIUM) (imported)",
+		"Summary: Parser panic in encoding/asn1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("extracted PDF text missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "server.go:3500") {
+		t.Errorf("stdlib frame position must not be shown in the PDF:\n%s", got)
+	}
+	if i, j := strings.Index(got, "GO-2026-4001"), strings.Index(got, "GO-2026-4002"); i < 0 || j < i {
+		t.Errorf("stdlib vulnerabilities not in the given order:\n%s", got)
+	}
+}
+
+// TestCollectVulnAliases_IncludesStdlib pins that the alias table the PDF
+// appendix renders covers the stdlib advisories passed to it.
+func TestCollectVulnAliases_IncludesStdlib(t *testing.T) {
+	entries := collectVulnAliases(&scorer.ProjectScore{}, stdlibTestVulns())
+	if len(entries) != 1 || entries[0].ID != "GO-2026-4001" ||
+		len(entries[0].Aliases) != 1 || entries[0].Aliases[0] != "CVE-2026-11111" {
+		t.Errorf("collectVulnAliases() = %+v, want GO-2026-4001 -> CVE-2026-11111", entries)
+	}
+}
