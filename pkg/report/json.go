@@ -178,6 +178,13 @@ type JSONVuln struct {
 	// function (outermost frame first). Set only when Reachability is "called".
 	// Static-analysis evidence of reachability, not proof of exploitability.
 	CallPath []string `json:"call_path,omitempty"`
+	// CallTrace is CallPath with a source position per entry, index-aligned
+	// with it. A file is relative to its own module's root, so read it together
+	// with the frame's module and version. Set only when Reachability is "called".
+	CallTrace []scanner.CallFrame `json:"call_trace,omitempty"`
+	// CalledSymbols lists every vulnerable symbol found called for this
+	// advisory (sorted, capped). Set only when Reachability is "called".
+	CalledSymbols []string `json:"called_symbols,omitempty"`
 	// SeveritySource is "osv", "nvd", "ghsa", "none" (a lookup failed), or
 	// "unscored" (every source consulted answered; none has published a severity).
 	// Empty when enrichment was not attempted (severity was known from govulncheck).
@@ -466,6 +473,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				DaysUnpatched:       v.DaysUnpatched,
 				Reachability:        v.Reachability,
 				CallPath:            v.CallPath,
+				CallTrace:           v.CallTrace,
+				CalledSymbols:       v.CalledSymbols,
 				SeveritySource:      v.SeveritySource,
 				SeverityAlias:       v.SeverityAlias,
 				SeverityScored:      scorer.ScoredSeverity(v),

@@ -358,6 +358,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
 			}
+			if via := reachedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "  │  Reached via: %s\n", via)
+			}
+			if syms := calledSymbolsLine(v); syms != "" {
+				fmt.Fprintf(w, "  │  Vulnerable symbols called: %s\n", syms)
+			}
 		}
 	}
 

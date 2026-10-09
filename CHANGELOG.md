@@ -27,10 +27,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   reachability is `called`:** one example of how the project reaches the
   vulnerable function, outermost frame first, condensed to the entry frame, the
   frame where each package hands over, and the vulnerable function itself
-  (at most 8 entries). It is static-analysis evidence of reachability, not proof
-  of exploitability. Vulnerabilities that are only `imported` or
+  (at most 8 entries). A longer path is cut in the middle and a `"..."` entry
+  marks the cut, so a consumer must not treat every entry as a function name.
+  When a vulnerability has several vulnerable symbols the shortest path is
+  kept, with ties broken on the path string, so the choice does not depend on
+  govulncheck's output order. It is static-analysis evidence of reachability,
+  not proof of exploitability. Vulnerabilities that are only `imported` or
   `required` have no call path. `pkg/runner.Result` carries the same field
   through `scanner.Vulnerability.CallPath`.
+- **`call_trace` gives each `call_path` entry a source position (#134).** It is
+  an array of `{name, module, version, file, line, column, project, elided}`
+  objects (empty fields omitted), the same length and order as `call_path`,
+  present only for `called` findings; the cut slot is `{"elided": true}`. A
+  non-sink frame's position is the call it makes and the last entry's is the
+  vulnerable function's declaration; because the path is condensed, a kept
+  frame's position can point at a call to a dropped frame. `file` is relative
+  to that frame's own module (the standard library's to GOROOT), so read it
+  with `module` and `version`; it is dropped when govulncheck reports an
+  absolute path or one outside the module, while `line` and `column` are kept.
+  `project` is true for frames in govulncheck's scan roots, taken from its
+  `SBOM` message, and is false everywhere with a govulncheck that emits none.
+  Equally short paths are ordered on the path string and then on frame
+  positions. Exposed as `scanner.Vulnerability.CallTrace` and
+  `scanner.CallFrame`.
+- **`called_symbols` lists every vulnerable symbol found called for an
+  advisory in a module (#134).** govulncheck emits one finding per symbol while
+  `call_path` keeps one path. The list is sorted, deduplicated and capped at 20
+  (the first 20 in sorted order). Exposed as
+  `scanner.Vulnerability.CalledSymbols`.
+- **Text and PDF reports show a `Reached via:` line under each called
+  finding.** For example `Reached via: example.com/u1repro.main (main.go:13) →
+  golang.org/x/crypto/ssh/agent.keyring.Add`. `(file:line)` is shown only on
+  project frames, `...` marks a cut, and a `Vulnerable symbols called:` line
+  follows when there is more than one symbol. The PDF separates frames with
+  ` > ` because its standard font has no arrow glyph. There is no call-site
+  count: govulncheck emits one representative stack per symbol, so the number
+  of call sites is not in its output. `call_trace` and `called_symbols` do not
+  affect scores or policy results.
 
 #### `pkg/runner`: the scan pipeline as an importable package
 

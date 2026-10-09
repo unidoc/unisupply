@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -983,5 +984,71 @@ func TestWriteJSON_SeverityAliasAndUnscored(t *testing.T) {
 	}
 	if vulns[1]["severity_source"] != "unscored" {
 		t.Errorf("severity_source = %v, want unscored", vulns[1]["severity_source"])
+	}
+}
+
+// TestWriteJSON_CallTrace verifies call_trace and called_symbols are emitted
+// for a called finding with the project frame's position, are absent for an
+// imported one, and that call_path serializes exactly as before.
+func TestWriteJSON_CallTrace(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "golang.org/x/crypto", Version: "v0.48.0", Direct: true})
+
+	called := issue134Vuln()
+	imported := scanner.Vulnerability{ID: "GO-2026-0001", Severity: "HIGH", Reachability: "imported"}
+	ps := &scorer.ProjectScore{
+		OverallScore: 80,
+		OverallLevel: scorer.RiskCritical,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+			RiskScore: 80, RiskLevel: scorer.RiskCritical,
+			Vulns: []scanner.Vulnerability{called, imported},
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var raw struct {
+		Deps []struct {
+			Vulns []json.RawMessage `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Deps) != 1 || len(raw.Deps[0].Vulns) != 2 {
+		t.Fatalf("want 1 dep with 2 vulns, got %+v", raw.Deps)
+	}
+	// The report is indented; compact each entry so the byte assertions below
+	// pin the field order and values, not the whitespace.
+	compact := func(m json.RawMessage) string {
+		var b bytes.Buffer
+		if err := json.Compact(&b, m); err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		return b.String()
+	}
+	calledJSON, importedJSON := compact(raw.Deps[0].Vulns[0]), compact(raw.Deps[0].Vulns[1])
+
+	for _, want := range []string{
+		`"call_path":["example.com/u1repro.main","golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+		`"call_trace":[{"name":"example.com/u1repro.main","module":"example.com/u1repro","file":"main.go","line":13,"column":12,"project":true},`,
+		`"called_symbols":["golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+	} {
+		if !strings.Contains(calledJSON, want) {
+			t.Errorf("called vuln JSON missing %s:\n%s", want, calledJSON)
+		}
+	}
+	// The dependency frame keeps its module-relative position and version.
+	if want := `{"name":"golang.org/x/crypto/ssh/agent.keyring.Add","module":"golang.org/x/crypto","version":"v0.48.0","file":"ssh/agent/keyring.go","line":149,"column":19}`; !strings.Contains(calledJSON, want) {
+		t.Errorf("called vuln JSON missing dependency frame %s:\n%s", want, calledJSON)
+	}
+
+	for _, key := range []string{`"call_trace"`, `"called_symbols"`, `"call_path"`} {
+		if strings.Contains(importedJSON, key) {
+			t.Errorf("imported vuln JSON must not contain %s:\n%s", key, importedJSON)
+		}
 	}
 }

@@ -898,6 +898,13 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		if v.FixedVersion != "" {
 			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
 		}
+		// The ASCII separator is deliberate: see callPathSepPDF.
+		if via := reachedVia(v, callPathSepPDF); via != "" {
+			addBullet(details, "  Reached via: "+via, regular)
+		}
+		if syms := calledSymbolsLine(v); syms != "" {
+			addBullet(details, "  Vulnerable symbols called: "+syms, regular)
+		}
 	}
 
 	// Maintenance.

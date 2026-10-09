@@ -1,10 +1,12 @@
 package report
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
 	"github.com/unidoc/unipdf/v5/creator"
+	"github.com/unidoc/unipdf/v5/extractor"
 	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/testutil"
@@ -279,5 +281,101 @@ func TestWriteExecutiveSummary_ScanNotesSmoke(t *testing.T) {
 		c.NewPage()
 		ps := &scorer.ProjectScore{OverallLevel: scorer.RiskLow, Notes: notes}
 		writeExecutiveSummary(c, graph, ps, PDFOptions{}, regular, bold)
+	}
+}
+
+// TestWriteDependencyBlock_CallTraceSmoke verifies that a called vulnerability
+// carrying a trace, a cut path and several symbols renders without panicking,
+// including a path with no trace at all.
+func TestWriteDependencyBlock_CallTraceSmoke(t *testing.T) {
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	cut := issue134Vuln()
+	cut.ID = "GO-2026-5006"
+	cut.CallPath = []string{"example.com/u1repro.main", "...", "golang.org/x/crypto/ssh/agent.keyring.Add"}
+	cut.CallTrace = []scanner.CallFrame{cut.CallTrace[0], {Elided: true}, cut.CallTrace[1]}
+	cut.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+
+	noTrace := issue134Vuln()
+	noTrace.ID = "GO-2026-5007"
+	noTrace.CallTrace = nil
+
+	ds := &scorer.DependencyScore{
+		Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+		RiskScore: 80, RiskLevel: scorer.RiskCritical,
+		Vulns: []scanner.Vulnerability{issue134Vuln(), cut, noTrace},
+	}
+
+	// Must not panic.
+	writeDependencyBlock(c, ds, regular, bold, true)
+}
+
+// TestWriteDependencyBlock_ReachedViaExtraction renders a dependency block to a
+// PDF, reads it back and checks the extracted page text carries the call path
+// with the ASCII separator. Extracted text is whitespace-normalized because the
+// extractor may break the line at a wrap point.
+func TestWriteDependencyBlock_ReachedViaExtraction(t *testing.T) {
+	// initLicense returns "license key already set" on every call after the
+	// first in the test binary; that is not a failure, so the error is ignored
+	// like the other PDF tests do.
+	_ = initLicense()
+
+	c := creator.New()
+	c.SetPageSize(creator.PageSizeLetter)
+	c.SetPageMargins(50, 50, 50, 50)
+	c.NewPage()
+
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
+
+	v := issue134Vuln()
+	v.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+	ds := &scorer.DependencyScore{
+		Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+		RiskScore: 80, RiskLevel: scorer.RiskCritical,
+		Vulns: []scanner.Vulnerability{v},
+	}
+	writeDependencyBlock(c, ds, regular, bold, true)
+
+	var buf bytes.Buffer
+	if err := c.Write(&buf); err != nil {
+		t.Fatalf("write PDF: %v", err)
+	}
+	reader, err := model.NewPdfReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("read PDF: %v", err)
+	}
+	page, err := reader.GetPage(1)
+	if err != nil {
+		t.Fatalf("get page 1: %v", err)
+	}
+	ex, err := extractor.New(page)
+	if err != nil {
+		t.Fatalf("extractor: %v", err)
+	}
+	text, err := ex.ExtractText()
+	if err != nil {
+		t.Fatalf("extract text: %v", err)
+	}
+	got := strings.Join(strings.Fields(text), " ")
+
+	for _, want := range []string{
+		"Reached via: example.com/u1repro.main (main.go:13) > golang.org/x/crypto/ssh/agent.keyring.Add",
+		"Vulnerable symbols called: golang.org/x/crypto/ssh/agent.keyring.Add, golang.org/x/crypto/ssh/agent.keyring.Lock",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("extracted PDF text missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "keyring.go:149") {
+		t.Errorf("dependency position must not be shown in the PDF:\n%s", got)
 	}
 }
