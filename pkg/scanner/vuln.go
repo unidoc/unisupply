@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -495,7 +496,23 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 
 	var stderrBuf bytes.Buffer
 
+	// govulncheck's -C only moves package loading; it resolves the Go version
+	// and GOROOT for the standard library in this process's working directory.
+	// Resolve the project's own so the result does not depend on where
+	// unisupply was launched from.
+	projectGoVersion, projectGoRoot, projectErr := resolveGoEnv(ctx, projectDir)
+	if projectErr != nil {
+		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
+	}
+	// A failure here only costs stdlib file positions, so it is not reported.
+	_, scannerGoRoot, scannerErr := resolveGoEnv(ctx, "")
+	parseOpts := gvcParseOptions{}
+	if projectErr == nil && scannerErr == nil {
+		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
+	}
+
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
+	cmd.Env = govulncheckEnv(os.Environ(), projectGoVersion)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderrBuf
 
@@ -527,7 +544,7 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		return nil, warnings, false, nil
 	}
 
-	results, err := parseGovulncheckJSON(&stdout)
+	results, err := parseGovulncheckJSONWithOptions(&stdout, parseOpts)
 	if err != nil {
 		return nil, append(warnings, err.Error()), false, nil
 	}
@@ -637,7 +654,25 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 	return warnings
 }
 
+// gvcParseOptions carries the toolchain locations needed to normalise
+// standard-library frame filenames. The zero value disables the rebase.
+type gvcParseOptions struct {
+	// scannerGOROOT is the GOROOT of the process running govulncheck.
+	scannerGOROOT string
+	// projectGOROOT is the GOROOT of the scanned project's toolchain.
+	projectGOROOT string
+}
+
+// parseGovulncheckJSON parses govulncheck's JSON stream without any standard
+// library filename rebasing.
 func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error) {
+	return parseGovulncheckJSONWithOptions(buf, gvcParseOptions{})
+}
+
+// parseGovulncheckJSONWithOptions parses govulncheck's JSON stream. Filenames
+// of standard-library trace frames are rebased from opts.scannerGOROOT onto
+// opts.projectGOROOT before the call path is condensed; see rebaseStdlibFile.
+func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (map[string][]Vulnerability, error) {
 	// Collect OSVs and findings.
 	osvs := make(map[string]*gvcOSV) // id -> osv
 	var findings []gvcFinding
@@ -679,6 +714,12 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 		if findingData, ok := raw["finding"]; ok {
 			var f gvcFinding
 			if err := json.Unmarshal(findingData, &f); err == nil && f.OSV != "" {
+				for i := range f.Trace {
+					t := &f.Trace[i]
+					if t.Module == "stdlib" && t.Position != nil {
+						t.Position.Filename = rebaseStdlibFile(t.Position.Filename, opts.scannerGOROOT, opts.projectGOROOT)
+					}
+				}
 				findings = append(findings, f)
 			}
 		}

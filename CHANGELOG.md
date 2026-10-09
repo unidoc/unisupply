@@ -272,6 +272,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   GitHub API had returned errors.** The warning now says "GitHub API error" (or
   "rate-limited or errored" when both happened), so a user who did set a token
   is not sent after a fix that cannot work.
+- **Standard-library vulnerabilities depended on the directory unisupply was
+  started from.** govulncheck runs with `-C <project>`, but `-C` only moves
+  package loading: the Go version it matches standard-library advisories
+  against and the GOROOT it makes standard-library file positions relative to
+  came from the launch directory. One module reported 13, 65 and 46
+  standard-library vulnerabilities from three directories using go1.26.8,
+  go1.24.1 and go1.26.0; only the run that matched the project's own toolchain
+  (46) was right. unisupply now runs `go env GOVERSION GOROOT` in the project
+  directory and passes `GOVERSION` to govulncheck, so the result follows the
+  project's toolchain wherever unisupply is run. A `GOVERSION` already set in
+  the environment is respected. Standard-library file positions in `call_trace`
+  are rebased onto the project's GOROOT (for example `src/sync/once.go`)
+  instead of being dropped. If the project's toolchain cannot be resolved,
+  govulncheck's previous behavior is kept and the report warns "could not
+  resolve the project's Go toolchain (...); standard-library vulnerabilities
+  are checked against the Go version of unisupply's working directory". Risk
+  scores are not affected: the scorer does not read standard-library
+  vulnerabilities.
 
 ## [0.6.0] - 2026-09-29
 

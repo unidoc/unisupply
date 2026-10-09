@@ -175,8 +175,11 @@ govulncheck's output order.
   the function's declaration. Because the path is condensed, a kept frame's
   position can point at a call to a frame that was dropped.
 - **Files are module-relative.** `file` is relative to the root of that frame's
-  own module (for the standard library, relative to GOROOT), so it is only
-  meaningful together with `module` and `version`. When govulncheck reports an
+  own module (for the standard library, relative to the project's GOROOT, for
+  example `src/sync/once.go`), so it is only meaningful together with `module`
+  and `version`. Standard-library vulnerabilities are matched against the
+  project's toolchain, the Go version `go env` reports in the project
+  directory, not the directory unisupply is run from. When govulncheck reports an
   absolute path, or one outside the module (`../...`), `file` is dropped so a
   shared report does not expose the scanning machine's layout; `line` and
   `column` are kept.
