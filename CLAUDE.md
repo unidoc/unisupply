@@ -100,7 +100,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 
 ## Tech stack
 
-- Go 1.26.8, no CGo
+- Go 1.26.9, no CGo
 - `github.com/spf13/pflag` — CLI flags
 - `github.com/unidoc/unipdf/v5` — PDF report generation (dogfooding)
 - `github.com/unidoc/unichart` — Charts in PDF reports

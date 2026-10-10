@@ -1,6 +1,6 @@
 module github.com/unidoc/unisupply
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/spf13/pflag v1.0.10
@@ -25,7 +25,7 @@ require (
 	github.com/unidoc/unitype v0.5.1 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/image v0.46.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260908163034-4bcc4b2ee518 // indirect

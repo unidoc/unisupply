@@ -320,6 +320,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   scores are not affected: the scorer does not read standard-library
   vulnerabilities.
 
+### Security Patches
+
+- **Built with Go 1.26.9 instead of 1.26.8**, clearing 13 standard-library
+  advisories that affect v0.6.0 binaries. govulncheck reports 9 of them as
+  reachable from unisupply's HTTP client: GO-2026-6603, GO-2026-6605,
+  GO-2026-6607, GO-2026-6608, GO-2026-6610, GO-2026-6611, GO-2026-6612,
+  GO-2026-6613, GO-2026-6617. The other 4 are imported or module-level only:
+  GO-2026-6599, GO-2026-6600, GO-2026-6604, GO-2026-6609. Building from source
+  now needs Go 1.26.9 or newer, and CI tests against Go 1.26.9 and 1.27.1.
+- Upgraded `golang.org/x/net` `v0.59.0` → `v0.60.0` (GO-2026-6603,
+  GO-2026-6610, GO-2026-6611, GO-2026-6612, GO-2026-6617). unisupply does not
+  call the affected HTTP/2 code; it is pulled in through UniPDF's use of
+  `x/net/html/charset`.
+
 ## [0.6.0] - 2026-09-29
 
 ### New Features
