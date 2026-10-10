@@ -233,6 +233,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
+			if via := reachedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Reached via:"), via)
+			}
+			if syms := calledSymbolsLine(v); syms != "" {
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Vulnerable symbols called:"), syms)
+			}
 		}
 		fmt.Fprintln(w)
 	}
@@ -357,6 +363,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			}
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+			}
+			if via := reachedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "  │  Reached via: %s\n", via)
+			}
+			if syms := calledSymbolsLine(v); syms != "" {
+				fmt.Fprintf(w, "  │  Vulnerable symbols called: %s\n", syms)
 			}
 		}
 	}

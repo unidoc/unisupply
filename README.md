@@ -207,6 +207,25 @@ feed the risk score — see
         "example.com/app/cmd/app.main",
         "golang.org/x/net/http2.Server.ServeConn"
       ],
+      "call_trace": [
+        {
+          "name": "example.com/app/cmd/app.main",
+          "module": "example.com/app",
+          "file": "cmd/app/main.go",
+          "line": 42,
+          "column": 18,
+          "project": true
+        },
+        {
+          "name": "golang.org/x/net/http2.Server.ServeConn",
+          "module": "golang.org/x/net",
+          "version": "v0.35.0",
+          "file": "http2/server.go",
+          "line": 412,
+          "column": 22
+        }
+      ],
+      "called_symbols": ["golang.org/x/net/http2.Server.ServeConn"],
       "epss_score": 0.89,
       "epss_percentile": 0.994,
       "epss_date": "2026-07-10",
@@ -232,7 +251,18 @@ feed the risk score — see
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
 
+Vulnerabilities in the Go standard library of the project's toolchain are not
+attached to a dependency. They appear in a top-level `stdlib_vulnerabilities`
+array after `dependencies`, sorted by advisory ID and omitted when there are
+none. Each entry has the same fields as a dependency vulnerability above
+(including `reachability`, `call_path`, `call_trace` and `called_symbols`)
+except `severity_scored`, which is never set because the scorer does not score
+standard-library vulnerabilities. They are not counted in `summary`.
+
 `call_path` is present only when `reachability` is `"called"`: one example of how the project reaches the vulnerable function, outermost frame first, condensed to the entry frame, the frame where each package hands over to the next, and the vulnerable function (at most 8 entries; `"..."` marks a cut). Consecutive entries are not necessarily direct callers. It is evidence that the code is on an execution path, not proof that the vulnerability is exploitable.
+
+`call_trace` has one object per `call_path` entry, in the same order, with the frame's module, version and source position (`file`, `line`, `column`); `project` is true for the project's own code, and the `"..."` slot is `{"elided": true}`. A frame's position is the call it makes; the last entry's is the vulnerable function's declaration. `file` is relative to that frame's module, and is omitted when govulncheck reports an absolute path or one outside the module; `line` and `column` are kept. `called_symbols` lists every vulnerable symbol found called for the advisory (sorted, at most 20), since `call_path` shows only one. Neither field affects scoring or policy.
+
 Absent `epss_score` means EPSS has no score for that CVE (expected — EPSS does
 not score every CVE), the lookup failed, or the vuln has no CVE alias;
 absent `in_kev` means the KEV catalog was not consulted (`false` means

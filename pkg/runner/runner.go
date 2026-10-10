@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -380,11 +381,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// (the text, JSON and PDF reports and Result.Takeovers all depend on it).
 	takeovers := scanner.TakeoverCandidates(maintainers)
 
-	var stdlibVulns []scanner.Vulnerability
-	if stdlibList, ok := vulns["stdlib"]; ok {
-		stdlibVulns = stdlibList
-		delete(vulns, "stdlib")
-	}
+	stdlibVulns := takeStdlibVulns(vulns)
 
 	interrupted := ctx.Err() != nil
 	if interrupted {
@@ -424,4 +421,20 @@ func vulnScanFailure(err error, scanned bool, warnings []string) error {
 		return errors.New(line)
 	}
 	return errors.New("vulnerability scan did not run")
+}
+
+// takeStdlibVulns removes the Go standard library's vulnerabilities from vulns
+// and returns them, or nil when there are none. They are sorted by ID so that
+// the text, JSON and PDF reports share one deterministic order instead of
+// govulncheck's finding order.
+func takeStdlibVulns(vulns map[string][]scanner.Vulnerability) []scanner.Vulnerability {
+	list, ok := vulns["stdlib"]
+	if !ok {
+		return nil
+	}
+	delete(vulns, "stdlib")
+	slices.SortStableFunc(list, func(a, b scanner.Vulnerability) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return list
 }

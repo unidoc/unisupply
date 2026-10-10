@@ -27,10 +27,43 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   reachability is `called`:** one example of how the project reaches the
   vulnerable function, outermost frame first, condensed to the entry frame, the
   frame where each package hands over, and the vulnerable function itself
-  (at most 8 entries). It is static-analysis evidence of reachability, not proof
-  of exploitability. Vulnerabilities that are only `imported` or
+  (at most 8 entries). A longer path is cut in the middle and a `"..."` entry
+  marks the cut, so a consumer must not treat every entry as a function name.
+  When a vulnerability has several vulnerable symbols the shortest path is
+  kept, with ties broken on the path string, so the choice does not depend on
+  govulncheck's output order. It is static-analysis evidence of reachability,
+  not proof of exploitability. Vulnerabilities that are only `imported` or
   `required` have no call path. `pkg/runner.Result` carries the same field
   through `scanner.Vulnerability.CallPath`.
+- **`call_trace` gives each `call_path` entry a source position (#134).** It is
+  an array of `{name, module, version, file, line, column, project, elided}`
+  objects (empty fields omitted), the same length and order as `call_path`,
+  present only for `called` findings; the cut slot is `{"elided": true}`. A
+  non-sink frame's position is the call it makes and the last entry's is the
+  vulnerable function's declaration; because the path is condensed, a kept
+  frame's position can point at a call to a dropped frame. `file` is relative
+  to that frame's own module (the standard library's to GOROOT), so read it
+  with `module` and `version`; it is dropped when govulncheck reports an
+  absolute path or one outside the module, while `line` and `column` are kept.
+  `project` is true for frames in govulncheck's scan roots, taken from its
+  `SBOM` message, and is false everywhere with a govulncheck that emits none.
+  Equally short paths are ordered on the path string and then on frame
+  positions. Exposed as `scanner.Vulnerability.CallTrace` and
+  `scanner.CallFrame`.
+- **`called_symbols` lists every vulnerable symbol found called for an
+  advisory in a module (#134).** govulncheck emits one finding per symbol while
+  `call_path` keeps one path. The list is sorted, deduplicated and capped at 20
+  (the first 20 in sorted order). Exposed as
+  `scanner.Vulnerability.CalledSymbols`.
+- **Text and PDF reports show a `Reached via:` line under each called
+  finding.** For example `Reached via: example.com/u1repro.main (main.go:13) →
+  golang.org/x/crypto/ssh/agent.keyring.Add`. `(file:line)` is shown only on
+  project frames, `...` marks a cut, and a `Vulnerable symbols called:` line
+  follows when there is more than one symbol. The PDF separates frames with
+  ` > ` because its standard font has no arrow glyph. There is no call-site
+  count: govulncheck emits one representative stack per symbol, so the number
+  of call sites is not in its output. `call_trace` and `called_symbols` do not
+  affect scores or policy results.
 
 #### `pkg/runner`: the scan pipeline as an importable package
 
@@ -166,6 +199,26 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   summary now carry a note stating their scope, and the renderer has bats
   tests in CI.
 
+#### Standard-library vulnerabilities in JSON and PDF reports
+
+- **JSON and PDF reports now include standard-library vulnerabilities,** which
+  only the text report listed before. JSON gains a top-level
+  `stdlib_vulnerabilities` array after `dependencies` (omitted when there are
+  none); the PDF gains a "Standard Library Vulnerabilities" section before the
+  vulnerability ID alias appendix, and that appendix now covers
+  standard-library aliases. Entries carry the same evidence as a dependency
+  vulnerability (`reachability`, `call_path`, `call_trace`, `called_symbols`,
+  EPSS and KEV fields in JSON; severity, fix version, `Reached via:` and
+  `Vulnerable symbols called:` in the PDF), except that JSON never sets
+  `severity_scored`.
+- **All three reports list them in the same order, sorted by advisory ID**,
+  instead of govulncheck's finding order. The text report's
+  `STDLIB VULNERABILITIES` section now also prints `Reached via:` and, when more
+  than one symbol is called, `Vulnerable symbols called:`.
+- **They are not scored.** The scorer does not read standard-library
+  vulnerabilities, so they are not counted in `summary` and change no risk
+  score or the headline.
+
 ### Bug Fixes
 
 - **`--require-github-token` now fails (exit 3) when GitHub rejects the
@@ -248,6 +301,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   permission error. When a token was used, the rate-limit warning no longer
   asks for `GITHUB_TOKEN`; it says the token's quota or a secondary rate limit
   was reached.
+- **Standard-library vulnerabilities depended on the directory unisupply was
+  started from.** govulncheck runs with `-C <project>`, but `-C` only moves
+  package loading: the Go version it matches standard-library advisories
+  against and the GOROOT it makes standard-library file positions relative to
+  came from the launch directory. One module reported 13, 65 and 46
+  standard-library vulnerabilities from three directories using go1.26.8,
+  go1.24.1 and go1.26.0; only the run that matched the project's own toolchain
+  (46) was right. unisupply now runs `go env GOVERSION GOROOT` in the project
+  directory and passes `GOVERSION` to govulncheck, so the result follows the
+  project's toolchain wherever unisupply is run. A `GOVERSION` already set in
+  the environment is respected. Standard-library file positions in `call_trace`
+  are rebased onto the project's GOROOT (for example `src/sync/once.go`)
+  instead of being dropped. If the project's toolchain cannot be resolved,
+  govulncheck's previous behavior is kept and the report warns "could not
+  resolve the project's Go toolchain (...); standard-library vulnerabilities
+  are checked against the Go version of unisupply's working directory". Risk
+  scores are not affected: the scorer does not read standard-library
+  vulnerabilities.
 
 ## [0.6.0] - 2026-09-29
 

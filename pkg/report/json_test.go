@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -983,5 +984,159 @@ func TestWriteJSON_SeverityAliasAndUnscored(t *testing.T) {
 	}
 	if vulns[1]["severity_source"] != "unscored" {
 		t.Errorf("severity_source = %v, want unscored", vulns[1]["severity_source"])
+	}
+}
+
+// TestWriteJSON_CallTrace verifies call_trace and called_symbols are emitted
+// for a called finding with the project frame's position, are absent for an
+// imported one, and that call_path serializes exactly as before.
+func TestWriteJSON_CallTrace(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "golang.org/x/crypto", Version: "v0.48.0", Direct: true})
+
+	called := issue134Vuln()
+	imported := scanner.Vulnerability{ID: "GO-2026-0001", Severity: "HIGH", Reachability: "imported"}
+	ps := &scorer.ProjectScore{
+		OverallScore: 80,
+		OverallLevel: scorer.RiskCritical,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+			RiskScore: 80, RiskLevel: scorer.RiskCritical,
+			Vulns: []scanner.Vulnerability{called, imported},
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var raw struct {
+		Deps []struct {
+			Vulns []json.RawMessage `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Deps) != 1 || len(raw.Deps[0].Vulns) != 2 {
+		t.Fatalf("want 1 dep with 2 vulns, got %+v", raw.Deps)
+	}
+	// The report is indented; compact each entry so the byte assertions below
+	// pin the field order and values, not the whitespace.
+	compact := func(m json.RawMessage) string {
+		var b bytes.Buffer
+		if err := json.Compact(&b, m); err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		return b.String()
+	}
+	calledJSON, importedJSON := compact(raw.Deps[0].Vulns[0]), compact(raw.Deps[0].Vulns[1])
+
+	for _, want := range []string{
+		`"call_path":["example.com/u1repro.main","golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+		`"call_trace":[{"name":"example.com/u1repro.main","module":"example.com/u1repro","file":"main.go","line":13,"column":12,"project":true},`,
+		`"called_symbols":["golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+	} {
+		if !strings.Contains(calledJSON, want) {
+			t.Errorf("called vuln JSON missing %s:\n%s", want, calledJSON)
+		}
+	}
+	// The dependency frame keeps its module-relative position and version.
+	if want := `{"name":"golang.org/x/crypto/ssh/agent.keyring.Add","module":"golang.org/x/crypto","version":"v0.48.0","file":"ssh/agent/keyring.go","line":149,"column":19}`; !strings.Contains(calledJSON, want) {
+		t.Errorf("called vuln JSON missing dependency frame %s:\n%s", want, calledJSON)
+	}
+
+	for _, key := range []string{`"call_trace"`, `"called_symbols"`, `"call_path"`} {
+		if strings.Contains(importedJSON, key) {
+			t.Errorf("imported vuln JSON must not contain %s:\n%s", key, importedJSON)
+		}
+	}
+}
+
+// TestWriteJSON_StdlibVulnerabilities verifies the top-level
+// stdlib_vulnerabilities list: the advisories in the given order, call_trace on
+// the called one, no severity_scored, and no change to the summary counts.
+func TestWriteJSON_StdlibVulnerabilities(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/dep", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{
+		OverallScore: 10,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "example.com/dep", Version: "v1.0.0", Direct: true,
+			RiskScore: 10, RiskLevel: scorer.RiskLow,
+		}},
+	}
+
+	stdlib := stdlibTestVulns()
+	// An UNKNOWN severity is what the scorer would promote for a dependency;
+	// for stdlib the scored tier must stay absent regardless.
+	stdlib[1].Severity = "UNKNOWN"
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26", StdlibVulns: stdlib}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var raw struct {
+		Stdlib  []json.RawMessage `json:"stdlib_vulnerabilities"`
+		Summary struct {
+			TotalVulns int `json:"total_vulns"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Stdlib) != 2 {
+		t.Fatalf("want 2 stdlib vulns, got %d:\n%s", len(raw.Stdlib), buf.String())
+	}
+	if raw.Summary.TotalVulns != 0 {
+		t.Errorf("summary.total_vulns = %d, want 0: stdlib must not count", raw.Summary.TotalVulns)
+	}
+
+	var ids []string
+	for _, m := range raw.Stdlib {
+		var v struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(m, &v); err != nil {
+			t.Fatalf("unmarshal vuln: %v", err)
+		}
+		ids = append(ids, v.ID)
+		if strings.Contains(string(m), "severity_scored") {
+			t.Errorf("stdlib vuln %s must not carry severity_scored:\n%s", v.ID, m)
+		}
+	}
+	if strings.Join(ids, ",") != "GO-2026-4001,GO-2026-4002" {
+		t.Errorf("stdlib ids = %v, want the given order", ids)
+	}
+	for _, want := range []string{`"call_trace"`, `"called_symbols"`, `"project": true`} {
+		if !strings.Contains(string(raw.Stdlib[0]), want) {
+			t.Errorf("called stdlib vuln missing %s:\n%s", want, raw.Stdlib[0])
+		}
+	}
+	if strings.Contains(string(raw.Stdlib[1]), "call_trace") {
+		t.Errorf("imported stdlib vuln must not carry call_trace:\n%s", raw.Stdlib[1])
+	}
+}
+
+// TestWriteJSON_NoStdlibVulnerabilities verifies the key is absent, not null or
+// empty, when there are no stdlib vulnerabilities.
+func TestWriteJSON_NoStdlibVulnerabilities(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/dep", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{OverallScore: 0, OverallLevel: scorer.RiskLow}
+
+	for name, opts := range map[string]JSONOptions{
+		"nil":   {GoVersion: "1.26"},
+		"empty": {GoVersion: "1.26", StdlibVulns: []scanner.Vulnerability{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteJSON(graph, ps, opts, &buf); err != nil {
+				t.Fatalf("WriteJSON() failed: %v", err)
+			}
+			if strings.Contains(buf.String(), "stdlib_vulnerabilities") {
+				t.Errorf("stdlib_vulnerabilities must be absent:\n%s", buf.String())
+			}
+		})
 	}
 }
