@@ -162,6 +162,50 @@ depend on govulncheck's output order. The path is evidence that the code is on
 an execution path, not proof that the vulnerability is exploitable (see the
 caveat below).
 
+`call_trace` carries the same path with a source position per entry. It is
+index-aligned with `call_path` and has the same length; each object holds
+`name`, `module`, `version`, `file`, `line`, `column`, `project` and `elided`,
+all omitted when empty. The cut slot is `{"elided": true}` where `call_path`
+has `"..."`. Ties between equally short paths are broken on the path string,
+then on the frame positions, so the selected trace does not depend on
+govulncheck's output order.
+
+- **Position meaning.** For every frame except the last, `file:line:column` is
+  the call that frame makes; for the last entry, the vulnerable function, it is
+  the function's declaration. Because the path is condensed, a kept frame's
+  position can point at a call to a frame that was dropped.
+- **Files are module-relative.** `file` is relative to the root of that frame's
+  own module (for the standard library, relative to the project's GOROOT, for
+  example `src/sync/once.go`), so it is only meaningful together with `module`
+  and `version`. Standard-library vulnerabilities are matched against the
+  project's toolchain, the Go version `go env` reports in the project
+  directory, not the directory unisupply is run from. When govulncheck reports an
+  absolute path, or one outside the module (`../...`), `file` is dropped so a
+  shared report does not expose the scanning machine's layout; `line` and
+  `column` are kept.
+- **`project`.** True when the frame's package is one of govulncheck's scan
+  roots, as listed in the `SBOM` message of its JSON stream. A govulncheck that
+  emits no `SBOM` message leaves `project` false on every frame.
+
+`called_symbols` lists the vulnerable symbols of every called finding for that
+advisory in that module, sorted and without duplicates. govulncheck emits one
+finding per vulnerable symbol while `call_path` keeps only one path, so this is
+where the other symbols remain visible. It holds at most 20 entries, the first
+20 in sorted order.
+
+The text and PDF reports show this under each called finding as
+`Reached via: example.com/u1repro.main (main.go:13) → golang.org/x/crypto/ssh/agent.keyring.Add`.
+`(file:line)` appears only on `project` frames, `...` marks a cut, and a
+`Vulnerable symbols called: a, b` line follows when there is more than one
+symbol. The PDF separates frames with ` > ` because its standard font has no
+arrow glyph.
+
+There is no call-site count. govulncheck emits one representative call stack
+per vulnerable symbol and visits each function at most once, so the number of
+places that call the vulnerable code is not in its output; any number derived
+from it would be a lower bound that reads like an exact count. Neither
+`call_trace` nor `called_symbols` affects scoring or policy.
+
 #### Scoring effect
 
 Reachability adjusts the vulnerability contribution at two levels:
@@ -219,6 +263,29 @@ See the upstream documentation for further precision-limit details:
 [Go Vulnerability Management](https://go.dev/security/vuln/) ·
 [govulncheck reference](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
 
+### Standard-library vulnerabilities in reports
+
+Vulnerabilities in the Go standard library of the project's toolchain (see
+`Files are module-relative` above for how the toolchain is chosen) belong to no
+dependency, so each report lists them separately, in the same order (sorted by
+advisory ID) and with the same evidence as a dependency vulnerability:
+
+- **Text report:** the `STDLIB VULNERABILITIES` section, with `Fixed in:`,
+  `Reached via:` and, when more than one symbol is called,
+  `Vulnerable symbols called:` lines.
+- **JSON report:** a top-level `stdlib_vulnerabilities` array after
+  `dependencies`, omitted when there are none. Entries have the shape of a
+  dependency's `vulnerabilities` entries, including `reachability`,
+  `call_path`, `call_trace`, `called_symbols` and the EPSS and KEV fields, but
+  never `severity_scored`.
+- **PDF report:** a "Standard Library Vulnerabilities" section on its own page,
+  before the vulnerability ID alias appendix, with the same per-vulnerability
+  lines as a dependency block.
+
+They are not scored: the scorer does not read standard-library
+vulnerabilities, so they do not change any risk score, the `summary` counts or
+the headline.
+
 ### Vulnerability identifiers in report output
 
 Human-facing output — text and PDF — identifies every advisory by its **Go
@@ -231,7 +298,8 @@ CVE and GHSA identifiers are not dropped — they are collected into one place:
 
 - **Text report:** a `VULNERABILITY ID ALIASES` section between the stdlib
   vulnerabilities and the summary.
-- **PDF report:** an "Appendix: Vulnerability ID Aliases" table.
+- **PDF report:** an "Appendix: Vulnerability ID Aliases" table, which also
+  covers standard-library advisories.
 
 Advisories with no aliases are omitted from both, and the section disappears
 entirely when nothing in the report has an alias.

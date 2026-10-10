@@ -26,6 +26,10 @@ type PDFOptions struct {
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
 	Takeovers       []*scanner.MaintainerInfo
+
+	// StdlibVulns are the standard library vulnerabilities, already sorted by
+	// the caller. They are listed in the order given.
+	StdlibVulns []scanner.Vulnerability
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
@@ -89,8 +93,13 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
+	if len(opts.StdlibVulns) > 0 {
+		rep.Step("standard library vulnerabilities section")
+		writeStdlibVulnSection(c, opts.StdlibVulns, helvetica, helveticaBold)
+	}
+
 	rep.Step("vulnerability ID appendix")
-	writeVulnAliasAppendix(c, ps, helvetica, helveticaBold)
+	writeVulnAliasAppendix(c, ps, opts.StdlibVulns, helvetica, helveticaBold)
 
 	rep.Step("methodology page")
 	writeMethodologyPage(c, helvetica, helveticaBold)
@@ -631,11 +640,8 @@ func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInf
 // govulncheck guarantees; this appendix is where a reader translates one into
 // the identifier their own tooling uses. Skipped when no advisory in the
 // report carries an alias.
-func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	// nil stdlib: PDFOptions carries no StdlibVulns, because the PDF has no
-	// stdlib-vulnerability section to alias in the first place (a text/PDF
-	// parity gap, tracked separately).
-	entries := collectVulnAliases(ps, nil)
+func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, stdlib []scanner.Vulnerability, regular, bold *model.PdfFont) {
+	entries := collectVulnAliases(ps, stdlib)
 	if len(entries) == 0 {
 		return
 	}
@@ -834,6 +840,65 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 	}
 }
 
+// addVulnBullets appends the bullet lines describing one vulnerability: its
+// ID, severity, reachability tag and threat-intel badges, the fix, the call
+// path and the vulnerable symbols called. withSummary adds the advisory
+// summary after the first line; dependency blocks omit it.
+func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, withSummary bool, font *model.PdfFont) {
+	// Append an inline reachability tag when the tier is not "called" (the
+	// most-severe tier).  Empty Reachability is treated as called for
+	// backward compatibility with non-govulncheck CVE sources.
+	reachTag := ""
+	switch v.Reachability {
+	case "imported", "required":
+		reachTag = fmt.Sprintf(" (%s)", v.Reachability)
+	}
+	ti := epssBadge(v)
+	if v.InKEV {
+		ti += " [KEV — exploited in the wild]"
+	}
+	addBullet(p, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), font)
+	if withSummary && v.Summary != "" {
+		addBullet(p, "  Summary: "+v.Summary, font)
+	}
+	if v.FixedVersion != "" {
+		addBullet(p, fmt.Sprintf("  Fix available: %s", v.FixedVersion), font)
+	}
+	// The ASCII separator is deliberate: see callPathSepPDF.
+	if via := reachedVia(v, callPathSepPDF); via != "" {
+		addBullet(p, "  Reached via: "+via, font)
+	}
+	if syms := calledSymbolsLine(v); syms != "" {
+		addBullet(p, "  Vulnerable symbols called: "+syms, font)
+	}
+}
+
+// writeStdlibVulnSection lists the vulnerabilities in the Go standard library
+// of the project's toolchain, in the order given. They are not part of any
+// dependency's risk score, so they get their own section rather than a
+// dependency block.
+func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, regular, bold *model.PdfFont) {
+	c.NewPage()
+	heading(c, "Standard Library Vulnerabilities", bold)
+
+	intro := c.NewStyledParagraph()
+	intro.SetMargins(0, 0, 5, 10)
+	ch := intro.Append("These affect the Go standard library used to build dependencies.")
+	ch.Style.Font = regular
+	ch.Style.FontSize = 10
+	_ = c.Draw(intro)
+
+	// One paragraph per vulnerability: the list can run to dozens of entries,
+	// which should not be a single paragraph spanning pages.
+	for i := range vulns {
+		details := c.NewStyledParagraph()
+		details.SetMargins(20, 0, 0, 6)
+		details.SetLineHeight(1.5)
+		addVulnBullets(details, &vulns[i], true, regular)
+		_ = c.Draw(details)
+	}
+}
+
 func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regular, bold *model.PdfFont, detailed bool) {
 	color := pdfRiskColor(ds.RiskLevel)
 
@@ -881,23 +946,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		return epssOrZero(&vulns[i]) > epssOrZero(&vulns[j])
 	})
 	for i := range vulns {
-		v := &vulns[i]
-		// Append an inline reachability tag when the tier is not "called" (the
-		// most-severe tier).  Empty Reachability is treated as called for
-		// backward compatibility with non-govulncheck CVE sources.
-		reachTag := ""
-		switch v.Reachability {
-		case "imported", "required":
-			reachTag = fmt.Sprintf(" (%s)", v.Reachability)
-		}
-		ti := epssBadge(v)
-		if v.InKEV {
-			ti += " [KEV — exploited in the wild]"
-		}
-		addBullet(details, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), regular)
-		if v.FixedVersion != "" {
-			addBullet(details, fmt.Sprintf("  Fix available: %s", v.FixedVersion), regular)
-		}
+		addVulnBullets(details, &vulns[i], false, regular)
 	}
 
 	// Maintenance.

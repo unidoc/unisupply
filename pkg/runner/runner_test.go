@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,4 +111,37 @@ func TestActivityFallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTakeStdlibVulns verifies the stdlib entry is removed from the map and
+// returned sorted by ID, and that its absence yields nil.
+func TestTakeStdlibVulns(t *testing.T) {
+	t.Run("sorted and removed", func(t *testing.T) {
+		vulns := map[string][]scanner.Vulnerability{
+			"stdlib":          {{ID: "GO-2026-0030"}, {ID: "GO-2026-0010"}, {ID: "GO-2026-0020"}},
+			"example.com/dep": {{ID: "GO-2026-0001"}},
+		}
+		got := takeStdlibVulns(vulns)
+
+		var ids []string
+		for _, v := range got {
+			ids = append(ids, v.ID)
+		}
+		if want := "GO-2026-0010,GO-2026-0020,GO-2026-0030"; strings.Join(ids, ",") != want {
+			t.Errorf("ids = %v, want %s", ids, want)
+		}
+		if _, ok := vulns["stdlib"]; ok {
+			t.Error("stdlib key still in the map")
+		}
+		if len(vulns["example.com/dep"]) != 1 {
+			t.Error("dependency entries must be untouched")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		vulns := map[string][]scanner.Vulnerability{"example.com/dep": {{ID: "GO-2026-0001"}}}
+		if got := takeStdlibVulns(vulns); got != nil {
+			t.Errorf("takeStdlibVulns() = %v, want nil", got)
+		}
+	})
 }

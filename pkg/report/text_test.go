@@ -945,3 +945,107 @@ func TestWriteDebugScoring_SeverityLabels(t *testing.T) {
 		t.Errorf("no [severity_unpublished] label in output:\n%s", out)
 	}
 }
+
+// renderDetailed renders one detailed dependency block holding vulns.
+func renderDetailed(vulns ...scanner.Vulnerability) string {
+	ds := &scorer.DependencyScore{
+		Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+		RiskScore: 80, RiskLevel: scorer.RiskCritical, Vulns: vulns,
+	}
+	var buf bytes.Buffer
+	writeDependencyDetail(&buf, ds, func(_, s string) string { return s }, true)
+	return buf.String()
+}
+
+// TestWriteDependencyDetail_ReachedVia verifies the call path lines under a
+// called finding: project position only, symbols line only for two or more
+// symbols, the cut marker, no output for imported findings, and the fallback
+// when a vulnerability has a path but no trace.
+func TestWriteDependencyDetail_ReachedVia(t *testing.T) {
+	const arrow = "  │  Reached via: example.com/u1repro.main (main.go:13) → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+
+	t.Run("issue 134 example", func(t *testing.T) {
+		v := issue134Vuln()
+		v.FixedVersion = "v0.52.0"
+		out := renderDetailed(v)
+		want := "  │  Fix available: v0.52.0\n" + arrow
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+		if strings.Contains(out, "keyring.go:149") {
+			t.Errorf("dependency position must not be shown in text:\n%s", out)
+		}
+		if strings.Contains(out, "Vulnerable symbols called") {
+			t.Errorf("one symbol must not print the symbols line:\n%s", out)
+		}
+	})
+
+	t.Run("two symbols", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+		out := renderDetailed(v)
+		want := arrow + "  │  Vulnerable symbols called: golang.org/x/crypto/ssh/agent.keyring.Add, golang.org/x/crypto/ssh/agent.keyring.Lock\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+
+	t.Run("cut path renders the marker", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CallPath = []string{"example.com/u1repro.main", "...", "golang.org/x/crypto/ssh/agent.keyring.Add"}
+		v.CallTrace = []scanner.CallFrame{v.CallTrace[0], {Elided: true}, v.CallTrace[1]}
+		out := renderDetailed(v)
+		want := "  │  Reached via: example.com/u1repro.main (main.go:13) → ... → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+
+	t.Run("imported prints no path", func(t *testing.T) {
+		v := issue134Vuln()
+		v.Reachability = "imported"
+		if out := renderDetailed(v); strings.Contains(out, "Reached via") {
+			t.Errorf("imported finding printed a path:\n%s", out)
+		}
+	})
+
+	t.Run("path without trace falls back to names", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CallTrace = nil
+		out := renderDetailed(v)
+		want := "  │  Reached via: example.com/u1repro.main → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+}
+
+// TestWriteText_StdlibReachedVia verifies the stdlib section prints the call
+// path and symbols for a called advisory and nothing extra for an imported one.
+func TestWriteText_StdlibReachedVia(t *testing.T) {
+	out := renderAliasReport(t, aliasReport(), stdlibTestVulns())
+
+	for _, want := range []string{
+		"STDLIB VULNERABILITIES (2 found)",
+		"    Fixed in: go1.26.3\n    Reached via: example.com/app.main (main.go:21) → net/http.ListenAndServe\n" +
+			"    Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// The imported advisory is the last entry; nothing may follow its summary
+	// line except the section's closing blank line.
+	idx := strings.Index(out, "GO-2026-4002 Parser panic in encoding/asn1")
+	if idx < 0 {
+		t.Fatalf("imported stdlib advisory missing:\n%s", out)
+	}
+	rest := out[idx:]
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	if strings.Contains(rest, "Reached via") || strings.Contains(rest, "Vulnerable symbols") {
+		t.Errorf("imported stdlib advisory must not print call evidence:\n%s", rest)
+	}
+}

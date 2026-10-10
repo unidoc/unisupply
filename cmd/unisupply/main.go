@@ -331,6 +331,7 @@ func run(cfg *runConfig) error {
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
 			Takeovers:       takeovers,
+			StdlibVulns:     stdlibVulns,
 		}, writer)
 	case "pdf":
 		err = report.WritePDF(ctx, graph, projectScore, report.PDFOptions{
@@ -339,6 +340,7 @@ func run(cfg *runConfig) error {
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
 			Takeovers:       takeovers,
+			StdlibVulns:     stdlibVulns,
 		})
 	case "sbom-cyclonedx":
 		err = report.WriteCycloneDX(graph, projectScore, sbomOpts, writer)
