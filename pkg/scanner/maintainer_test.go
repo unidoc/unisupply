@@ -1605,6 +1605,55 @@ func TestGitHubRateLimit_SetsUnavailableReason(t *testing.T) {
 	}
 }
 
+// TestGitHubRateLimit_StatusAndHeader pins which responses count as a rate
+// limit. GitHub answers some 429s (secondary limits) without
+// X-RateLimit-Remaining; those were reported as an API error and the
+// GITHUB_TOKEN hint never showed. A 403 without the header stays an API error:
+// it is a permission failure, not a limit.
+func TestGitHubRateLimit_StatusAndHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		remaining  string
+		wantReason string
+		wantHints  int64
+	}{
+		{name: "429 without header", status: http.StatusTooManyRequests, wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "429 with remaining 0", status: http.StatusTooManyRequests, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "429 with remaining left", status: http.StatusTooManyRequests, remaining: "12", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "403 with remaining 0", status: http.StatusForbidden, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "403 without header", status: http.StatusForbidden, wantReason: UnavailableAPIError},
+		{name: "403 with remaining left", status: http.StatusForbidden, remaining: "12", wantReason: UnavailableAPIError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.remaining != "" {
+					w.Header().Set("X-RateLimit-Remaining", tc.remaining)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			var hints int64
+			ctx := progress.WithReporter(context.Background(), &countingReporter{match: "set GITHUB_TOKEN", count: &hints})
+
+			ms := newTestMaintainerScanner(srv.URL)
+			info := ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+			if info.DataAvailable {
+				t.Fatal("expected DataAvailable=false")
+			}
+			if info.UnavailableReason != tc.wantReason {
+				t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, tc.wantReason)
+			}
+			if hints != tc.wantHints {
+				t.Errorf("GITHUB_TOKEN hints = %d, want %d", hints, tc.wantHints)
+			}
+		})
+	}
+}
+
 func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 	resetAt := time.Now().Add(5 * time.Minute).Unix()
 
@@ -1635,27 +1684,35 @@ func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 	}
 }
 
-// TestGitHubRateLimit_HintNamesRejectedToken verifies that the rate-limit
-// warning does not tell the user to set GITHUB_TOKEN when they did set one and
-// GitHub rejected it, which is the only reason the scan is unauthenticated.
-func TestGitHubRateLimit_HintNamesRejectedToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-RateLimit-Remaining", "0")
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer srv.Close()
-
+// TestGitHubRateLimit_HintMatchesTokenState verifies that the rate-limit
+// warning tells the user to set GITHUB_TOKEN only when no token was used: not
+// when GitHub rejected the token (the scan then ran unauthenticated), and not
+// when the token was used (its quota or a secondary limit was hit, typically a
+// 429 without X-RateLimit-Remaining).
+func TestGitHubRateLimit_HintMatchesTokenState(t *testing.T) {
 	tests := []struct {
 		name          string
+		status        int
+		token         string
 		tokenRejected bool
 		want          string
 		notWant       string
 	}{
-		{name: "no token", want: "set GITHUB_TOKEN", notWant: "rejected"},
-		{name: "rejected token", tokenRejected: true, want: "token was rejected (401)", notWant: "set GITHUB_TOKEN"},
+		{name: "no token", status: http.StatusForbidden, want: "set GITHUB_TOKEN", notWant: "rejected"},
+		{name: "rejected token", status: http.StatusForbidden, tokenRejected: true, want: "token was rejected (401)", notWant: "set GITHUB_TOKEN"},
+		{name: "token in use, 403", status: http.StatusForbidden, token: "t", want: "requests were authenticated", notWant: "set GITHUB_TOKEN"},
+		{name: "token in use, 429", status: http.StatusTooManyRequests, token: "t", want: "secondary rate limit", notWant: "set GITHUB_TOKEN"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.status == http.StatusForbidden {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
 			var wantCount, notWantCount int64
 			ctx := progress.WithReporter(context.Background(), multiReporter{
 				&countingReporter{match: tc.want, count: &wantCount},
@@ -1663,6 +1720,7 @@ func TestGitHubRateLimit_HintNamesRejectedToken(t *testing.T) {
 			})
 
 			ms := newTestMaintainerScanner(srv.URL)
+			ms.token = tc.token
 			ms.TokenRejected = tc.tokenRejected
 			ms.analyzeRepo(ctx, "someowner", "somerepo")
 
