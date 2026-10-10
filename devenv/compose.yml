@@ -11,7 +11,7 @@ services:
       context: .
       args:
         CRONTAB_URL_DEPS: ${CRONTAB_URL_DEPS:-https://go.dev/dl}
-        GO_DL: ${GO_DL:-go1.26.8.linux-amd64.tar.gz}
+        GO_DL: ${GO_DL:-go1.26.9.linux-amd64.tar.gz}
     container_name: unisupply-dev
     hostname: unisupply-dev
     stdin_open: true
