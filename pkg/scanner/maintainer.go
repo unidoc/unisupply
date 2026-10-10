@@ -21,7 +21,7 @@ import (
 )
 
 // errRateLimited is returned by githubGet when the GitHub API rate limit is
-// exhausted (X-RateLimit-Remaining: 0 on a 403 or 429 response).
+// exhausted: any 429 response, or a 403 with X-RateLimit-Remaining: 0.
 var errRateLimited = errors.New("github rate limit exceeded")
 
 // Values of MaintainerInfo.UnavailableReason.
@@ -328,8 +328,13 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
-			if ms.TokenRejected {
+			switch {
+			case ms.TokenRejected:
 				hint = "the GitHub token was rejected (401), so requests ran unauthenticated"
+			case ms.token != "":
+				// Authenticated requests still hit the token's quota or a
+				// secondary limit (a 429); asking for a token would not help.
+				hint = "requests were authenticated, so the token's quota or a secondary rate limit was reached; wait and re-run"
 			}
 			ms.rateLimitWarnOnce.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
@@ -554,8 +559,11 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
-			resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		// A 429 is always a rate limit: GitHub also sends it without
+		// X-RateLimit-Remaining (a secondary limit). A 403 is one only
+		// when the remaining count says so; otherwise it is a permission error.
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
 			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 				resetAt := time.Unix(resetUnix, 0).UTC()
 				untilReset := time.Until(resetAt).Round(time.Second)

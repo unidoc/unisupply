@@ -273,6 +273,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   GitHub API had returned errors.** The warning now says "GitHub API error" (or
   "rate-limited or errored" when both happened), so a user who did set a token
   is not sent after a fix that cannot work.
+- **A GitHub 429 without `X-RateLimit-Remaining: 0` was reported as an API
+  error.** GitHub sends some 429s, such as secondary rate limits, without that
+  header. The maintainer scanner counted a 429 as a rate limit only when the
+  header said `0`, so those responses were reported as "GitHub API error" and
+  the `GITHUB_TOKEN` hint never appeared. Any 429 now counts as rate-limited. A
+  403 still counts only with `X-RateLimit-Remaining: 0`; without it, a 403 is a
+  permission error. When a token was used, the rate-limit warning no longer
+  asks for `GITHUB_TOKEN`; it says the token's quota or a secondary rate limit
+  was reached.
 
 ## [0.6.0] - 2026-09-29
 

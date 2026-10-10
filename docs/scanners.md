@@ -669,6 +669,17 @@ show an `outside build` label next to `test-only` under the same rule.
   in no list: `go tool` builds the tool separately, and nothing of it is linked
   into the main module. It is reported as `in_build: false` like any other
   graph-only module, so the outside-the-build exemptions below apply to it.
+- **`tools.go` files.** The older way to pin a tool is a file behind
+  `//go:build tools` that blank-imports the tool's package. That import makes
+  the tool a direct requirement in `go.mod`, but the `tools` tag is never set,
+  so no list contains it. The build-tag guard above therefore applies: the tool
+  and every module reachable from it in the module graph are left unknown and
+  counted as built. For a large tool such as a linter, that is its whole
+  dependency tree, and those modules can then raise the headline. This errs
+  toward counting too much, never too little. Declaring the same tool with a go
+  1.24 `tool` directive instead gets `in_build: false` for its modules. A
+  package-level refinement that would narrow this is tracked in
+  [#139](https://github.com/unidoc/unisupply/issues/139).
 - **Platforms.** Only `linux`, `darwin` and `windows` on `amd64` and `arm64`
   are listed. A module imported only on another GOOS (`freebsd`, `js`, ...) or
   another architecture (`386`, `riscv64`, ...) is not seen.
