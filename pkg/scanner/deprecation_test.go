@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -120,5 +121,54 @@ func TestMaintenanceScanner_GoModFetchFailureIsNotDeprecation(t *testing.T) {
 	}
 	if info.Deprecated || info.DeprecationMessage != "" {
 		t.Errorf("Deprecated = %v (%q), want false on a failed go.mod fetch", info.Deprecated, info.DeprecationMessage)
+	}
+}
+
+// The go.mod of a version never changes, so a fetched one is kept on disk and
+// a rerun reads it from there. A failed fetch is not cached.
+func TestMaintenanceScanner_GoModDiskCache(t *testing.T) {
+	var modRequests atomic.Int64
+	var fail atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/github.com/golang/protobuf/@v/v1.5.4.mod" {
+			modRequests.Add(1)
+			if fail.Load() {
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprint(w, protobufGoMod)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	check := func() *MaintenanceInfo {
+		ms := NewMaintenanceScanner(5 * time.Second)
+		ms.proxyURL = srv.URL
+		ms.diskCache = newMaintainerCache(dir, time.Hour)
+		info := &MaintenanceInfo{}
+		ms.checkGoModDeprecation(context.Background(), "github.com/golang/protobuf", "v1.5.4", info)
+		return info
+	}
+
+	if info := check(); !info.Deprecated {
+		t.Fatal("first check: not deprecated, want the v1.5.4 notice")
+	}
+	if info := check(); !info.Deprecated {
+		t.Error("second check: not deprecated, want the notice from the cache")
+	}
+	if n := modRequests.Load(); n != 1 {
+		t.Errorf("go.mod requested %d times, want once: the second check reads the cache", n)
+	}
+
+	fail.Store(true)
+	modRequests.Store(0)
+	dir = t.TempDir()
+	check()
+	check()
+	if n := modRequests.Load(); n != 2 {
+		t.Errorf("go.mod requested %d times after failures, want 2: a failed fetch is not cached", n)
 	}
 }

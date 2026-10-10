@@ -373,7 +373,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
 		if ds.Maintenance.Deprecated {
-			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated%s\n", deprecationSuffix(ds.Maintenance.DeprecationMessage))
+			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated%s\n", deprecationSuffix(ds.Maintenance.DeprecationNotice()))
 		}
 	}
 
@@ -405,9 +405,10 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  ├─ License: %s\n", mi.License)
 		}
 
-		// Activity.
+		// Activity. LastCommitDate is GitHub's pushed_at, which moves on a push
+		// to any branch; the scored date is the maintenance "Last commit" line.
 		if !mi.LastCommitDate.IsZero() {
-			fmt.Fprintf(w, "  ├─ Last commit: %s (%s)\n",
+			fmt.Fprintf(w, "  ├─ Last push (any branch): %s (%s)\n",
 				mi.LastCommitDate.Format("2006-01-02"), mi.ActivityPattern)
 		} else if mi.ActivityPattern != "" && mi.ActivityPattern != "unknown" {
 			fmt.Fprintf(w, "  ├─ Activity: %s\n", mi.ActivityPattern)
@@ -787,7 +788,11 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
 		case ds.Maintenance.Deprecated:
-			reasons = append(reasons, "module is deprecated by its maintainers — move to the successor"+deprecationSuffix(ds.Maintenance.DeprecationMessage))
+			if msg := ds.Maintenance.DeprecationNotice(); msg != "" {
+				reasons = append(reasons, "module is deprecated by its maintainers: "+msg)
+			} else {
+				reasons = append(reasons, "module is deprecated by its maintainers — plan to move off it")
+			}
 		case ds.Maintenance.MonthsInactive() >= 24:
 			if ds.Maintenance.HasActivity() {
 				reasons = append(reasons, fmt.Sprintf("no release in %d months and no default-branch commit in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))

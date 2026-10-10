@@ -139,8 +139,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   when the proxy query fails. GitHub's `pushed_at` is not used: it moves on
   pushes to any branch, Dependabot's included. The JSON `maintenance` object
   gains `last_activity`, `months_since_activity`, `activity_source` and
-  `activity_branch`, and the text and PDF reports show "Last commit". Without
-  activity data the release age alone is used, as before.
+  `activity_branch`, and the text and PDF reports show "Last commit". The text
+  report's maintainer section now labels its `pushed_at` date "Last push (any
+  branch)". Without activity data the release age alone is used, as before.
+  Branch queries time out after 10 seconds, and resolved branches and the
+  `go.mod` files read for deprecation are cached on disk for 24 hours.
 - **`no_unmaintained_months` is more lenient for repositories with recent
   default-branch commits:** a dependency passes when it was released or
   committed to within the limit, and the violation names both ages.

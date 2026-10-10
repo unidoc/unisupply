@@ -79,6 +79,17 @@ func (m *MaintenanceInfo) HasActivity() bool {
 	return m != nil && !m.LastActivity.IsZero()
 }
 
+// DeprecationNotice returns DeprecationMessage on one line, for display. The
+// Go reference lets a notice run over several comment lines, which modfile
+// joins with newlines; those would break a report line or a policy violation.
+// JSON keeps the raw message.
+func (m *MaintenanceInfo) DeprecationNotice() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(m.DeprecationMessage), " ")
+}
+
 // MonthsInactive returns the months since the module last showed signs of
 // maintenance: the smaller of MonthsSinceRelease and MonthsSinceActivity when
 // activity is known, otherwise MonthsSinceRelease alone. A repository whose
@@ -103,6 +114,17 @@ type MaintenanceScanner struct {
 	cache    map[string]*MaintenanceInfo
 	mu       sync.Mutex
 
+	// diskCache keeps the branch and go.mod answers across scans for a day,
+	// like the GitHub responses: a rerun does not pay again for a cold
+	// monorepo fetch, and a go.mod at a fixed version never changes. Nil
+	// disables it.
+	diskCache *maintainerCache
+
+	// branchTimeout bounds one default-branch query (see ScanActivity); the
+	// client timeout still applies when it is shorter. Zero leaves only the
+	// client timeout.
+	branchTimeout time.Duration
+
 	// ScanStart is the reference time used for MonthsSinceRelease calculations.
 	// Truncated to the start of a UTC day so that two scans on the same calendar
 	// day produce identical band results. Defaults to
@@ -113,10 +135,29 @@ type MaintenanceScanner struct {
 // NewMaintenanceScanner creates a new maintenance health scanner.
 func NewMaintenanceScanner(timeout time.Duration) *MaintenanceScanner {
 	return &MaintenanceScanner{
-		client:    NewClient(ClientOptions{Timeout: timeout}),
-		proxyURL:  "https://proxy.golang.org",
-		cache:     make(map[string]*MaintenanceInfo),
-		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
+		client:        NewClient(ClientOptions{Timeout: timeout}),
+		proxyURL:      "https://proxy.golang.org",
+		cache:         make(map[string]*MaintenanceInfo),
+		diskCache:     newMaintainerCache(defaultCacheDir("proxy"), 0), // OS cache dir, 24h TTL
+		branchTimeout: defaultBranchQueryTimeout,
+		ScanStart:     time.Now().UTC().Truncate(24 * time.Hour),
+	}
+}
+
+// cachedProxyBody returns a fresh disk-cached body for url, if there is one.
+func (ms *MaintenanceScanner) cachedProxyBody(url string) ([]byte, bool) {
+	if ms.diskCache == nil {
+		return nil, false
+	}
+	body, hit, err := ms.diskCache.Get(url)
+	return body, err == nil && hit
+}
+
+// putProxyBody stores a 200 body for url in the disk cache. A failed write
+// only costs the next scan a request.
+func (ms *MaintenanceScanner) putProxyBody(url string, body []byte) {
+	if ms.diskCache != nil {
+		_ = ms.diskCache.Put(url, body)
 	}
 }
 
@@ -301,16 +342,23 @@ func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath stri
 // its module directive, the way `go list -m -u` and `go get` report it. The
 // Go modules reference reads deprecation from the latest version's go.mod, so
 // a notice in an older version does not count, and a comment elsewhere in the
-// file is not a deprecation. A failed fetch or an unparsable go.mod leaves
+// file is not a deprecation. The go.mod of a version never changes, so a
+// fetched one is kept in the disk cache. A failed fetch or an unparsable go.mod leaves
 // info unchanged: no deprecation is reported rather than a wrong one.
 func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath, version string, info *MaintenanceInfo) {
 	url := fmt.Sprintf("%s/%s/@v/%s.mod", ms.proxyURL, encodeModulePath(modPath), encodeModulePath(version))
-	body, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host:    proxyHost(ms.proxyURL),
-		Purpose: "maintenance:go-mod",
-	})
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return
+	body, hit := ms.cachedProxyBody(url)
+	if !hit {
+		var resp *http.Response
+		var err error
+		body, resp, err = ms.client.Get(ctx, url, GetOptions{
+			Host:    proxyHost(ms.proxyURL),
+			Purpose: "maintenance:go-mod",
+		})
+		if err != nil || resp.StatusCode != http.StatusOK {
+			return
+		}
+		ms.putProxyBody(url, body)
 	}
 	if msg := goModDeprecation(body); msg != "" {
 		info.Deprecated = true

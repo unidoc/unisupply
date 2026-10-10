@@ -83,6 +83,13 @@ func TestEvaluate_NoDeprecated_Message(t *testing.T) {
 		t.Errorf("violations = %v, want the deprecation message in the detail", result.Violations)
 	}
 
+	// A notice over several go.mod comment lines stays on one line.
+	dep.Maintenance.DeprecationMessage = "Use the \"google.golang.org/protobuf\"\nmodule instead."
+	result = p.Evaluate(makeEvalInput([]*scorer.DependencyScore{dep}, 20))
+	if len(result.Violations) != 1 || result.Violations[0].Detail != `module is deprecated: Use the "google.golang.org/protobuf" module instead.` {
+		t.Errorf("violations = %v, want a multi-line message joined on one line", result.Violations)
+	}
+
 	dep.Maintenance.DeprecationMessage = ""
 	result = p.Evaluate(makeEvalInput([]*scorer.DependencyScore{dep}, 20))
 	if len(result.Violations) != 1 || result.Violations[0].Detail != "module is deprecated" {

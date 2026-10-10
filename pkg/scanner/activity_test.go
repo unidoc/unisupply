@@ -21,11 +21,13 @@ import (
 var activityScanStart = time.Date(2026, time.October, 9, 0, 0, 0, 0, time.UTC)
 
 // fakeProxy answers branch queries from a map of request path to status and
-// commit time, and records every path requested. Unlisted paths are 404.
+// commit time, and records every path requested. Unlisted paths are 404. A 404
+// or 410 carries the proxy's "unknown revision" body unless bodies overrides it.
 type fakeProxy struct {
 	*httptest.Server
 	mu       sync.Mutex
 	answers  map[string]proxyAnswer
+	bodies   map[string]string
 	requests []string
 }
 
@@ -34,25 +36,43 @@ type proxyAnswer struct {
 	time   time.Time
 }
 
+// proxyFetchTimedOut is the body proxy.golang.org sends, with a 404, when its
+// own fetch of the repository timed out (recorded on a cold aws-sdk-go-v2
+// submodule). It says nothing about whether the branch exists.
+const proxyFetchTimedOut = "not found: fetch timed out"
+
 func newFakeProxy(t *testing.T, answers map[string]proxyAnswer) *fakeProxy {
 	t.Helper()
-	p := &fakeProxy{answers: answers}
+	p := &fakeProxy{answers: answers, bodies: map[string]string{}}
 	p.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		p.requests = append(p.requests, r.URL.Path)
 		a, ok := p.answers[r.URL.Path]
+		body, hasBody := p.bodies[r.URL.Path]
 		p.mu.Unlock()
 		if !ok {
-			http.NotFound(w, r)
-			return
+			a.status = http.StatusNotFound
 		}
 		w.WriteHeader(a.status)
-		if a.status == http.StatusOK {
+		switch {
+		case hasBody:
+			fmt.Fprint(w, body)
+		case a.status == http.StatusOK:
 			fmt.Fprintf(w, `{"Version":"v0.0.0-x","Time":%q}`, a.time.Format(time.RFC3339))
+		case a.status == http.StatusNotFound || a.status == http.StatusGone:
+			// The proxy's answer for a branch that does not exist.
+			rev := strings.TrimSuffix(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:], ".info")
+			fmt.Fprintf(w, "not found: %s@%s: invalid version: unknown revision %s", actMod, rev, rev)
 		}
 	}))
 	t.Cleanup(p.Close)
 	return p
+}
+
+func (p *fakeProxy) setBody(path, body string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.bodies[path] = body
 }
 
 func (p *fakeProxy) requested() []string {
@@ -82,6 +102,7 @@ func newActivityScanner(p *fakeProxy) *MaintenanceScanner {
 	ms := NewMaintenanceScanner(5 * time.Second)
 	ms.proxyURL = p.URL
 	ms.ScanStart = activityScanStart
+	ms.diskCache = nil
 	return ms
 }
 
@@ -204,6 +225,137 @@ func TestScanActivity_TransientFailureWithoutFallbackIsCounted(t *testing.T) {
 	fb := &fakeCommits{err: errors.New("rate limited")}
 	if err := newActivityScanner(p).ScanActivity(context.Background(), actGraph(), maint, nil, fb); err == nil {
 		t.Error("ScanActivity = nil, want a failure when the fallback fails as well")
+	}
+}
+
+// The proxy answers a fetch it gave up on with a 404 too, and keeps serving
+// that answer for a while. It says nothing about the branch: reading it as "no
+// such branch" skipped the fallback, warned about nothing, and fell through to
+// a years-stale master (aws-sdk-go-v2 read as 70 months inactive).
+func TestScanActivity_FetchTimedOutIsTransient(t *testing.T) {
+	p := newFakeProxy(t, map[string]proxyAnswer{
+		"/github.com/acme/widget/@v/main.info":   {http.StatusNotFound, time.Time{}},
+		"/github.com/acme/widget/@v/master.info": {http.StatusOK, monthsBefore(70)},
+	})
+	p.setBody("/github.com/acme/widget/@v/main.info", proxyFetchTimedOut)
+
+	fb := &fakeCommits{t: monthsBefore(1)}
+	maint := map[string]*MaintenanceInfo{actMod: {MonthsSinceRelease: 30}}
+	if err := newActivityScanner(p).ScanActivity(context.Background(), actGraph(), maint, nil, fb); err != nil {
+		t.Fatalf("ScanActivity: %v", err)
+	}
+	if got := maint[actMod]; got.ActivitySource != ActivityViaGitHub || got.MonthsSinceActivity != 1 {
+		t.Errorf("activity = %s/%s %d months, want github_commits 1", got.ActivitySource, got.ActivityBranch, got.MonthsSinceActivity)
+	}
+	if slices.Contains(p.requested(), "/github.com/acme/widget/@v/master.info") {
+		t.Error("master queried after a timed-out fetch of main; the answer for main is unknown, not absent")
+	}
+
+	// Without a fallback it is a counted failure, not a quiet unknown.
+	maint = map[string]*MaintenanceInfo{actMod: {MonthsSinceRelease: 30}}
+	err := newActivityScanner(p).ScanActivity(context.Background(), actGraph(), maint, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "1 of 1") {
+		t.Errorf("ScanActivity = %v, want a failure count of 1 of 1", err)
+	}
+	if maint[actMod].HasActivity() {
+		t.Errorf("activity set to %s %v, want unknown", maint[actMod].ActivityBranch, maint[actMod].LastActivity)
+	}
+}
+
+func TestIsDefinitiveNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		// Recorded from proxy.golang.org.
+		{"not found: github.com/hashicorp/go-multierror@nosuchbranch: invalid version: unknown revision nosuchbranch", true},
+		{`not found: github.com/go-chi/chi/v4@v4.1.3-0.20260929233827-167e1e3bd039: invalid version: go.mod has non-.../v4 module path "github.com/go-chi/chi/v5" (and .../v4/go.mod does not exist) at revision 167e1e3bd039`, true},
+		{"not found: github.com/nosuch/repo@main: invalid version: git ls-remote -q --end-of-options https://github.com/nosuch/repo in /tmp/gopath/pkg/mod/cache/vcs/x: exit status 128", true},
+		{proxyFetchTimedOut, false},
+		{"", false},
+		{"404 page not found", false},
+	} {
+		if got := isDefinitiveNotFound([]byte(tc.body)); got != tc.want {
+			t.Errorf("isDefinitiveNotFound(%q) = %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// A branch query has a short timeout of its own: a cold monorepo submodule
+// would otherwise hold the scan for the full client timeout. Cut short, it is
+// transient, so the fallback still answers.
+func TestScanActivity_BranchQueryTimeout(t *testing.T) {
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(release) })
+
+	ms := NewMaintenanceScanner(5 * time.Second)
+	ms.proxyURL = slow.URL
+	ms.ScanStart = activityScanStart
+	ms.diskCache = nil
+	ms.branchTimeout = 50 * time.Millisecond
+
+	fb := &fakeCommits{t: monthsBefore(2)}
+	maint := map[string]*MaintenanceInfo{actMod: {MonthsSinceRelease: 30}}
+	start := time.Now()
+	if err := ms.ScanActivity(context.Background(), actGraph(), maint, nil, fb); err != nil {
+		t.Fatalf("ScanActivity: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("ScanActivity took %v, want the branch timeout (50ms) to cut the query short, not the client timeout (5s)", elapsed)
+	}
+	if got := maint[actMod]; got.ActivitySource != ActivityViaGitHub || got.MonthsSinceActivity != 2 {
+		t.Errorf("activity = %s %d months, want github_commits 2 after a timed-out query", got.ActivitySource, got.MonthsSinceActivity)
+	}
+}
+
+// A resolved branch is kept on disk, so a rerun within the day makes no
+// request for it. Anything else is asked again.
+func TestScanActivity_DiskCache(t *testing.T) {
+	p := newFakeProxy(t, map[string]proxyAnswer{
+		"/github.com/acme/widget/@v/main.info": {http.StatusOK, monthsBefore(6)},
+	})
+	dir := t.TempDir()
+	scan := func() *MaintenanceInfo {
+		t.Helper()
+		ms := newActivityScanner(p)
+		ms.diskCache = newMaintainerCache(dir, time.Hour)
+		maint := map[string]*MaintenanceInfo{actMod: {MonthsSinceRelease: 30}}
+		if err := ms.ScanActivity(context.Background(), actGraph(), maint, nil, nil); err != nil {
+			t.Fatalf("ScanActivity: %v", err)
+		}
+		return maint[actMod]
+	}
+
+	if got := scan(); got.ActivityBranch != "main" || got.MonthsSinceActivity != 6 {
+		t.Fatalf("first scan: activity = %s %d months, want main 6", got.ActivityBranch, got.MonthsSinceActivity)
+	}
+	if got := scan(); got.ActivityBranch != "main" || got.MonthsSinceActivity != 6 {
+		t.Errorf("second scan: activity = %s %d months, want main 6 from the cache", got.ActivityBranch, got.MonthsSinceActivity)
+	}
+	if reqs := p.requested(); len(reqs) != 1 {
+		t.Errorf("requests = %v, want one: the second scan reads the cache", reqs)
+	}
+
+	// A branch that did not resolve is not cached.
+	p = newFakeProxy(t, map[string]proxyAnswer{
+		"/github.com/acme/widget/@v/master.info": {http.StatusOK, monthsBefore(3)},
+	})
+	dir = t.TempDir()
+	scan()
+	scan()
+	want := []string{
+		"/github.com/acme/widget/@v/main.info", "/github.com/acme/widget/@v/master.info", // first scan
+		"/github.com/acme/widget/@v/main.info", // second scan: master comes from the cache
+	}
+	if reqs := p.requested(); !slices.Equal(reqs, want) {
+		t.Errorf("requests = %v, want %v", reqs, want)
 	}
 }
 

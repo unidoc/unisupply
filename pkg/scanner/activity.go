@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,9 +41,30 @@ type branchOutcome int
 
 const (
 	branchFound     branchOutcome = iota // the proxy resolved the branch
-	branchNotFound                       // 404 or 410: no such branch for this module
+	branchNotFound                       // a definitive 404 or 410: no such branch for this module
 	branchTransient                      // any other failure: the answer is unknown
 )
+
+// defaultBranchQueryTimeout bounds one branch query. A warm answer takes well
+// under a second, but a cold fetch of a large repository (a monorepo submodule
+// such as aws-sdk-go-v2/service/s3) can run until the proxy gives up after
+// about a minute. Waiting for that costs the scan the full client timeout per
+// module for a date the release usually already covers; a query cut short is
+// transient, so the GitHub fallback or the warning still accounts for it.
+const defaultBranchQueryTimeout = 10 * time.Second
+
+// proxyNotFoundMarkers are the substrings of a proxy 404 or 410 body that make
+// it a definitive "no such branch for this module": the revision does not
+// exist (`invalid version: unknown revision main`), or it exists but does not
+// hold this module (`invalid version: go.mod has non-.../v4 module path`). The
+// proxy also answers a fetch it gave up on with a 404 (`not found: fetch timed
+// out`), and caches that answer for a while; that one says nothing about the
+// branch and must stay transient. No 410 body has been observed for a branch
+// query; a 410 is held to the same rule. The rule is broad in one place: a
+// repository the proxy cannot list answers `invalid version: git ls-remote
+// ... exit status 128` whether it does not exist or the host failed during the
+// proxy's fetch, and the body does not tell them apart.
+var proxyNotFoundMarkers = []string{"unknown revision", "invalid version:"}
 
 // ScanActivity sets LastActivity, MonthsSinceActivity, ActivitySource and
 // ActivityBranch on each entry of maintenance from the head commit of the
@@ -57,11 +79,14 @@ const (
 // it, otherwise main, then master. The `HEAD` query is deliberately not used:
 // the proxy can serve it stale by months.
 //
-// When the proxy answers a branch query with a failure other than 404 or 410
-// (a timeout, a 5xx), fallback is asked instead, if it is non-nil. A 404 or
-// 410 on every candidate leaves activity unknown without a fallback: for a
-// module such as foo/v2 whose default branch has moved to v3, the repository's
-// latest commit would describe a different module.
+// A 404 or 410 whose body says the revision is unknown or does not hold the
+// module is "no such branch". On every candidate, that leaves activity unknown
+// without a fallback: for a module such as foo/v2 whose default branch has
+// moved to v3, the repository's latest commit would describe a different
+// module. Any other failure (a timeout, a 5xx, the proxy's own `fetch timed
+// out` 404) is transient, and fallback is asked instead, if it is non-nil.
+// Each query is bounded by a short timeout of its own, and a successful answer
+// is kept in the on-disk response cache for a day.
 //
 // Modules without a maintenance entry (the proxy lookup failed, so the axis is
 // unmeasured) and archived modules (whose score does not depend on activity)
@@ -170,9 +195,21 @@ func usableBranchQuery(branch string) bool {
 }
 
 // fetchBranchTime asks the module proxy for `<module>/@v/<branch>.info` and
-// returns the commit time of the branch head.
+// returns the commit time of the branch head. A fresh answer in the disk cache
+// is used without a request; only a resolved branch is cached.
 func (ms *MaintenanceScanner) fetchBranchTime(ctx context.Context, modPath, branch string) (time.Time, branchOutcome) {
 	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, encodeModulePath(modPath), encodeModulePath(branch))
+	if body, hit := ms.cachedProxyBody(url); hit {
+		if t, ok := parseBranchTime(body); ok {
+			return t, branchFound
+		}
+	}
+
+	if ms.branchTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, ms.branchTimeout)
+		defer cancel()
+	}
 	body, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host:    proxyHost(ms.proxyURL),
 		Purpose: "maintenance:branch-info",
@@ -186,13 +223,38 @@ func (ms *MaintenanceScanner) fetchBranchTime(ctx context.Context, modPath, bran
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound, http.StatusGone:
-		return time.Time{}, branchNotFound
+		if isDefinitiveNotFound(body) {
+			return time.Time{}, branchNotFound
+		}
+		return time.Time{}, branchTransient
 	default:
 		return time.Time{}, branchTransient
 	}
-	var v proxyVersionInfo
-	if err := json.Unmarshal(body, &v); err != nil || v.Time.IsZero() {
+	t, ok := parseBranchTime(body)
+	if !ok {
 		return time.Time{}, branchTransient
 	}
-	return v.Time, branchFound
+	ms.putProxyBody(url, body)
+	return t, branchFound
+}
+
+// parseBranchTime reads the commit time from a proxy `.info` answer.
+func parseBranchTime(body []byte) (time.Time, bool) {
+	var v proxyVersionInfo
+	if err := json.Unmarshal(body, &v); err != nil || v.Time.IsZero() {
+		return time.Time{}, false
+	}
+	return v.Time, true
+}
+
+// isDefinitiveNotFound reports whether a proxy 404 or 410 body says the branch
+// does not exist for the module, rather than that the proxy failed to find out.
+func isDefinitiveNotFound(body []byte) bool {
+	text := string(body)
+	for _, marker := range proxyNotFoundMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }

@@ -281,13 +281,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Done("")
 
 	// Activity reads the default branch the maintainer scan found, so it runs
-	// after it. The GitHub commits fallback is offered only with a token: the
-	// unauthenticated quota belongs to the maintainer scan.
+	// after it.
 	rep.Stage("Checking default-branch activity")
-	var commitFallback scanner.CommitLookup
-	if githubToken != "" && !offlineMode {
-		commitFallback = maintainerScanner
-	}
+	commitFallback := activityFallback(githubToken, offlineMode, maintainerScanner)
 	if err := maintScanner.ScanActivity(ctx, graph, maintenance, maintainers, commitFallback); err != nil {
 		maintWarnings = append(maintWarnings, err.Error())
 		rep.Warn("%v", err)
@@ -420,6 +416,16 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Maintainers:         maintainers,
 		Typosquats:          typosquats,
 	}, nil
+}
+
+// activityFallback returns the GitHub commits lookup the activity scan may ask
+// when the module proxy cannot answer. It is offered only with a token, since
+// the unauthenticated quota belongs to the maintainer scan, and never offline.
+func activityFallback(githubToken string, offlineMode bool, maintainers *scanner.MaintainerScanner) scanner.CommitLookup {
+	if githubToken == "" || offlineMode {
+		return nil
+	}
+	return maintainers
 }
 
 // vulnScanFailure reports whether a ScanVulns outcome means the vulnerability

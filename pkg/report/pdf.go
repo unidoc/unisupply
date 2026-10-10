@@ -912,7 +912,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 			addBullet(details, "Repository archived", regular)
 		}
 		if ds.Maintenance.Deprecated {
-			addBullet(details, "Module deprecated"+deprecationSuffix(ds.Maintenance.DeprecationMessage), regular)
+			addBullet(details, "Module deprecated"+deprecationSuffix(ds.Maintenance.DeprecationNotice()), regular)
 		}
 	}
 

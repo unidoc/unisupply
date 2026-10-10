@@ -118,9 +118,30 @@ func TestWriteDependencyDetail_ActivityAndDeprecation(t *testing.T) {
 	if out := render(ds); !strings.Contains(out, "Module deprecated: Use example.com/new instead.") {
 		t.Errorf("deprecation line lacks the message:\n%s", out)
 	}
+	ds.Maintenance.DeprecationMessage = "Use example.com/new\ninstead."
+	if out := render(ds); !strings.Contains(out, "Module deprecated: Use example.com/new instead.\n") {
+		t.Errorf("multi-line deprecation message not joined on one line:\n%s", out)
+	}
 	ds.Maintenance.DeprecationMessage = ""
 	if out := render(ds); !strings.Contains(out, "Module deprecated\n") {
 		t.Errorf("plain deprecation line missing:\n%s", out)
+	}
+
+	// The maintainer section's date is GitHub's pushed_at, which moves on a
+	// push to any branch; it must not share the scored "Last commit" label.
+	ds = activityScore(40, 6)
+	ds.MaintainerInfo = &scanner.MaintainerInfo{
+		DataAvailable:   true,
+		Owner:           "example",
+		LastCommitDate:  time.Date(2026, time.October, 7, 0, 0, 0, 0, time.UTC),
+		ActivityPattern: "active",
+	}
+	out := render(ds)
+	if !strings.Contains(out, "Last push (any branch): 2026-10-07 (active)") {
+		t.Errorf("maintainer pushed_at line not labelled as a push:\n%s", out)
+	}
+	if n := strings.Count(out, "Last commit"); n != 1 {
+		t.Errorf("%d \"Last commit\" lines, want only the default-branch one:\n%s", n, out)
 	}
 }
 
@@ -150,7 +171,12 @@ func TestDepExplanation_ActivityAndDeprecation(t *testing.T) {
 	ds := activityScore(31, 0)
 	ds.Maintenance.Deprecated = true
 	ds.Maintenance.DeprecationMessage = "Use example.com/new instead."
-	if got := depExplanation(ds); !strings.Contains(got, "deprecated by its maintainers") || !strings.Contains(got, "Use example.com/new instead.") {
+	if got := depExplanation(ds); !strings.Contains(got, "module is deprecated by its maintainers: Use example.com/new instead.") {
 		t.Errorf("deprecated explanation = %q", got)
+	}
+	// The notice need not name a successor, so the wording does not assume one.
+	ds.Maintenance.DeprecationMessage = ""
+	if got := depExplanation(ds); !strings.Contains(got, "module is deprecated by its maintainers — plan to move off it") || strings.Contains(got, "successor") {
+		t.Errorf("deprecated explanation without a message = %q", got)
 	}
 }
