@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -31,9 +33,78 @@ func proxyHost(proxyURL string) string {
 type MaintenanceInfo struct {
 	LastRelease        time.Time `json:"last_release"`
 	MonthsSinceRelease int       `json:"months_since_release"`
-	Archived           bool      `json:"archived"`
-	Deprecated         bool      `json:"deprecated"`
-	LatestVersion      string    `json:"latest_version"`
+
+	// LastActivity is the commit time of the head of the default branch of
+	// the module's repository (see ScanActivity). It is zero when activity is
+	// unknown: offline, archived, no branch resolved, or the lookup failed.
+	// Unlike GitHub's pushed_at it does not move on pushes to other branches,
+	// such as Dependabot's.
+	LastActivity time.Time `json:"last_activity,omitzero"`
+
+	// MonthsSinceActivity is the calendar-month age of LastActivity. It is
+	// meaningful only when LastActivity is non-zero.
+	MonthsSinceActivity int `json:"months_since_activity,omitempty"`
+
+	// ActivitySource says where LastActivity came from (ActivityViaProxy or
+	// ActivityViaGitHub), and ActivityBranch names the branch whose head was
+	// read when it is known. Both are empty when LastActivity is zero.
+	ActivitySource string `json:"activity_source,omitempty"`
+	ActivityBranch string `json:"activity_branch,omitempty"`
+
+	Archived   bool `json:"archived"`
+	Deprecated bool `json:"deprecated"`
+
+	// DeprecationMessage is the text of the `// Deprecated:` notice in the
+	// go.mod of the module's latest version, which usually names the
+	// successor. It is empty when the module is not deprecated that way (a
+	// 410 from the proxy sets Deprecated without a message).
+	DeprecationMessage string `json:"deprecation_message,omitempty"`
+
+	LatestVersion string `json:"latest_version"`
+}
+
+// Values of MaintenanceInfo.ActivitySource.
+const (
+	// ActivityViaProxy means the module proxy resolved a branch query
+	// (`@v/<branch>.info`) to the branch head's commit time.
+	ActivityViaProxy = "proxy_branch"
+
+	// ActivityViaGitHub means the GitHub commits API reported the default
+	// branch's latest commit, used when the proxy query failed.
+	ActivityViaGitHub = "github_commits"
+)
+
+// HasActivity reports whether repository activity is known for the module.
+func (m *MaintenanceInfo) HasActivity() bool {
+	return m != nil && !m.LastActivity.IsZero()
+}
+
+// DeprecationNotice returns DeprecationMessage on one line, for display. The
+// Go reference lets a notice run over several comment lines, which modfile
+// joins with newlines; those would break a report line or a policy violation.
+// JSON keeps the raw message.
+func (m *MaintenanceInfo) DeprecationNotice() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(m.DeprecationMessage), " ")
+}
+
+// MonthsInactive returns the months since the module last showed signs of
+// maintenance: the smaller of MonthsSinceRelease and MonthsSinceActivity when
+// activity is known, otherwise MonthsSinceRelease alone. A repository whose
+// default branch is worked on but that rarely tags a release is therefore not
+// mistaken for an abandoned one, while a module with no activity data keeps
+// the release-only behaviour. MonthsSinceRelease stays the right value for
+// statements that are specifically about releases.
+func (m *MaintenanceInfo) MonthsInactive() int {
+	if m == nil {
+		return 0
+	}
+	if !m.HasActivity() {
+		return m.MonthsSinceRelease
+	}
+	return min(m.MonthsSinceRelease, m.MonthsSinceActivity)
 }
 
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
@@ -42,6 +113,17 @@ type MaintenanceScanner struct {
 	proxyURL string
 	cache    map[string]*MaintenanceInfo
 	mu       sync.Mutex
+
+	// diskCache keeps the branch and go.mod answers across scans for a day,
+	// like the GitHub responses: a rerun does not pay again for a cold
+	// monorepo fetch, and a go.mod at a fixed version never changes. Nil
+	// disables it.
+	diskCache *maintainerCache
+
+	// branchTimeout bounds one default-branch query (see ScanActivity); the
+	// client timeout still applies when it is shorter. Zero leaves only the
+	// client timeout.
+	branchTimeout time.Duration
 
 	// ScanStart is the reference time used for MonthsSinceRelease calculations.
 	// Truncated to the start of a UTC day so that two scans on the same calendar
@@ -53,10 +135,29 @@ type MaintenanceScanner struct {
 // NewMaintenanceScanner creates a new maintenance health scanner.
 func NewMaintenanceScanner(timeout time.Duration) *MaintenanceScanner {
 	return &MaintenanceScanner{
-		client:    NewClient(ClientOptions{Timeout: timeout}),
-		proxyURL:  "https://proxy.golang.org",
-		cache:     make(map[string]*MaintenanceInfo),
-		ScanStart: time.Now().UTC().Truncate(24 * time.Hour),
+		client:        NewClient(ClientOptions{Timeout: timeout}),
+		proxyURL:      "https://proxy.golang.org",
+		cache:         make(map[string]*MaintenanceInfo),
+		diskCache:     newMaintainerCache(defaultCacheDir("proxy"), 0), // OS cache dir, 24h TTL
+		branchTimeout: defaultBranchQueryTimeout,
+		ScanStart:     time.Now().UTC().Truncate(24 * time.Hour),
+	}
+}
+
+// cachedProxyBody returns a fresh disk-cached body for url, if there is one.
+func (ms *MaintenanceScanner) cachedProxyBody(url string) ([]byte, bool) {
+	if ms.diskCache == nil {
+		return nil, false
+	}
+	body, hit, err := ms.diskCache.Get(url)
+	return body, err == nil && hit
+}
+
+// putProxyBody stores a 200 body for url in the disk cache. A failed write
+// only costs the next scan a request.
+func (ms *MaintenanceScanner) putProxyBody(url string, body []byte) {
+	if ms.diskCache != nil {
+		_ = ms.diskCache.Put(url, body)
 	}
 }
 
@@ -159,8 +260,12 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 		return nil, fmt.Errorf("maintenance lookup for %s: %w", modPath, versionErr)
 	}
 
-	// Check for deprecation via the @latest endpoint.
+	// Check for deprecation: a 410 on @v/list, or a `// Deprecated:` notice
+	// in the latest version's go.mod.
 	ms.checkDeprecation(ctx, modPath, info)
+	if latestVersion != "" {
+		ms.checkGoModDeprecation(ctx, modPath, latestVersion, info)
+	}
 
 	ms.mu.Lock()
 	ms.cache[modPath] = info
@@ -230,6 +335,48 @@ func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath stri
 	if resp.StatusCode == http.StatusGone {
 		info.Deprecated = true
 	}
+}
+
+// checkGoModDeprecation reads the go.mod of version (the module's latest
+// version) from the proxy and records a `// Deprecated:` notice attached to
+// its module directive, the way `go list -m -u` and `go get` report it. The
+// Go modules reference reads deprecation from the latest version's go.mod, so
+// a notice in an older version does not count, and a comment elsewhere in the
+// file is not a deprecation. The go.mod of a version never changes, so a
+// fetched one is kept in the disk cache. A failed fetch or an unparsable go.mod leaves
+// info unchanged: no deprecation is reported rather than a wrong one.
+func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath, version string, info *MaintenanceInfo) {
+	url := fmt.Sprintf("%s/%s/@v/%s.mod", ms.proxyURL, encodeModulePath(modPath), encodeModulePath(version))
+	body, hit := ms.cachedProxyBody(url)
+	if !hit {
+		var resp *http.Response
+		var err error
+		body, resp, err = ms.client.Get(ctx, url, GetOptions{
+			Host:    proxyHost(ms.proxyURL),
+			Purpose: "maintenance:go-mod",
+		})
+		if err != nil || resp.StatusCode != http.StatusOK {
+			return
+		}
+		ms.putProxyBody(url, body)
+	}
+	if msg := goModDeprecation(body); msg != "" {
+		info.Deprecated = true
+		info.DeprecationMessage = msg
+	}
+}
+
+// goModDeprecation returns the deprecation message of a go.mod file, or "" when
+// the module directive carries no `// Deprecated:` notice or the file does not
+// parse. The notice is recognised by golang.org/x/mod/modfile, which applies
+// the Go modules reference rules (a paragraph starting with "Deprecated:" in
+// the comments before the module directive or on its line).
+func goModDeprecation(data []byte) string {
+	f, err := modfile.ParseLax("go.mod", data, nil)
+	if err != nil || f.Module == nil {
+		return ""
+	}
+	return strings.TrimSpace(f.Module.Deprecated)
 }
 
 // encodeModulePath encodes a module path for use with the Go module proxy.

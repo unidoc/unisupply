@@ -35,7 +35,8 @@ type Policy struct {
 	// NoSingleMaintainer fails if any direct dependency has bus factor <= 1.
 	NoSingleMaintainer bool `json:"no_single_maintainer,omitempty"`
 
-	// NoUnmaintained fails if any dependency hasn't been released in this many months.
+	// NoUnmaintained fails if any dependency has had neither a release nor a
+	// commit on its default branch (when known) in this many months.
 	//
 	// Confirmed outside-the-build deps (InBuild == &false, in the module graph
 	// only) are exempt: no code of theirs is compiled into the project. A nil
@@ -207,9 +208,16 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 		// the scorer, whose archived floor and time bombs skip them; nil
 		// (unknown) InBuild is not exempt and denied.
 		if p.NoUnmaintainedMonths != nil && ds.Maintenance != nil && !isConfirmedOutsideBuild(ds) {
-			if ds.Maintenance.MonthsSinceRelease > *p.NoUnmaintainedMonths {
-				result.addError("no_unmaintained", ds.Module,
-					fmt.Sprintf("last release %d months ago (max: %d)", ds.Maintenance.MonthsSinceRelease, *p.NoUnmaintainedMonths))
+			// A module counts as maintained when it was released or committed
+			// to on its default branch within the limit. Without activity data
+			// this is the release age alone.
+			if ds.Maintenance.MonthsInactive() > *p.NoUnmaintainedMonths {
+				msg := fmt.Sprintf("last release %d months ago (max: %d)", ds.Maintenance.MonthsSinceRelease, *p.NoUnmaintainedMonths)
+				if ds.Maintenance.HasActivity() {
+					msg = fmt.Sprintf("last release %d months ago and last default-branch commit %d months ago (max: %d)",
+						ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity, *p.NoUnmaintainedMonths)
+				}
+				result.addError("no_unmaintained", ds.Module, msg)
 			}
 		}
 
@@ -220,7 +228,11 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 
 		// No deprecated.
 		if p.NoDeprecated && ds.Maintenance != nil && ds.Maintenance.Deprecated && !isConfirmedOutsideBuild(ds) {
-			result.addError("no_deprecated", ds.Module, "module is deprecated")
+			detail := "module is deprecated"
+			if msg := ds.Maintenance.DeprecationNotice(); msg != "" {
+				detail += ": " + msg
+			}
+			result.addError("no_deprecated", ds.Module, detail)
 		}
 
 		// No typosquatting.

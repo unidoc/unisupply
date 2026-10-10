@@ -78,7 +78,7 @@ indicative only. Per-dependency `risk_level` always carries a real band.
 | Scanner | What it checks | Data source |
 |---------|---------------|-------------|
 | **Vulnerability** | Known CVEs in dependencies | Go vuln DB (vuln.go.dev) |
-| **Maintenance** | Last release, archive status, deprecation | Go Module Proxy |
+| **Maintenance** | Last release, default-branch activity, archive status, deprecation (incl. go.mod `// Deprecated:`) | Go Module Proxy |
 | **Maintainer** | Contributors, bus factor, activity, org verification | GitHub API |
 | **Typosquatting** | Similar names to well-known packages (Levenshtein) | Built-in list (~75 modules) |
 | **Resilience** | Release cadence, governance files, version scheme | GitHub API |

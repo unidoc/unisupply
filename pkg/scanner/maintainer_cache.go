@@ -33,7 +33,8 @@ type cacheEntry struct {
 	GzipBody []byte `json:"gzip_body"`
 }
 
-// maintainerCache is a disk-backed cache for GitHub API responses. It is safe
+// maintainerCache is a disk-backed cache for GitHub API responses, and for the
+// module proxy's branch and go.mod answers (in a sibling directory). It is safe
 // for concurrent use from multiple goroutines within a single process, and
 // atomic at the file level (write-then-rename) so multiple processes sharing
 // the same directory cannot produce torn reads.
@@ -52,20 +53,27 @@ type maintainerCache struct {
 	disabled bool
 }
 
+// userCacheDir resolves the OS user cache directory. Tests replace it so no
+// test writes to the developer's real cache.
+var userCacheDir = os.UserCacheDir
+
+// defaultCacheDir returns userCacheDir()+"/unisupply/"+sub, falling back to
+// TempDir when the user cache directory is unavailable (HOME not set, etc.),
+// so the scan can still proceed.
+func defaultCacheDir(sub string) string {
+	base, err := userCacheDir()
+	if err != nil {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "unisupply", sub)
+}
+
 // newMaintainerCache returns a cache rooted at dir with the given TTL.
 // If dir is empty, it falls back to os.UserCacheDir()+"/unisupply/maintainer".
 // Cache-directory creation is attempted lazily on the first write, not here.
 func newMaintainerCache(dir string, ttl time.Duration) *maintainerCache {
 	if dir == "" {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			// os.UserCacheDir returning an error is rare (HOME not set, etc.).
-			// Fall back to TempDir so the scan can still proceed. The single
-			// filepath.Join below appends "unisupply/maintainer" exactly once,
-			// regardless of which branch produced `base`.
-			base = os.TempDir()
-		}
-		dir = filepath.Join(base, "unisupply", "maintainer")
+		dir = defaultCacheDir("maintainer")
 	}
 	if ttl <= 0 {
 		ttl = defaultCacheTTL

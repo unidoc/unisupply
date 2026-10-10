@@ -10,7 +10,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Scanner          | What it checks                                             | Data source                |
 | ---------------- | ---------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs (call-graph-aware via `govulncheck`)            | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, archive status, deprecation                  | Go Module Proxy            |
+| Maintenance      | Last release, default-branch activity, archive status, deprecation | Go Module Proxy (GitHub commits API as a fallback) |
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
@@ -457,10 +457,78 @@ but no package from it is compiled into your binary.
 | Component        | Range  | Notes                                                          |
 | ---------------- | ------ | -------------------------------------------------------------- |
 | Vulnerabilities  | 0–100  | CRITICAL = 100, HIGH = 80, MEDIUM = 50, LOW = 25; capped at 100 |
-| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo); 100 if archived; 30 if unknown |
+| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo), on the newer of the last release and the default branch's last commit; 100 if archived or deprecated; 30 if unknown |
 | Depth            | 0–100  | 0 (direct), 20 (depth 1), 40 (deeper)                          |
 | Maintainer       | 0–100  | 0 for trusted namespaces / multi-maintainer; 50 for bus factor 1; 30 if unknown |
 | Maturity         | 0–100  | 0 for trusted namespaces or v1+; 30 for v0.x; 50 if untagged   |
+
+### Maintenance age and deprecation
+
+The Maintenance axis does not rest on release tags alone. A repository that is
+worked on but rarely tagged would otherwise read as abandoned, so the axis
+bands on the newer of two dates:
+
+- **Last release:** the latest version's time from the module proxy
+  (`months_since_release`).
+- **Last commit on the default branch:** the module proxy resolves a branch
+  query, `proxy.golang.org/<module>/@v/<branch>.info`, to the branch head's
+  commit time. That needs no token and no GitHub quota, and works for modules
+  not hosted on GitHub. The branch is the repository's GitHub `default_branch`
+  when the maintainer scan has it, otherwise `main`, then `master`. The `HEAD`
+  query is deliberately not used: the proxy can serve it stale by months.
+
+  Any commit on the default branch counts: there is no filtering of bot or
+  CI-only commits yet, so a single workflow edit makes the date recent. For a
+  module in a multi-module repository (for example
+  `github.com/aws/aws-sdk-go-v2/service/s3`) the date is the repository's last
+  commit on that branch, not the last commit under the module's directory.
+
+"No such branch" is a 404 or 410 whose body says so: `unknown revision`, or
+`invalid version:` (the revision is missing, or it does not hold this module).
+A 404 or 410 with that answer on every branch leaves activity unknown without a
+fallback: for a module such as `foo/v2` whose default branch has moved to v3,
+the repository's latest commit would describe a different module.
+
+Any other failure is transient: a 5xx, a query that runs past its own
+10-second timeout (or the `--timeout`, if shorter), or the proxy's
+`not found: fetch timed out` 404, which it sends when its own fetch of a cold
+repository gives up and then repeats for a while. On a transient failure with a
+GitHub token set, the GitHub commits API
+(`/repos/{owner}/{repo}/commits?per_page=1`, which lists the default branch) is
+asked instead; without a token, or if that fails too, the module is counted in
+a scan warning. Without activity the axis uses the release age alone, as
+before; archived modules are not looked up.
+
+A resolved branch answer, and the latest version's `go.mod` (read for
+deprecation), are kept in the on-disk cache for 24 hours, like the GitHub API
+responses, so a rerun within the day does not ask again.
+
+The JSON `maintenance` object reports `last_activity`, `months_since_activity`,
+`activity_source` (`proxy_branch` or `github_commits`) and `activity_branch`
+when activity is known; the text and PDF reports show "Last commit (branch)".
+The `unmaintained` risk factor, the `unmaintained_1yr` / `unmaintained_2yr`
+counts and the `no_unmaintained_months` policy rule use the same combined
+value, so the report, the score and the policy agree.
+
+GitHub's `pushed_at` is **not** used for the Maintenance axis. It moves on a
+push to any branch, Dependabot branches included, so a repository whose default
+branch stopped moving years ago can look active. It is reported as
+`maintainer.last_commit_date`, and in the text report's maintainer section as
+"Last push (any branch)". It still sets `maintainer.activity_pattern`, which
+drives the `maintainer_inactive` risk factor and the `takeover_candidate` flag,
+so those two can disagree with the Maintenance axis until they move to the
+default-branch date.
+
+**Deprecation.** A module is deprecated when the `go.mod` of its latest version
+carries a `// Deprecated:` notice on its `module` directive (the rule `go list
+-m -u` and `go get` apply, parsed with `golang.org/x/mod/modfile`), or when the
+module proxy answers `@v/list` with 410. The notice usually names the
+successor and is reported as `maintenance.deprecation_message`, in the text and
+PDF reports and in the `no_deprecated` policy violation. Deprecated, like
+archived, sets the Maintenance component to 100 whatever the dates: the
+maintainers have said to move off the module, and a recent commit (for example
+on `github.com/golang/protobuf`) does not change that. Deprecation does not set
+the `archived_floor` headline candidate.
 
 The maintainer and maturity components fall back to **0** for trusted
 namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,

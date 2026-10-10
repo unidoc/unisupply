@@ -225,8 +225,24 @@ type JSONVuln struct {
 type JSONMaintenance struct {
 	LastRelease        string `json:"last_release"`
 	MonthsSinceRelease int    `json:"months_since_release"`
-	Archived           bool   `json:"archived"`
-	Deprecated         bool   `json:"deprecated"`
+	// LastActivity is the commit time of the default branch's head (RFC3339),
+	// from the module proxy or, as a fallback, the GitHub commits API; see
+	// ActivitySource. Absent when unknown; consumers must not read absence as
+	// "no commits". It is not GitHub's pushed_at, which the maintainer object
+	// reports as last_commit_date.
+	LastActivity string `json:"last_activity,omitempty"`
+	// MonthsSinceActivity is omitted together with LastActivity. It is a
+	// pointer so a commit this month (0) is still reported.
+	MonthsSinceActivity *int `json:"months_since_activity,omitempty"`
+	// ActivitySource is "proxy_branch" or "github_commits"; ActivityBranch is
+	// the branch whose head was read, when known.
+	ActivitySource string `json:"activity_source,omitempty"`
+	ActivityBranch string `json:"activity_branch,omitempty"`
+	Archived       bool   `json:"archived"`
+	Deprecated     bool   `json:"deprecated"`
+	// DeprecationMessage is the go.mod `// Deprecated:` notice of the latest
+	// version, which usually names the successor.
+	DeprecationMessage string `json:"deprecation_message,omitempty"`
 }
 
 // JSONMaintainer holds maintainer analysis info.
@@ -523,6 +539,14 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				MonthsSinceRelease: ds.Maintenance.MonthsSinceRelease,
 				Archived:           ds.Maintenance.Archived,
 				Deprecated:         ds.Maintenance.Deprecated,
+				DeprecationMessage: ds.Maintenance.DeprecationMessage,
+			}
+			if ds.Maintenance.HasActivity() {
+				months := ds.Maintenance.MonthsSinceActivity
+				jd.Maintenance.LastActivity = ds.Maintenance.LastActivity.Format(time.RFC3339)
+				jd.Maintenance.MonthsSinceActivity = &months
+				jd.Maintenance.ActivitySource = ds.Maintenance.ActivitySource
+				jd.Maintenance.ActivityBranch = ds.Maintenance.ActivityBranch
 			}
 		}
 
