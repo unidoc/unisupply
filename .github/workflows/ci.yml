@@ -185,7 +185,9 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
-    needs: lint
+    # After the tests: coverage reruns them, so a failing suite is not run
+    # twice and a red PR gets no coverage comment.
+    needs: [lint, test]
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
@@ -285,3 +287,37 @@ jobs:
                 owner, repo, issue_number, body,
               });
             }
+
+  # The one required status check for this workflow. The rulesets require
+  # "CI passed" instead of each job, so a job renamed by its matrix (a new Go
+  # version, a new platform) needs no ruleset change.
+  #
+  # GitHub counts a skipped required check as passing, so this job must run
+  # with always() and fail on its own. Skipped dependencies are allowed:
+  # Coverage runs only on pull requests and Version Parity only on rc-v*
+  # pull requests into master. Every other job needs lint, so it can only be
+  # skipped when lint failed, which fails this job. A new job with an if:
+  # condition would pass here when skipped; add it with care.
+  ci-passed:
+    name: CI passed
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - license-check
+      - test-license-scripts
+      - test
+      - build
+      - version-check
+      - coverage
+    if: always()
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$RESULTS" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null; then
+            echo "::error::A required job failed or was cancelled."
+            exit 1
+          fi
