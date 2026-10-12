@@ -378,11 +378,14 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			fmt.Fprintf(w, "  ├─ Last release: %d months ago\n", ds.Maintenance.MonthsSinceRelease)
 		}
+		if ds.Maintenance.HasActivity() {
+			fmt.Fprintf(w, "  ├─ Last commit%s: %d months ago\n", branchSuffix(ds.Maintenance.ActivityBranch), ds.Maintenance.MonthsSinceActivity)
+		}
 		if ds.Maintenance.Archived {
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
 		if ds.Maintenance.Deprecated {
-			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated\n")
+			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated%s\n", deprecationSuffix(ds.Maintenance.DeprecationNotice()))
 		}
 	}
 
@@ -414,9 +417,10 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  ├─ License: %s\n", mi.License)
 		}
 
-		// Activity.
+		// Activity. LastCommitDate is GitHub's pushed_at, which moves on a push
+		// to any branch; the scored date is the maintenance "Last commit" line.
 		if !mi.LastCommitDate.IsZero() {
-			fmt.Fprintf(w, "  ├─ Last commit: %s (%s)\n",
+			fmt.Fprintf(w, "  ├─ Last push (any branch): %s (%s)\n",
 				mi.LastCommitDate.Format("2006-01-02"), mi.ActivityPattern)
 		} else if mi.ActivityPattern != "" && mi.ActivityPattern != "unknown" {
 			fmt.Fprintf(w, "  ├─ Activity: %s\n", mi.ActivityPattern)
@@ -795,10 +799,24 @@ func depExplanation(ds *scorer.DependencyScore) string {
 		switch {
 		case ds.Maintenance.Archived:
 			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		case ds.Maintenance.MonthsSinceRelease >= 24:
-			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-		case ds.Maintenance.MonthsSinceRelease >= 12:
-			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
+		case ds.Maintenance.Deprecated:
+			if msg := ds.Maintenance.DeprecationNotice(); msg != "" {
+				reasons = append(reasons, "module is deprecated by its maintainers: "+msg)
+			} else {
+				reasons = append(reasons, "module is deprecated by its maintainers — plan to move off it")
+			}
+		case ds.Maintenance.MonthsInactive() >= 24:
+			if ds.Maintenance.HasActivity() {
+				reasons = append(reasons, fmt.Sprintf("no release in %d months and no default-branch commit in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
+			}
+		case ds.Maintenance.MonthsInactive() >= 12:
+			if ds.Maintenance.HasActivity() {
+				reasons = append(reasons, fmt.Sprintf("last release %d months ago and last default-branch commit %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease, ds.Maintenance.MonthsSinceActivity))
+			} else {
+				reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
+			}
 		}
 	}
 
@@ -928,6 +946,24 @@ const timeBombScopeNote = "Any dependency, direct or transitive and not confirme
 	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
 	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
 	"modules with no recent release are counted under Unmaintained."
+
+// branchSuffix renders the branch an activity date was read from, " (main)",
+// or "" when the branch is not known.
+func branchSuffix(branch string) string {
+	if branch == "" {
+		return ""
+	}
+	return " (" + branch + ")"
+}
+
+// deprecationSuffix renders a deprecation message as ": <message>", or "" when
+// there is none (a deprecation signalled by the proxy carries no message).
+func deprecationSuffix(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
+}
 
 // wrapWords splits s into lines of at most width runes, breaking at spaces.
 // A single word longer than width gets a line of its own.

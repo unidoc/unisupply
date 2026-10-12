@@ -85,6 +85,34 @@ func TestVulnScanFailure(t *testing.T) {
 	}
 }
 
+// The activity scan falls back to the GitHub commits API only with a token
+// (the unauthenticated quota belongs to the maintainer scan) and never offline.
+func TestActivityFallback(t *testing.T) {
+	ms := scanner.NewMaintainerScanner(time.Second, "tok")
+	tests := []struct {
+		name    string
+		token   string
+		offline bool
+		want    bool
+	}{
+		{"token, online", "tok", false, true},
+		{"no token", "", false, false},
+		{"token, offline", "tok", true, false},
+		{"no token, offline", "", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := activityFallback(tt.token, tt.offline, ms)
+			if tt.want && got != scanner.CommitLookup(ms) {
+				t.Errorf("activityFallback = %v, want the maintainer scanner", got)
+			}
+			if !tt.want && got != nil {
+				t.Errorf("activityFallback = %v, want nil", got)
+			}
+		})
+	}
+}
+
 // TestTakeStdlibVulns verifies the stdlib entry is removed from the map and
 // returned sorted by ID, and that its absence yields nil.
 func TestTakeStdlibVulns(t *testing.T) {
