@@ -72,19 +72,24 @@ module graph only) are exempt; a dependency whose build membership is
 unknown is not. **Strict preset:** enabled. **Moderate preset:** enabled.
 
 #### `.no_deprecated` *(bool)*
-Fails any dependency whose `go.mod` carries a `// Deprecated:`
-directive. Dependencies confirmed to be outside the build (`in_build: false`)
-are exempt; a dependency whose build membership is unknown is not.
+Fails any dependency whose latest version's `go.mod` carries a
+`// Deprecated:` notice on its `module` directive, or that the module
+proxy reports as gone. The violation includes the deprecation message,
+which usually names the successor. Dependencies confirmed to be outside the
+build (`in_build: false`) are exempt; a dependency whose build membership is
+unknown is not. Neither preset enables this rule.
 
 #### `.no_typosquatting` *(bool)*
 Fails any dependency the typosquat scanner flags as similar to a
 well-known module. **Strict preset:** enabled.
 
 #### `.no_unmaintained_months` *(int)*
-Fails any dependency whose last release is older than the given number
-of months. Dependencies confirmed to be outside the build (`in_build: false`)
-are exempt; a dependency whose build membership is unknown is not.
-**Strict preset:** `24`.
+Fails any dependency that has had neither a release nor a commit on its
+repository's default branch within the given number of months. Without
+default-branch data (offline, no branch found, lookup failed) the
+release age alone decides. Dependencies confirmed to be outside the build
+(`in_build: false`) are exempt; a dependency whose build membership is
+unknown is not. **Strict preset:** `24`.
 
 ### Dependency graph rules
 

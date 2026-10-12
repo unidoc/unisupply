@@ -304,7 +304,9 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	const timeout = 5 * time.Second
 
 	// proxy.golang.org
-	if _, err := scanner.NewMaintenanceScanner(timeout).ScanAll(ctx, graph); err != nil {
+	maint := scanner.NewMaintenanceScanner(timeout)
+	maintenance, err := maint.ScanAll(ctx, graph)
+	if err != nil {
 		t.Logf("maintenance scan reported %v (stub responses are minimal; hosts contacted is what matters)", err)
 	}
 
@@ -316,6 +318,12 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 
 	// api.github.com (repo, owner profile, contributors)
 	maintainers := scanner.NewMaintainerScanner(timeout, "").ScanAll(ctx, graph)
+
+	// proxy.golang.org (default-branch queries) → api.github.com (commits
+	// fallback, which needs a token; a placeholder stands in).
+	if err := maint.ScanActivity(ctx, graph, maintenance, maintainers, scanner.NewMaintainerScanner(timeout, "contract-test-token")); err != nil {
+		t.Logf("activity scan reported %v", err)
+	}
 
 	// proxy.golang.org + api.github.com (governance files)
 	scanner.NewResilienceScanner(timeout).ScanAll(ctx, graph, maintainers)
