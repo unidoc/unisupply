@@ -114,7 +114,7 @@ func gradeDecidingText(d *grade.Deciding) string {
 }
 
 // gradeCountedLabelFor says whether a finding counted toward the letter.
-func gradeCountedLabelFor(f grade.FindingResult) string {
+func gradeCountedLabelFor(f *grade.FindingResult) string {
 	if f.Counted {
 		return gradeCountedLabel
 	}
@@ -130,7 +130,7 @@ func gradeVEXText(v grade.VEXStatus) string {
 }
 
 // gradeFindingSeverity is the scored severity, marked when it was estimated.
-func gradeFindingSeverity(f grade.FindingResult) string {
+func gradeFindingSeverity(f *grade.FindingResult) string {
 	sev := f.Severity
 	if sev == "" {
 		sev = "UNKNOWN"
@@ -224,7 +224,8 @@ func writeGradeRowsText(w io.Writer, c func(string, string) string, g *grade.Res
 		if r.UpkeepNote != "" {
 			fmt.Fprintf(w, "      Maintainers say: %s\n", r.UpkeepNote)
 		}
-		for _, f := range r.Findings {
+		for i := range r.Findings {
+			f := &r.Findings[i]
 			fmt.Fprintf(w, "      %s  severity %s, tier %s, %s\n", f.ID, gradeFindingSeverity(f), f.Tier, gradeCountedLabelFor(f))
 			if f.Exploited {
 				fmt.Fprintf(w, "        Known exploited (CISA KEV)\n")

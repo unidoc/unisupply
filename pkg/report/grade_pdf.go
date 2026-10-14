@@ -153,7 +153,9 @@ func writeGradeRowsPDF(c *creator.Creator, g *grade.Result, regular, bold *model
 		}
 		for _, v := range []string{name, r.Version, gradeRowLabel(r), fmt.Sprintf("%d", r.Score), r.UpkeepState, r.Reason} {
 			cell := table.NewCell()
-			cell.SetContent(pdfPara(c, v, regular, 9, creator.ColorBlack, false, [4]float64{0, 0, 0, 0}))
+			if err := cell.SetContent(pdfPara(c, v, regular, 9, creator.ColorBlack, false, [4]float64{0, 0, 0, 0})); err != nil {
+				fmt.Printf("Error setting grade table content: %v\n", err)
+			}
 		}
 	}
 	_ = c.Draw(table)
@@ -176,7 +178,8 @@ func writeGradeRowsPDF(c *creator.Creator, g *grade.Result, regular, bold *model
 		p := c.NewStyledParagraph()
 		p.SetMargins(20, 0, 0, 8)
 		p.SetLineHeight(1.5)
-		for _, f := range r.Findings {
+		for i := range r.Findings {
+			f := &r.Findings[i]
 			addBullet(p, fmt.Sprintf("%s: severity %s, tier %s, %s", f.ID, gradeFindingSeverity(f), f.Tier, gradeCountedLabelFor(f)), regular)
 			if f.Exploited {
 				addBullet(p, "  Known exploited (CISA KEV)", regular)

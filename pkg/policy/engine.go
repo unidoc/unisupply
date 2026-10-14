@@ -412,13 +412,13 @@ func (p *Policy) evalGrade(g *grade.Result, result *Result) {
 		result.addError("max_grade", "", err.Error())
 		return
 	}
-	max := grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade)))
+	worst := grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade)))
 	if g == nil || g.Letter == "" {
 		reason := "grading did not run"
 		if g != nil && g.Pending != nil {
 			reason = g.Pending.Reason
 		}
-		detail := fmt.Sprintf("the grade is Pending (%s), so it cannot be checked against maximum %s", reason, max)
+		detail := fmt.Sprintf("the grade is Pending (%s), so it cannot be checked against maximum %s", reason, worst)
 		if p.AllowPending {
 			result.addWarning("max_grade", "", detail)
 		} else {
@@ -426,8 +426,8 @@ func (p *Policy) evalGrade(g *grade.Result, result *Result) {
 		}
 		return
 	}
-	if g.Letter > max {
-		detail := fmt.Sprintf("grade %s is worse than the maximum %s", g.Letter, max)
+	if g.Letter > worst {
+		detail := fmt.Sprintf("grade %s is worse than the maximum %s", g.Letter, worst)
 		module := ""
 		if g.Deciding != nil {
 			detail += ": " + g.Deciding.Reason

@@ -439,7 +439,7 @@ func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath
 // go.mod data (a single version, or a [low,high] range, compared as semantic
 // versions) and returns the first matching directive's rationale. It returns
 // false for an unparsable go.mod or a version that is not valid semver.
-func goModRetraction(data []byte, version string) (bool, string) {
+func goModRetraction(data []byte, version string) (retracted bool, message string) {
 	if !semver.IsValid(version) {
 		return false, ""
 	}

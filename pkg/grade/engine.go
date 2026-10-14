@@ -102,10 +102,10 @@ type scored struct {
 	score     int // table value (0 for graph-only)
 }
 
-func scoreFinding(f Finding, self bool) scored {
+func scoreFinding(f *Finding, self bool) scored {
 	sev, est := severityOf(f.Severity)
 	tier, assumed := tierOf(f.Reachability, self)
-	s := scored{Finding: f, sev: sev, estimated: est, tier: tier, assumed: assumed}
+	s := scored{Finding: *f, sev: sev, estimated: est, tier: tier, assumed: assumed}
 	switch tier {
 	case TierCalled:
 		s.score = calledScore[sev]
@@ -153,8 +153,8 @@ func upkeepState(r Row, now time.Time) string {
 	if active {
 		return StateActive
 	}
-	for _, f := range r.Findings {
-		if strings.TrimSpace(f.FixedVersion) == "" {
+	for i := range r.Findings {
+		if strings.TrimSpace(r.Findings[i].FixedVersion) == "" {
 			return StateParked
 		}
 	}
@@ -299,11 +299,11 @@ func upkeepReason(r Row, state string, score int) string {
 }
 
 // gradeRow scores one row.
-func gradeRow(r Row, in Input) RowResult {
+func gradeRow(r Row, in *Input) RowResult {
 	state := upkeepState(r, in.Now)
 	fs := make([]scored, 0, len(r.Findings))
-	for _, f := range r.Findings {
-		fs = append(fs, scoreFinding(f, r.Self))
+	for i := range r.Findings {
+		fs = append(fs, scoreFinding(&r.Findings[i], r.Self))
 	}
 	vs, est, top, vreason := vulnScore(r, fs)
 	us := upkeepScore(r, state)
@@ -334,8 +334,8 @@ func gradeRow(r Row, in Input) RowResult {
 		rr.Reason = "nothing found"
 	}
 	_ = top
-	for _, f := range fs {
-		rr.Findings = append(rr.Findings, findingResult(f, r, in))
+	for i := range fs {
+		rr.Findings = append(rr.Findings, findingResult(&fs[i], r, in))
 	}
 	sort.SliceStable(rr.Findings, func(i, j int) bool {
 		a, b := rr.Findings[i], rr.Findings[j]
@@ -364,7 +364,8 @@ func preferVuln(a, b RowResult) bool {
 }
 
 // Grade computes the grade.
-func Grade(in Input) Result {
+func Grade(input *Input) Result {
+	in := *input // the merge below must not change the caller's rows
 	if in.Now.IsZero() {
 		in.Now = time.Now().UTC()
 	}
@@ -380,9 +381,9 @@ func Grade(in Input) Result {
 	in.Deps = deps
 
 	rows := make([]RowResult, 0, len(in.Deps)+1)
-	rows = append(rows, gradeRow(in.Self, in))
+	rows = append(rows, gradeRow(in.Self, &in))
 	for _, d := range in.Deps {
-		rows = append(rows, gradeRow(d, in))
+		rows = append(rows, gradeRow(d, &in))
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Score != rows[j].Score {
@@ -396,7 +397,7 @@ func Grade(in Input) Result {
 	res.Score = worst.Score
 
 	// whole-tree rules raise the letter only when they beat the worst row
-	if tr := treeRule(in, rows); tr != nil && tr.Score > worst.Score {
+	if tr := treeRule(&in, rows); tr != nil && tr.Score > worst.Score {
 		res.TreeRows = append(res.TreeRows, *tr)
 		res.Score = tr.Score
 		res.Estimated = tr.Estimated
@@ -407,7 +408,7 @@ func Grade(in Input) Result {
 	}
 	res.Letter = bandOf(res.Score)
 
-	if p := pendingFor(in, rows, res.Score); p != nil {
+	if p := pendingFor(&in, rows, res.Score); p != nil {
 		res.Pending, res.Letter, res.Estimated = p, "", false
 	}
 	if in.Checks.SelfAdvisoriesSkipped {

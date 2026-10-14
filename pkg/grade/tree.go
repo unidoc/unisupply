@@ -15,7 +15,7 @@ import (
 // It returns the highest rule that applies; the caller uses it only when it raises the letter (its score is above the
 // worst row's), and then it appears as a row of its own. Without a tree-wide count, splitting one risky dependency into
 // several small modules would turn an F into a D.
-func treeRule(in Input, rows []RowResult) *TreeRow {
+func treeRule(in *Input, rows []RowResult) *TreeRow {
 	all := append([]Row{in.Self}, in.Deps...)
 	type key struct{ module, id string }
 	calledHC := map[key]bool{}
@@ -27,7 +27,8 @@ func treeRule(in Input, rows []RowResult) *TreeRow {
 		if isConfirmed(r.TestOnly) {
 			continue
 		}
-		for _, f := range r.Findings {
+		for i := range r.Findings {
+			f := &r.Findings[i]
 			sf := scoreFinding(f, r.Self)
 			k := key{r.Module, f.ID}
 			if sf.tier == TierCalled && highOrCritical(sf.sev) {

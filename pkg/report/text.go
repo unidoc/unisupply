@@ -544,14 +544,6 @@ func colorFunc(noColor bool) func(string, string) string {
 	}
 }
 
-func formatCount(count, total int) string {
-	if total == 0 {
-		return fmt.Sprintf("%3d", count)
-	}
-	pct := float64(count) / float64(total) * 100
-	return fmt.Sprintf("%3d (%4.1f%%)", count, pct)
-}
-
 func countWithVulns(deps []*scorer.DependencyScore) int {
 	count := 0
 	for _, ds := range deps {

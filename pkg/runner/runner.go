@@ -226,7 +226,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			Now:       scanStart,
 			DebugMode: opts.DebugScoring,
 		})
-		g := gradeAll(ctx, gradeRun{
+		g := gradeAll(ctx, &gradeRun{
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 			Timeout: timeout, ScanStart: scanStart, VulnScanned: true,
 		})
@@ -416,7 +416,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
 	}
 
-	gradeResult := gradeAll(ctx, gradeRun{
+	gradeResult := gradeAll(ctx, &gradeRun{
 		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 		Timeout: timeout, ScanStart: scanStart,
 		Vulns: vulns, Stdlib: stdlibVulns, Maintenance: maintenance,

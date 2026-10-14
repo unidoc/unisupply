@@ -780,10 +780,3 @@ func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 		return creator.ColorRGBFromHex("#009900")
 	}
 }
-
-func pctStr(count, total int) string {
-	if total == 0 {
-		return "0%"
-	}
-	return fmt.Sprintf("%.1f%%", float64(count)/float64(total)*100)
-}

@@ -31,7 +31,7 @@ func run(in Input) Result {
 	if in.Now.IsZero() {
 		in.Now = now
 	}
-	return Grade(in)
+	return Grade(&in)
 }
 
 func row(t *testing.T, r Result, module string) RowResult {

@@ -344,9 +344,10 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 	// leave DataAvailable as false so callers know zero-values are not real.
 	repoData, err := ms.repoMeta(ctx, owner, repo)
 	if err != nil {
-		if errors.Is(err, ErrRepositoryNotFound) {
+		switch {
+		case errors.Is(err, ErrRepositoryNotFound):
 			info.UnavailableReason = UnavailableNotFound
-		} else if errors.Is(err, errRateLimited) {
+		case errors.Is(err, errRateLimited):
 			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
@@ -361,7 +362,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			ms.rateLimitWarnOnce.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
-		} else {
+		default:
 			info.UnavailableReason = UnavailableAPIError
 		}
 		ms.mu.Lock()

@@ -34,7 +34,7 @@ type gradeInputs struct {
 }
 
 // buildGradeInput maps the scanner outputs onto the rows of the grade.
-func buildGradeInput(in gradeInputs) grade.Input {
+func buildGradeInput(in *gradeInputs) grade.Input {
 	out := grade.Input{
 		Self:             in.Self,
 		ChecksumMismatch: in.GoSumBad,
@@ -70,15 +70,15 @@ func buildGradeInput(in gradeInputs) grade.Input {
 
 func findingsOf(module string, vulns []scanner.Vulnerability) []grade.Finding {
 	var out []grade.Finding
-	for _, v := range vulns {
-		out = append(out, FindingFromVuln(module, v))
+	for i := range vulns {
+		out = append(out, FindingFromVuln(module, &vulns[i]))
 	}
 	return out
 }
 
 // FindingFromVuln maps one scanned vulnerability onto a graded finding. It reads the raw severity: the scorer's own
 // adjustments (EPSS, tier promotion) are not part of the v2 grade.
-func FindingFromVuln(module string, v scanner.Vulnerability) grade.Finding {
+func FindingFromVuln(module string, v *scanner.Vulnerability) grade.Finding {
 	return grade.Finding{
 		ID:               v.ID,
 		Aliases:          v.Aliases,
@@ -162,7 +162,7 @@ func errString(err error) string {
 
 // gradeAll builds the grade: the module's own row (status and advisories), every dependency's row, and the checks the
 // grade depends on. It never fails: a lookup that did not work is recorded in Checks, and the grade says Pending.
-func gradeAll(ctx context.Context, r gradeRun) *grade.Result {
+func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 	in := gradeInputs{
 		Graph:       r.Graph,
 		Vulns:       r.Vulns,
@@ -187,13 +187,14 @@ func gradeAll(ctx context.Context, r gradeRun) *grade.Result {
 		// Context only: a failed lookup leaves the labels at "Not enough response history", never a Pending grade.
 		in.History, _ = scanner.ScanResponseHistory(ctx, scanner.ResponseHistoryOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, moduleDependencies(r.Graph))
 	}
-	res := grade.Grade(buildGradeInput(in))
+	gi := buildGradeInput(&in)
+	res := grade.Grade(&gi)
 	return &res
 }
 
 // assessSelf builds the module's own row. Without a published version the module is not assessed as a published
 // module: no own advisories (OSV needs a version) and no archived lookup, said plainly in the result.
-func assessSelf(ctx context.Context, r gradeRun, checks *grade.Checks) grade.Row {
+func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Row {
 	row := grade.Row{Module: r.GoMod.ModulePath, Version: r.Opts.SelfVersion, Self: true}
 	if r.Opts.SelfVersion == "" {
 		checks.SelfAdvisoriesSkipped = true

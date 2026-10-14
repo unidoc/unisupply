@@ -491,11 +491,6 @@ func TestWriteSPDX_GradeAnnotation(t *testing.T) {
 	}
 }
 
-// Helper function
-func containsSubstring(str, substr string) bool {
-	return bytes.Contains([]byte(str), []byte(substr))
-}
-
 // TestWriteCycloneDX_RootComponentVersion checks that the go directive is not
 // reported as the scanned project's own version. A go.mod carries no version
 // for the main module, so the root component has none; the go directive is

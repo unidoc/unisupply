@@ -19,7 +19,7 @@ func TestBuildGradeInput_MapsTheScannerOutput(t *testing.T) {
 		"example.com/a": {Module: parser.Module{Path: "example.com/a", Version: "v1.2.3"}, Direct: true, IsTestOnly: tp(true), InBuild: tp(true)},
 		"example.com/b": {Module: parser.Module{Path: "example.com/b", Version: "v0.1.0"}},
 	}}
-	in := buildGradeInput(gradeInputs{
+	in := buildGradeInput(&gradeInputs{
 		Graph: g,
 		Vulns: map[string][]scanner.Vulnerability{"example.com/a": {{
 			ID: "GO-1", Severity: "high", Reachability: "called", InKEV: true, FixedVersion: "v1.2.4",
@@ -75,7 +75,7 @@ func TestGrade_EndToEndThroughTheEngine(t *testing.T) {
 	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
 		"golang.org/x/image": {Module: parser.Module{Path: "golang.org/x/image", Version: "v0.1.0"}, Direct: true, InBuild: tp(true)},
 	}}
-	in := buildGradeInput(gradeInputs{
+	in := buildGradeInput(&gradeInputs{
 		Graph: g,
 		Vulns: map[string][]scanner.Vulnerability{"golang.org/x/image": {
 			{ID: "A", Severity: "HIGH", Reachability: "called", FixedVersion: "v9"},
@@ -86,7 +86,7 @@ func TestGrade_EndToEndThroughTheEngine(t *testing.T) {
 		Now:         time.Now(),
 		Self:        grade.Row{Module: "example.com/app", Self: true},
 	})
-	r := grade.Grade(in)
+	r := grade.Grade(&in)
 	if r.Letter != grade.LetterF || r.Score != 80 {
 		t.Fatalf("%s %d", r.Letter, r.Score)
 	}
@@ -107,7 +107,7 @@ func (e errTest) Error() string { return string(e) }
 
 func TestGradeAll_NoModuleVersionSkipsTheModuleItself(t *testing.T) {
 	gm := &parser.GoMod{ModulePath: "example.com/app"}
-	res := gradeAll(t.Context(), gradeRun{GoMod: gm, Graph: &resolver.Graph{}, Integrity: &scanner.IntegrityReport{}, VulnScanned: true, ScanStart: time.Now()})
+	res := gradeAll(t.Context(), &gradeRun{GoMod: gm, Graph: &resolver.Graph{}, Integrity: &scanner.IntegrityReport{}, VulnScanned: true, ScanStart: time.Now()})
 	if res.Pending != nil || res.Letter != grade.LetterA {
 		t.Fatalf("a module with nothing to scan is graded: %+v", res)
 	}
@@ -120,7 +120,7 @@ func TestGradeAll_OfflineWithModuleVersionIsPendingNotAnA(t *testing.T) {
 	offline.Enable()
 	t.Cleanup(offline.Disable)
 	gm := &parser.GoMod{ModulePath: "example.com/app"}
-	res := gradeAll(t.Context(), gradeRun{
+	res := gradeAll(t.Context(), &gradeRun{
 		Opts: Options{SelfVersion: "v1.0.0"}, GoMod: gm, Graph: &resolver.Graph{}, Integrity: &scanner.IntegrityReport{},
 		VulnScanned: true, ScanStart: time.Now(),
 	})
@@ -132,7 +132,7 @@ func TestGradeAll_OfflineWithModuleVersionIsPendingNotAnA(t *testing.T) {
 func TestGradeAll_FailedVulnScanIsPending(t *testing.T) {
 	gm := &parser.GoMod{ModulePath: "example.com/app"}
 	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/a": {Module: parser.Module{Path: "example.com/a", Version: "v1.0.0"}, Direct: true}}}
-	res := gradeAll(t.Context(), gradeRun{
+	res := gradeAll(t.Context(), &gradeRun{
 		GoMod: gm, Graph: g, Integrity: &scanner.IntegrityReport{}, ScanStart: time.Now(),
 		Maintenance: map[string]*scanner.MaintenanceInfo{"example.com/a": {LastRelease: time.Now()}},
 		VulnScanned: false, VulnScanReason: "govulncheck: loading packages",
@@ -145,7 +145,7 @@ func TestGradeAll_FailedVulnScanIsPending(t *testing.T) {
 func TestGradeAll_ChecksumMismatchIsF(t *testing.T) {
 	gm := &parser.GoMod{ModulePath: "example.com/app"}
 	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/a": {Module: parser.Module{Path: "example.com/a", Version: "v1.0.0"}, Direct: true}}}
-	res := gradeAll(t.Context(), gradeRun{
+	res := gradeAll(t.Context(), &gradeRun{
 		GoMod: gm, Graph: g, Integrity: &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedFalse}, ScanStart: time.Now(),
 		Maintenance: map[string]*scanner.MaintenanceInfo{"example.com/a": {LastRelease: time.Now()}}, VulnScanned: true,
 	})

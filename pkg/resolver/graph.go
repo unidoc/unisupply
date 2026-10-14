@@ -619,11 +619,11 @@ func goModListed(dir string) map[string]bool {
 // goVersionAtLeast reports whether a go directive value ("1.21", "1.22.3")
 // is at least major.minor. An empty or unparsable value is not.
 func goVersionAtLeast(v string, major, minor int) bool {
-	var maj, min int
-	if _, err := fmt.Sscanf(v, "%d.%d", &maj, &min); err != nil {
+	var maj, mnr int
+	if _, err := fmt.Sscanf(v, "%d.%d", &maj, &mnr); err != nil {
 		return false
 	}
-	return maj > major || (maj == major && min >= minor)
+	return maj > major || (maj == major && mnr >= minor)
 }
 
 // reachableFrom returns every module reachable from seeds in the module graph,

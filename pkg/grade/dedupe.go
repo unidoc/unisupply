@@ -25,7 +25,8 @@ func mergeAdvisories(in []Finding) []Finding {
 		return x
 	}
 	owner := map[string]int{}
-	for i, f := range in {
+	for i := range in {
+		f := &in[i]
 		for _, id := range append([]string{f.ID}, f.Aliases...) {
 			if id == "" {
 				continue

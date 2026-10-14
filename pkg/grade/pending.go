@@ -17,7 +17,7 @@ import (
 //     not compiled in) would beat the worst row known so far.
 //
 // A module with no dependencies has nothing to scan and is not Pending for that; its own row still needs 3.
-func pendingFor(in Input, rows []RowResult, score int) *Pending {
+func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 	c := in.Checks
 	known := knownFacts(in, rows)
 	switch {
@@ -73,7 +73,7 @@ func withDetail(base, detail string) string {
 }
 
 // knownFacts is what is known when the grade is Pending: the module's own upkeep state, and the worst row found so far.
-func knownFacts(in Input, rows []RowResult) []string {
+func knownFacts(in *Input, rows []RowResult) []string {
 	var out []string
 	for _, r := range rows {
 		if r.Self {

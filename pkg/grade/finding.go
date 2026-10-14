@@ -8,7 +8,7 @@ import (
 
 // findingResult is a finding after grading: its tier, its score, whether it was graded, its VEX status and the context
 // around its fix.
-func findingResult(f scored, r Row, in Input) FindingResult {
+func findingResult(f *scored, r Row, in *Input) FindingResult {
 	fr := FindingResult{
 		ID: f.ID, Aliases: f.Aliases, Module: f.Module, Severity: f.sev, Estimated: f.estimated, Tier: f.tier, TierAssumed: f.assumed,
 		Score: f.score, Counted: f.tier != TierGraphOnly, Exploited: f.Exploited, FixedVersion: f.FixedVersion,
@@ -30,7 +30,7 @@ func findingResult(f scored, r Row, in Input) FindingResult {
 		notes = append(notes, "Severity is unknown and is scored as medium.")
 	}
 	fr.Note = strings.Join(notes, " ")
-	fr.Response = responseFor(f.Finding, r, in)
+	fr.Response = responseFor(&f.Finding, r, in)
 	return fr
 }
 
@@ -49,7 +49,7 @@ func joinLimited(items []string, n int) string {
 //	known exploited:        counts at once; no response label.
 //
 // A generic "overdue" label is deliberately not used: users can usually take the fix themselves.
-func responseFor(f Finding, r Row, in Input) Response {
+func responseFor(f *Finding, r Row, in *Input) Response {
 	resp := Response{}
 	if f.Exploited {
 		resp.Status = "exploited"
@@ -91,7 +91,7 @@ func responseFor(f Finding, r Row, in Input) Response {
 }
 
 // historyText is the response-history context, or "Not enough response history".
-func historyText(f Finding, in Input) string {
+func historyText(f *Finding, in *Input) string {
 	module := f.Module
 	if module == "" {
 		return ""
