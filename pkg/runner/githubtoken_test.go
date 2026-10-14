@@ -20,17 +20,17 @@ import (
 
 // stubGitHub replaces http.DefaultTransport (which the scanner client
 // delegates to) with one that answers api.github.com/rate_limit with status
-// and fails the test on any other request. It returns the request count.
+// and refuses every other request (a module with no dependencies still runs the vulnerability scan, which must not
+// reach the network in a test). It returns the count of token probes.
 func stubGitHub(t *testing.T, status int) *atomic.Int32 {
 	t.Helper()
 	var requests atomic.Int32
 	original := http.DefaultTransport
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requests.Add(1)
 		if req.URL.Host != "api.github.com" || req.URL.Path != "/rate_limit" {
-			t.Errorf("unexpected request %s %s: only the token probe may run", req.Method, req.URL)
-			return nil, fmt.Errorf("unexpected request %s", req.URL)
+			return nil, fmt.Errorf("no network in this test: %s", req.URL)
 		}
+		requests.Add(1)
 		return &http.Response{
 			StatusCode: status,
 			Body:       io.NopCloser(strings.NewReader(`{"message":"canned"}`)),

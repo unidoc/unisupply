@@ -45,12 +45,13 @@ const (
 
 // Upkeep states of a row.
 const (
-	StateActive     = "active"
-	StateFinished   = "finished" // quiet, with nothing open
-	StateParked     = "parked"   // quiet, with something open (an advisory without a fix)
-	StateDeprecated = "deprecated"
-	StateArchived   = "archived"
-	StateUnknown    = "unknown" // the maintenance data is missing
+	StateActive      = "active"
+	StateFinished    = "finished" // quiet, with nothing open
+	StateParked      = "parked"   // quiet, with something open (an advisory without a fix)
+	StateDeprecated  = "deprecated"
+	StateArchived    = "archived"
+	StateUnknown     = "unknown"      // the maintenance data is missing
+	StateNotAssessed = "not_assessed" // nobody looked (no published version to look up, or the standard library)
 )
 
 // Finding is one advisory on one row, as the scanners report it.
@@ -87,6 +88,10 @@ type Upkeep struct {
 	LastRelease  time.Time // zero = unknown
 	LastActivity time.Time // the default branch's last commit; zero = unknown
 
+	// NotAssessed is true when nobody looked: the module itself without a published version, the standard library. The
+	// state is then "not_assessed", never "finished".
+	NotAssessed bool
+
 	// Missing is true when the maintenance data could not be read (the lookup failed): the state is then unknown, and a
 	// check that could change the letter makes the grade Pending.
 	Missing bool
@@ -120,8 +125,23 @@ type Checks struct {
 	SelfStatusFailed      bool
 	SelfAdvisoriesFailed  bool
 	SelfAdvisoriesSkipped bool
-	SelfStatusReason      string // why the status lookup failed
-	SelfAdvisoriesReason  string // why the advisory lookup failed
+	// KEVUnchecked is the number of reached findings with a CVE whose known-exploited status (CISA's catalog) could not be
+	// checked: the grade says so in a note, since a called finding on that list is an F.
+	KEVUnchecked int
+
+	// ChecksumUnverified is true when `go mod verify` could not complete: a checksum mismatch (F) cannot be ruled out.
+	ChecksumUnverified bool
+
+	// StdlibVersion is the Go release the standard library row was graded at (the toolchain the scan ran with).
+	StdlibVersion string
+
+	SelfStatusReason     string // why the status lookup failed
+	SelfAdvisoriesReason string // why the advisory lookup failed
+
+	// ArchiveUnchecked lists the modules whose archived flag was never read for a reason that is not a failed GitHub call
+	// (their repository is not on GitHub, is unknown, or could not be found), so "not archived" is unproven for them. It
+	// is a note on the result, never a reason for Pending: no retry could change it.
+	ArchiveUnchecked []string
 }
 
 // Input is everything the grade reads.
@@ -236,6 +256,11 @@ type Result struct {
 	// Notes are things the letter does not cover or checks that were skipped (e.g. the module's own advisories were not
 	// looked up because no module version was given).
 	Notes []string `json:"notes,omitempty"`
+	// ChecksumMismatch is true when `go mod verify` found a module that does not match its checksum, and ChecksumDetail
+	// says which. It is a fact of the result whether or not a whole-tree row is what decides the letter: when a row already
+	// scores F, the rule does not raise the letter and so has no tree row, but the mismatch must not be lost.
+	ChecksumMismatch bool   `json:"checksum_mismatch,omitempty"`
+	ChecksumDetail   string `json:"checksum_detail,omitempty"`
 }
 
 // Deciding names what set the letter: a row, or a whole-tree rule.

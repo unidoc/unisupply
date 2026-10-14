@@ -162,9 +162,12 @@ type EvalInput struct {
 // Evaluate checks all dependencies against the policy and returns violations.
 func (p *Policy) Evaluate(input EvalInput) *Result {
 	result := &Result{Pass: true}
-	ps := input.ProjectScore
-
 	p.evalGrade(input.Grade, result)
+	ps := input.ProjectScore
+	if ps == nil {
+		// a library caller may pass only the grade: the per-dependency rules then have nothing to check
+		return result
+	}
 
 	// Per-dependency checks.
 	for _, ds := range ps.Dependencies {
@@ -337,32 +340,62 @@ func (r *Result) addError(rule, module, detail string) {
 	})
 }
 
-// FormatText returns a human-readable summary of violations.
+// FormatText returns a human-readable summary of violations. Errors decide PASS or FAIL and are the only ones counted
+// in the FAIL line; warnings (for example a Pending grade allowed by allow_pending) are listed separately and are
+// printed on PASS as well, so a gate that passed on "no result" is never silent.
 func (r *Result) FormatText(noColor bool) string {
-	if r.Pass {
-		if noColor {
-			return "PASS: All policies satisfied.\n"
+	var errs, warns []Violation
+	for _, v := range r.Violations {
+		if v.Severity == "warning" {
+			warns = append(warns, v)
+		} else {
+			errs = append(errs, v)
 		}
-		return "\033[32mPASS: All policies satisfied.\033[0m\n"
+	}
+
+	paint := func(code, s string) string {
+		if noColor {
+			return s
+		}
+		return code + s + "\033[0m"
+	}
+	plural := func(n int, word string) string {
+		if n == 1 {
+			return fmt.Sprintf("%d %s", n, word)
+		}
+		return fmt.Sprintf("%d %ss", n, word)
 	}
 
 	var b strings.Builder
-	if noColor {
-		fmt.Fprintf(&b, "FAIL: %d policy violation(s) found.\n\n", len(r.Violations))
-	} else {
-		fmt.Fprintf(&b, "\033[31mFAIL: %d policy violation(s) found.\033[0m\n\n", len(r.Violations))
+	if r.Pass {
+		if len(warns) == 0 {
+			b.WriteString(paint("\033[32m", "PASS: All policies satisfied.") + "\n")
+			return b.String()
+		}
+		b.WriteString(paint("\033[32m", fmt.Sprintf("PASS (%s): All policies satisfied except what is listed below.", plural(len(warns), "warning"))) + "\n\n")
+		writeViolationLines(&b, warns, 1)
+		return b.String()
 	}
 
-	for i, v := range r.Violations {
-		prefix := fmt.Sprintf("  %d. [%s]", i+1, v.Rule)
+	b.WriteString(paint("\033[31m", fmt.Sprintf("FAIL: %d policy violation(s) found.", len(errs))) + "\n\n")
+	writeViolationLines(&b, errs, 1)
+	if len(warns) > 0 {
+		fmt.Fprintf(&b, "\n%s:\n", plural(len(warns), "warning"))
+		writeViolationLines(&b, warns, 1)
+	}
+	return b.String()
+}
+
+// writeViolationLines writes numbered violation lines, numbering from start.
+func writeViolationLines(b *strings.Builder, vs []Violation, start int) {
+	for i, v := range vs {
+		prefix := fmt.Sprintf("  %d. [%s]", start+i, v.Rule)
 		if v.Module != "" {
-			fmt.Fprintf(&b, "%s %s: %s\n", prefix, v.Module, v.Detail)
+			fmt.Fprintf(b, "%s %s: %s\n", prefix, v.Module, v.Detail)
 		} else {
-			fmt.Fprintf(&b, "%s %s\n", prefix, v.Detail)
+			fmt.Fprintf(b, "%s %s\n", prefix, v.Detail)
 		}
 	}
-
-	return b.String()
 }
 
 // FormatJSON returns the result as JSON.

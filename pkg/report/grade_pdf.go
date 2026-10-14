@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/unidoc/unipdf/v5/creator"
 	"github.com/unidoc/unipdf/v5/model"
@@ -133,32 +134,45 @@ func writeGradeSection(c *creator.Creator, g *grade.Result, regular, bold *model
 	}
 }
 
+// pdfModuleColWidth is how many characters of a module path fit on one line of the rows table's module column.
+const pdfModuleColWidth = 28
+
+// pdfGradeRowCells is the text of one rows-table row. The module path is wrapped at '/' boundaries.
+func pdfGradeRowCells(r *grade.RowResult) [6]string {
+	lines := gradeWrapModulePath(r.Module, pdfModuleColWidth)
+	if r.Self {
+		lines = append(lines, "("+gradeThisModuleLabel+")")
+	}
+	return [6]string{strings.Join(lines, "\n"), r.Version, gradeRowLabel(r), fmt.Sprintf("%d", r.Score), r.UpkeepState, r.Reason}
+}
+
 func writeGradeRowsPDF(c *creator.Creator, g *grade.Result, regular, bold *model.PdfFont) {
 	if len(g.Rows) == 0 {
 		return
 	}
 	subheading(c, "Rows (worst first)", bold)
 
-	table := c.NewTable(6)
-	table.SetMargins(0, 0, 5, 10)
-	if err := table.SetColumnWidths(0.27, 0.12, 0.08, 0.08, 0.12, 0.33); err != nil {
-		return
-	}
-	addTableHeader(c, table, []string{"Module", "Version", "Grade", "Score", "Upkeep", "Reason"}, bold)
-	for i := range g.Rows {
-		r := &g.Rows[i]
-		name := r.Module
-		if r.Self {
-			name += " (" + gradeThisModuleLabel + ")"
+	rows, quiet := gradeRowsToShow(g, false)
+	if len(rows) > 0 {
+		table := c.NewTable(6)
+		table.SetMargins(0, 0, 5, 10)
+		if err := table.SetColumnWidths(0.32, 0.12, 0.07, 0.07, 0.10, 0.32); err != nil {
+			return
 		}
-		for _, v := range []string{name, r.Version, gradeRowLabel(r), fmt.Sprintf("%d", r.Score), r.UpkeepState, r.Reason} {
-			cell := table.NewCell()
-			if err := cell.SetContent(pdfPara(c, v, regular, 9, creator.ColorBlack, false, [4]float64{0, 0, 0, 0})); err != nil {
-				fmt.Printf("Error setting grade table content: %v\n", err)
+		addTableHeader(c, table, []string{"Module", "Version", "Grade", "Score", "Upkeep", "Reason"}, bold)
+		for _, r := range rows {
+			for _, v := range pdfGradeRowCells(r) {
+				cell := table.NewCell()
+				if err := cell.SetContent(pdfPara(c, v, regular, 9, creator.ColorBlack, false, [4]float64{0, 0, 0, 0})); err != nil {
+					fmt.Printf("Error setting grade table content: %v\n", err)
+				}
 			}
 		}
+		_ = c.Draw(table)
 	}
-	_ = c.Draw(table)
+	if line := gradeQuietRowsLine(quiet); line != "" {
+		_ = c.Draw(pdfPara(c, line, regular, 9, creator.ColorRGBFromHex("#666666"), false, [4]float64{0, 0, 0, 10}))
+	}
 
 	first := true
 	for i := range g.Rows {
@@ -226,6 +240,6 @@ func writeDependencyFindings(c *creator.Creator, ps *scorer.ProjectScore, g *gra
 	c.NewPage()
 	heading(c, fmt.Sprintf("Dependencies with Vulnerabilities (%d)", len(deps)), bold)
 	for _, ds := range deps {
-		writeDependencyBlock(c, ds, gradeRowLabel(rows[ds.Module]), regular, bold, true)
+		writeDependencyBlock(c, ds, rows[ds.Module], gradeRowLabel(rows[ds.Module]), regular, bold, true)
 	}
 }

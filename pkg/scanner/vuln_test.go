@@ -1437,6 +1437,31 @@ func TestCallCondition(t *testing.T) {
 	}
 }
 
+// A path through a standard-library callback is not explained by the standard library: the frame named is the first
+// one in a dependency.
+func TestCallCondition_SkipsStandardLibraryFrames(t *testing.T) {
+	roots := map[string]bool{"example.com/app": true}
+	std := func(pkg, fn, recv string) traceEntry {
+		return traceEntry{Module: "stdlib", Package: pkg, Function: fn, Receiver: recv}
+	}
+	app := func(fn string) traceEntry {
+		return traceEntry{Module: "example.com/app", Package: "example.com/app", Function: fn}
+	}
+	dep := func(fn string) traceEntry {
+		return traceEntry{Module: "example.com/dep", Version: "v1.0.0", Package: "example.com/dep", Function: fn}
+	}
+	// main -> net/http.ServeMux.ServeHTTP -> project handler -> dep.Func (innermost first).
+	trace := []traceEntry{dep("Func"), app("handler"), std("net/http", "ServeHTTP", "*ServeMux"), app("main")}
+	if got, want := callCondition(trace, roots), "reached through example.com/dep.Func"; got != want {
+		t.Errorf("callCondition = %q, want %q", got, want)
+	}
+	// Only the standard library follows the project: nothing to name.
+	trace = []traceEntry{std("crypto/tls", "Dial", ""), std("net/http", "Get", ""), app("main")}
+	if got := callCondition(trace, roots); got != "" {
+		t.Errorf("callCondition = %q, want empty when only standard-library frames follow the project", got)
+	}
+}
+
 // Without an SBOM no frame is a project frame, so no Condition is invented.
 func TestCallPath_NoConditionWithoutSBOM(t *testing.T) {
 	in := gvcTestOSV("GO-1") + gvcTestFinding("GO-1",

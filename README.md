@@ -1,6 +1,6 @@
 # unisupply
 
-> Go supply chain risk assessment — vulnerabilities, maintainer health, typosquatting, AI-generated code risk, CI/CD audit, SBOM, policy enforcement.
+> Go supply chain assessment — one letter grade from vulnerabilities and project upkeep, typosquatting, CI/CD audit, SBOM, policy enforcement.
 
 [![CI](https://github.com/unidoc/unisupply/actions/workflows/ci.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/ci.yml)
 [![Release](https://github.com/unidoc/unisupply/actions/workflows/release.yml/badge.svg)](https://github.com/unidoc/unisupply/actions/workflows/release.yml)
@@ -11,9 +11,9 @@
 ## What it does
 
 `unisupply` analyzes a Go project's full module dependency chain and produces a
-supply chain risk assessment. It runs ten focused scanners — vulnerability
+supply chain assessment. It runs nine focused scanners — vulnerability
 lookup, maintenance health, maintainer analysis, typosquatting detection,
-resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
+resilience scoring, CI/CD pipeline audit, build
 file inspection, `go.mod`/`go.sum` integrity audit (replace/exclude
 directives, go.sum completeness, go.sum verification), and Trust Index
 lookup — grades the module and each dependency from the in-tree scanner signals
@@ -61,35 +61,56 @@ unisupply ./ \
 unisupply ./ --policy-preset strict
 ```
 
-A typical text-format run against a small project looks like this (truncated
-for the README — your output will list every direct and transitive
-dependency):
+A text-format run reports the grade first, then the rows behind it. This is the
+real output (truncated: the dependency has two more findings, and your output
+lists every row that needs attention, `--verbose` all of them) for a small
+module that imports `gopkg.in/yaml.v2 v2.2.2` and calls `yaml.Unmarshal`:
 
 ```
-unisupply v0.4.0 — Go Supply Chain Risk Assessment
-by UniDoc (unidoc.io)
+SUPPLY-CHAIN GRADE: D
+  Decided by: gopkg.in/yaml.v2 (score 70) — called high GO-2022-0956 (70)
 
-Project: github.com/example/app
-Dependencies: 4 direct, 38 transitive (42 total, 113 graph edges)
+GRADE TABLE (worst first)
+  MODULE                         VERSION                             GRADE  SCORE  UPKEEP      REASON
+  gopkg.in/yaml.v2               v2.2.2                              D         70  unknown     called high GO-2022-0956 (70)
+      GO-2022-0956  severity HIGH, tier called, counted
+        Fixed in: v2.2.4
+        Response: Fix available for 1506 days; the graded version still requires the affected gopkg.in/yaml.v2 version.
+        History: Not enough response history.
+        VEX: affected
+        Condition: reached through gopkg.in/yaml.v2.Unmarshal
+  example.com/app (this module)                                      A          0  finished    nothing found
+  gopkg.in/check.v1              v0.0.0-20161208181325-20d25e280405  A          0  unknown     upkeep could not be read
 
-═══════════════════════════════════════════════════
-OVERALL SUPPLY CHAIN RISK SCORE: 26/100 (MEDIUM)
-═══════════════════════════════════════════════════
-
-HIGH RISK (3 dependencies)
-────────────────────────────────────────
-● golang.org/x/net      Risk: 51/100  (transitive)
-  ├─ 4 known vulnerabilities with available fixes
-  ├─ Resilience: 70/100 (frequent cadence, 53 releases)
-  └─ Score: vuln=100×40% maint=0×25% depth=0×15% maintainer=0×10% maturity=0×10%
-
-MEDIUM RISK (19 dependencies)   [...]
-LOW RISK (20 dependencies)      [use --verbose to see details]
-
-PACKAGES ELIGIBLE FOR MAINTENANCE TAKEOVER
-────────────────────────────────────────
-  ● widely-used/inactive-pkg   Activity: inactive   Bus factor: 1
+GRADE NOTES
+  - The known-exploited status (CISA's catalog) could not be checked for 3 reached findings: one on that list would grade F.
+  - The module's own advisories were not looked up: no module version was given.
 ```
+
+The SCORE column holds the policy values the letter is picked from. They are
+shown so you can follow the arithmetic; they are not a measurement and not a
+risk score (see [docs/grading.md](docs/grading.md)).
+
+An offline run (`unisupply ./ --offline --module-version v1.0.0`, captured from
+the built CLI on a one-dependency module) cannot check for vulnerabilities, so
+the grade is Pending and says why:
+
+```
+SUPPLY-CHAIN GRADE: PENDING
+  Why: the vulnerability scan did not run: offline — vulnerability scan skipped (no local vuln DB mirror configured)
+  Check that did not run: vulnerability_scan
+
+GRADE TABLE (worst first)
+  MODULE                            VERSION  GRADE  SCORE  UPKEEP      REASON
+  example.com/sample (this module)  v1.0.0   -          0  unknown     upkeep could not be read
+  gopkg.in/ini.v1                   v1.67.0  -          0  unknown     upkeep could not be read
+
+SCAN LIMITATIONS — the results above are incomplete
+  ! offline — maintenance data unavailable for 1 module(s)
+  ! vulnerability scan did not run
+```
+
+A row whose upkeep could not be read has no letter (`-`).
 
 Pass `--verbose` for full per-dependency breakdowns including the dependency
 path that pulled the module in.
@@ -103,7 +124,6 @@ path that pulled the module in.
 | Maintainer       | Contributors, bus factor, activity, org verification    | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules        | Built-in list              |
 | Resilience       | Release cadence, governance files, version scheme       | GitHub API                 |
-| AI-Generated     | Fresh modules, few releases, generic names (heuristics) | Module metadata            |
 | CI/CD            | Action pinning, permissions, secret exposure            | `.github/workflows/*.yml`  |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns         | Dockerfile, Makefile, *.sh |
 | Integrity        | `go.mod` `replace`/`exclude` directive audit            | `go.mod` (offline)         |
@@ -234,7 +254,8 @@ absent `in_kev` means the KEV catalog was not consulted (`false` means
 
 `unisupply` ships two presets and accepts a custom JSON policy file. Policy
 violations cause the binary to exit `2`, which is the convention CI systems
-expect for a deliberate fail-fast.
+expect for a deliberate fail-fast. Without `--policy` or `--policy-preset` the
+exit code ignores the grade: a grade of F still exits `0`.
 
 ```bash
 # Built-in presets
@@ -265,6 +286,11 @@ A minimal custom policy (every field is optional — see
 
 Notable fields:
 
+- `max_grade` — the worst letter allowed, `"A"` to `"F"` (`"C"` fails D and F).
+  A grade that is Pending (a check it needs did not run) or missing **fails**
+  this rule: a gate must not pass on "no result".
+- `allow_pending` — let a Pending grade pass `max_grade`. It is then printed as a
+  warning (`PASS (1 warning): ...`) instead of failing.
 - `no_known_vulns` / `no_critical_vulns` — fail on any vuln, or only on
   high/critical-severity vulns.
 - `no_single_maintainer` — fail if any **direct** dependency has bus factor ≤ 1.
@@ -274,7 +300,7 @@ Notable fields:
   matches `golang.org/x/net`); glob patterns are not supported.
 - `blocked_modules` — applies to direct and transitive dependencies, with the
   same exact-or-prefix matching rule.
-- `max_ci_score` — gate on the CI/CD scanner's overall risk score (requires
+- `max_ci_score` — gate on the CI/CD audit's own 0–100 score, which is separate from the grade (requires
   `--scan-ci`).
 - `no_unmaintained_months`, `no_archived` and `no_deprecated` skip modules
   confirmed outside the build (`in_build: false`, in the module graph only). A
@@ -290,7 +316,8 @@ Policy files are decoded strictly: any key that is not a recognized field is
 rejected at load time (exit 1, naming the offending key), so a typo'd or
 outdated rule name can never silently disable a check.
 
-<!-- TODO (PR 08 / M6.5): once the examples/ directory lands, link to ready-to-copy policy files here. -->
+Ready-to-copy policy files and a field-by-field reference are in
+[examples/](examples/policy-custom.md).
 
 ## Trust Index integration
 
@@ -365,7 +392,7 @@ output unchanged.
   off produces a fully self-contained scan — `unisupply` never reaches out
   to unitrust by default and has no implicit endpoint.
 - Failures of the Trust Index call (network errors, non-200 responses) are
-  surfaced as warnings; they do not abort the scan or alter risk scores
+  surfaced as warnings; they do not abort the scan or change the grade
   derived from the in-tree scanners.
 - **SSRF defense.** `--trust-index-url` requires `https` for all non-loopback
   hosts. RFC1918, link-local (`169.254/16`), and IPv6 ULA/link-local addresses
@@ -382,18 +409,17 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 10 security scanners       pkg/scanner/
+  ├── Run 9 security scanners        pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
   │   ├── Typosquatting detection
   │   ├── Resilience scoring
-  │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
   │   ├── Build file scanning
   │   ├── Integrity (go.mod/go.sum audit, go mod verify)
   │   └── Trust Index lookup (unitrust, optional)
-  ├── Compute risk scores             pkg/scorer/
+  ├── Grade (A to F)                  pkg/grade/ (inputs from pkg/scorer/)
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/
       ├── Text (colored terminal)
@@ -449,9 +475,11 @@ the same data already public in your `go.mod`.
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version, or a branch name (the GitHub default branch, else `main`, then `master`) | Maintenance and resilience scanners: release history, the latest version's `go.mod` (deprecation notice), and the default branch's head commit | always runs |
 | `proxy.golang.org` | Module path + fixed version (or, for the standard library, `golang.org/toolchain@v0.0.1-go<version>.linux-amd64`) | Fix-release dates: the `.info` time of the first fixed version of an advisory, at most 8 lookups at a time, one per distinct fixed version | always runs when an advisory names a fixed version (no-op otherwise) |
+| `proxy.golang.org` | The scanned module's path and its dependencies' module paths + fixed versions | Response history: the scanned module's version list (`@v/list`) and the `.info` and `.mod` of its newest releases, and the `.info` of the fixed versions of its dependencies' advisories; at most 2000 requests and 2 minutes per scan | only with `--response-history` (which needs `--module-version`); omit the flag to skip |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
 | `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*), and its GHSA/CVE alias IDs (at most 4 aliases per advisory) | Severity enrichment when a vuln has unknown severity: the advisory's own record, then its alias records (GHSA first, then CVE; CVSS v3 vectors are scored locally) | always runs (no-op when no vulns) |
 | `api.osv.dev` | The scanned module's path and version (one `POST /v1/query`, paged up to 10 pages) | The scanned module's own advisories: those that affect exactly that version, graded like a dependency's | always runs when the module's version is known (no-op otherwise) |
+| `api.osv.dev` | Your direct dependencies' module paths (one `POST /v1/query` per dependency, at most 60 dependencies, paged up to 5 pages; no versions) | Response history: the advisories of each dependency, to find the versions that fixed them | only with `--response-history` (which needs `--module-version`); omit the flag to skip |
 | `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV and its alias records have no severity | always runs (no-op if no CVE alias); the NVD API key, when set, is sent as the `apiKey` header to this host only |
 | `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list); with a token, also the default branch's latest commit when the module proxy cannot answer the branch query | always runs; a token raises rate limits |
 | `api.github.com` | The GitHub token only; no module data | Token validation: one request to `/rate_limit` (retried up to twice on a network error or 5xx), after the dependency graph is resolved and before any scanner runs | only when a GitHub token is supplied, the project has dependencies (or `--require-github-token` is set), and `--offline` is not set; omit the token to skip |
@@ -542,28 +570,29 @@ What `--offline` costs you, and how each loss is reported:
 
 | Scanner | Offline behavior |
 |---------|------------------|
-| Vulnerability (govulncheck) | Skipped — warning states no local vuln DB mirror is configured; the 40% weight is excluded from every score, never scored as clean |
-| Maintenance | Not measured — warning names the module count; the 25% weight is excluded rather than scored with an unknown constant |
-| Maintainer, Resilience | UNKNOWN; the maintainer axis is excluded from scores rather than counted as zero |
-| **Headline verdict** | **`UNKNOWN — not scored`.** Three of the five headline candidates are CVE-derived, so with no vulnerability data the headline would rest on dependency-graph position and version scheme alone. The numeric score is still reported, labelled indicative |
+| Vulnerability (govulncheck) | Skipped — warning states no local vuln DB mirror is configured; the grade is **Pending**, never a letter from a scan that did not look |
+| Maintenance | Not measured — warning names the module count; a row whose upkeep could not be read has no letter (`-`) rather than a guessed one |
+| Maintainer, Resilience | UNKNOWN; not used by the grade |
+| **Grade** | **`PENDING` (no letter).** With no vulnerability data a letter would rest on upkeep alone, so the grade has none; `grade.pending` in JSON names the check that did not run and what is known anyway. A policy with `max_grade` fails on it unless `allow_pending` is set |
+| Response history (`--response-history`) | Not run — no request is made, and no response-history context is shown |
 | Module's own advisories, fix-release dates | Not queried — the lookup returns an error that is reported as pending, and fix dates stay on the advisory's date |
 | Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
 | go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
 | GitHub token validation | Skipped — a supplied token is not checked; with `--require-github-token` a warning says so and the run continues |
-| AI-gen | Does not run — every indicator derives from the module's first-release date, which comes from the proxy. Reported as unexamined, with a warning naming the module count; **not** reported as "no AI-gen risk found" |
 | Typosquat, CI/CD, build files, `go.mod` integrity | Unaffected — these never used the network |
 
-Degraded axes are marked, never fabricated: an unavailable signal is reported
-as unavailable and dropped from the weighting, so an offline scan cannot read
-as a clean bill of health.
+Degraded checks are marked, never fabricated: an unavailable signal is reported
+as unavailable, and a missing check the grade needs makes the grade Pending, so
+an offline scan cannot read as a clean bill of health.
 
 `--offline` is rejected alongside `--trust-index-url` (a network service by
 definition) and `--format pdf` (UniPDF validates its license over the network
 before rendering). Use `--format text`, `json`, or `sbom-*` offline.
 
-Offline scans currently report no vulnerabilities, because govulncheck needs
-the Go vulnerability database. A documented local-mirror workflow is not yet
-available — track it before relying on `--offline` for vulnerability findings.
+An offline scan cannot look up vulnerabilities, because govulncheck needs the Go
+vulnerability database: its grade is Pending (no letter), never a clean result. A
+documented local-mirror workflow is not yet available — track it before relying on
+`--offline` for vulnerability findings.
 
 ## Documentation
 

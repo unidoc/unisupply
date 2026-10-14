@@ -2,6 +2,7 @@ package grade
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -102,9 +103,13 @@ type scored struct {
 	score     int // table value (0 for graph-only)
 }
 
-func scoreFinding(f *Finding, self bool) scored {
+func scoreFinding(f *Finding, r *Row) scored {
 	sev, est := severityOf(f.Severity)
-	tier, assumed := tierOf(f.Reachability, self)
+	tier, assumed := tierOf(f.Reachability, r.Self)
+	if !r.Self && isRefuted(r.InBuild) {
+		// a module that is confirmed not to be compiled in is graph-only whatever the reachability says: its code never runs
+		tier, assumed = TierGraphOnly, false
+	}
 	s := scored{Finding: *f, sev: sev, estimated: est, tier: tier, assumed: assumed}
 	switch tier {
 	case TierCalled:
@@ -136,6 +141,8 @@ func monthsSince(t, now time.Time) int {
 func upkeepState(r Row, now time.Time) string {
 	u := r.Upkeep
 	switch {
+	case u.NotAssessed && !u.Archived && !u.Deprecated && !u.Retracted:
+		return StateNotAssessed
 	case u.Archived:
 		return StateArchived
 	case u.Deprecated || u.Retracted:
@@ -193,7 +200,7 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 			imported.list = append(imported.list, &fs[i])
 		}
 	}
-	best := func(ts tierSet, cap int) (int, *scored, int) {
+	best := func(ts tierSet, cap int, bonus bool) (int, *scored, int) {
 		if len(ts.list) == 0 {
 			return 0, nil, 0
 		}
@@ -218,7 +225,7 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 		top := byID[ids[0]]
 		further := 0
 		for _, id := range ids[1:] {
-			if highOrCritical(byID[id].sev) {
+			if bonus && highOrCritical(byID[id].sev) {
 				further++
 			}
 		}
@@ -228,8 +235,8 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 		}
 		return s, top, further
 	}
-	cs, ctop, cfurther := best(called, 0)
-	is, itop, ifurther := best(imported, importedCap)
+	cs, ctop, cfurther := best(called, 0, true)
+	is, itop, ifurther := best(imported, importedCap, false)
 	switch {
 	case cs >= is && ctop != nil:
 		score, top = cs, ctop
@@ -238,14 +245,26 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 		score, top = is, itop
 		reason = describeVuln(itop, "imported", ifurther)
 	}
+	if score > 100 {
+		score = 100
+		reason += "; capped at 100"
+	}
+	// a called known-exploited finding: at least 76. The worst such finding names it (highest table value, then the
+	// smallest ID), so the text does not depend on the order of the input.
+	var kev *scored
 	for _, f := range called.list {
-		if f.Exploited && score < exploitedFloor {
-			score, top = exploitedFloor, f
-			reason = fmt.Sprintf("called known-exploited %s %s (at least %d)", strings.ToLower(f.sev), f.ID, exploitedFloor)
+		if f.Exploited && (kev == nil || f.score > kev.score || (f.score == kev.score && f.ID < kev.ID)) {
+			kev = f
 		}
 	}
+	floored := false
+	if kev != nil && score < exploitedFloor {
+		score, top, floored = exploitedFloor, kev, true
+		reason = fmt.Sprintf("called known-exploited %s %s (at least %d)", strings.ToLower(kev.sev), kev.ID, exploitedFloor)
+	}
 	if top != nil {
-		est = top.estimated
+		// the floor decided, not the estimate
+		est = top.estimated && !floored
 	}
 	if isConfirmed(r.TestOnly) && score > 0 {
 		half := score / 2
@@ -303,9 +322,9 @@ func gradeRow(r Row, in *Input) RowResult {
 	state := upkeepState(r, in.Now)
 	fs := make([]scored, 0, len(r.Findings))
 	for i := range r.Findings {
-		fs = append(fs, scoreFinding(&r.Findings[i], r.Self))
+		fs = append(fs, scoreFinding(&r.Findings[i], &r))
 	}
-	vs, est, top, vreason := vulnScore(r, fs)
+	vs, est, _, vreason := vulnScore(r, fs)
 	us := upkeepScore(r, state)
 	score := vs
 	if us > score {
@@ -320,6 +339,20 @@ func gradeRow(r Row, in *Input) RowResult {
 		Score: score, VulnScore: vs, UpkeepScore: us, Letter: bandOf(score),
 		UpkeepState: state, UpkeepNote: strings.TrimSpace(r.Upkeep.Message), UpkeepMissed: r.Upkeep.Missing,
 	}
+	// A row whose upkeep could not be read has no letter when what it could still be would change it: a row shown as A
+	// while its archived flag is unknown would read as a clean result.
+	if r.Upkeep.Missing && !isArchivedOrDeprecated(r) {
+		possible := upkeepDependency
+		if r.Self {
+			possible = upkeepSelf
+		}
+		if isConfirmed(r.TestOnly) || isRefuted(r.InBuild) {
+			possible = upkeepMinor
+		}
+		if bandOf(possible) > bandOf(score) {
+			rr.Letter = ""
+		}
+	}
 	switch {
 	case vs > 0 && vs >= us:
 		rr.Reason = vreason
@@ -330,10 +363,11 @@ func gradeRow(r Row, in *Input) RowResult {
 		rr.Reason = "findings are shown, not graded"
 	case state == StateUnknown:
 		rr.Reason = "upkeep could not be read"
+	case state == StateNotAssessed:
+		rr.Reason = "not assessed"
 	default:
 		rr.Reason = "nothing found"
 	}
-	_ = top
 	for i := range fs {
 		rr.Findings = append(rr.Findings, findingResult(&fs[i], r, in))
 	}
@@ -354,6 +388,10 @@ func preferVuln(a, b RowResult) bool {
 	if av != bv {
 		return av
 	}
+	if a.Estimated != b.Estimated {
+		// a row that does not rest on an estimate decides a tie, so the text does not depend on the module names
+		return !a.Estimated
+	}
 	if a.Self != b.Self {
 		return a.Self
 	}
@@ -363,8 +401,11 @@ func preferVuln(a, b RowResult) bool {
 	return a.Module < b.Module
 }
 
-// Grade computes the grade.
-func Grade(input *Input) Result {
+// gradeOnce computes the grade without the estimate check (see Grade).
+func gradeOnce(input *Input) Result {
+	if input == nil {
+		input = &Input{}
+	}
 	in := *input // the merge below must not change the caller's rows
 	if in.Now.IsZero() {
 		in.Now = time.Now().UTC()
@@ -400,19 +441,123 @@ func Grade(input *Input) Result {
 	if tr := treeRule(&in, rows); tr != nil && tr.Score > worst.Score {
 		res.TreeRows = append(res.TreeRows, *tr)
 		res.Score = tr.Score
-		res.Estimated = tr.Estimated
 		res.Deciding = &Deciding{Tree: tr.Rule, Reason: tr.Reason, Score: tr.Score}
 	} else if worst.Score > 0 {
-		res.Estimated = worst.Estimated
 		res.Deciding = &Deciding{Module: worst.Module, Self: worst.Self, Reason: worst.Reason, Score: worst.Score}
 	}
 	res.Letter = bandOf(res.Score)
 
 	if p := pendingFor(&in, rows, res.Score); p != nil {
-		res.Pending, res.Letter, res.Estimated = p, "", false
+		// No letter means no deciding row either: what is known is in Pending.Known.
+		res.Pending, res.Letter, res.Deciding, res.Score = p, "", nil, 0
+	}
+	if in.ChecksumMismatch {
+		res.ChecksumMismatch, res.ChecksumDetail = true, in.ChecksumDetail
+		if len(res.TreeRows) == 0 {
+			// no tree row: another row already scores F. The mismatch is still said.
+			note := "A module does not match its checksum (go.sum)"
+			if in.ChecksumDetail != "" {
+				note += ": " + in.ChecksumDetail
+			}
+			res.Notes = append(res.Notes, note+".")
+		}
+	}
+	if v := strings.TrimSpace(in.Checks.StdlibVersion); v != "" {
+		for i := range rows {
+			if rows[i].Module == "stdlib" && len(rows[i].Findings) > 0 {
+				res.Notes = append(res.Notes, "The standard library is graded at "+v+", the Go toolchain this scan ran with.")
+				break
+			}
+		}
 	}
 	if in.Checks.SelfAdvisoriesSkipped {
 		res.Notes = append(res.Notes, "The module's own advisories were not looked up: no module version was given.")
 	}
+	if n := archiveUncheckedNote(in.Checks.ArchiveUnchecked); n != "" {
+		res.Notes = append(res.Notes, n)
+	}
 	return res
+}
+
+// archiveUncheckedNote words the note for modules whose archived status was not checked: at most three names, sorted,
+// then a count of the rest. It is "" for an empty list.
+func archiveUncheckedNote(modules []string) string {
+	if len(modules) == 0 {
+		return ""
+	}
+	sorted := slices.Clone(modules)
+	slices.Sort(sorted)
+	shown := sorted[:min(3, len(sorted))]
+	list := strings.Join(shown, ", ")
+	if more := len(sorted) - len(shown); more > 0 {
+		list += fmt.Sprintf(" and %d more", more)
+	}
+	return fmt.Sprintf("Archived status was not checked for %d module(s) (their repository is not on GitHub or could not be found): %s.", len(sorted), list)
+}
+
+func isArchivedOrDeprecated(r Row) bool {
+	return r.Upkeep.Archived || r.Upkeep.Deprecated || r.Upkeep.Retracted
+}
+
+// Grade turns what the scanners found into the grade. Estimated is set when a severity nobody has published (scored as
+// medium) could change the letter: the grade is computed again with every such severity as low and as critical, and a
+// different letter in either run marks the result.
+func Grade(input *Input) Result {
+	if input == nil {
+		input = &Input{}
+	}
+	res := gradeOnce(input)
+	if res.Pending != nil || !hasEstimatedSeverity(input) {
+		return res
+	}
+	for _, sev := range []string{"LOW", "CRITICAL"} {
+		alt := withEstimatedSeverity(input, sev)
+		if r := gradeOnce(&alt); r.Letter != res.Letter {
+			res.Estimated = true
+			break
+		}
+	}
+	return res
+}
+
+// hasEstimatedSeverity is true when some finding of the input has no published severity.
+func hasEstimatedSeverity(in *Input) bool {
+	check := func(fs []Finding) bool {
+		for i := range fs {
+			if _, est := severityOf(fs[i].Severity); est {
+				return true
+			}
+		}
+		return false
+	}
+	if check(in.Self.Findings) {
+		return true
+	}
+	for i := range in.Deps {
+		if check(in.Deps[i].Findings) {
+			return true
+		}
+	}
+	return false
+}
+
+// withEstimatedSeverity is a copy of the input in which every finding without a published severity has the given one.
+func withEstimatedSeverity(in *Input, sev string) Input {
+	out := *in
+	set := func(fs []Finding) []Finding {
+		cp := append([]Finding(nil), fs...)
+		for i := range cp {
+			if _, est := severityOf(cp[i].Severity); est {
+				cp[i].Severity = sev
+			}
+		}
+		return cp
+	}
+	out.Self.Findings = set(in.Self.Findings)
+	out.Deps = make([]Row, len(in.Deps))
+	for i := range in.Deps {
+		out.Deps[i] = in.Deps[i]
+		out.Deps[i].Findings = set(in.Deps[i].Findings)
+	}
+	return out
 }

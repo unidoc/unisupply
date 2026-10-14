@@ -123,75 +123,137 @@ func NewResilienceScanner(timeout time.Duration) *ResilienceScanner {
 }
 
 // ScanAll computes resilience info for all dependencies.
+//
+// It works in three phases so that the per-scan request budget is spent
+// deterministically: the version lists are fetched first (they decide how many
+// dates each module needs), then every module's date requests are reserved from
+// the budget serially in sorted module-path order, and only then do the
+// workers fetch the dates. Which modules end up Limited under a spent budget
+// therefore depends on the module paths alone, not on goroutine scheduling or
+// map order.
 func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph, maintainers map[string]*MaintainerInfo) map[string]*ResilienceInfo {
 	rep := progress.From(ctx)
 	total := len(graph.Dependencies)
-
-	results := make(map[string]*ResilienceInfo)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var done int64
 
 	rs.mu.Lock()
 	rs.infoBudget = rs.scanBudget
 	rs.mu.Unlock()
 
-	sem := make(chan struct{}, resilienceModuleConcurrency)
+	paths := make([]string, 0, total)
+	for p := range graph.Dependencies {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
 
-	for _, dep := range graph.Dependencies {
-		wg.Add(1)
-		go func(d *resolver.Dependency) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	// Phase 1: version lists.
+	work := make([]*resilienceWork, len(paths))
+	runBounded(resilienceModuleConcurrency, len(paths), func(i int) {
+		rep.Step("%s", paths[i])
+		work[i] = rs.planModule(ctx, paths[i])
+	})
 
-			rep.Step("%s", d.Module.Path)
-			info := rs.analyzeModule(ctx, d.Module.Path)
-
-			// Enrich with maintainer data if available.
-			if mi, ok := maintainers[d.Module.Path]; ok {
-				info.HasMultipleMaintainers = mi.BusFactor > 1
-			}
-
-			info.Score = computeResilienceScore(info)
-			n := atomic.AddInt64(&done, 1)
-			rep.Progress(int(n), total)
-
-			mu.Lock()
-			results[d.Module.Path] = info
-			mu.Unlock()
-		}(dep)
+	// Phase 2: reserve each module's date requests, in sorted order.
+	granted := make([]int, len(work))
+	for i, w := range work {
+		if !w.done {
+			granted[i] = rs.reserveInfoRequests(len(w.sample))
+		}
 	}
 
-	wg.Wait()
+	// Phase 3: dates and scoring.
+	results := make(map[string]*ResilienceInfo, total)
+	var mu sync.Mutex
+	var done int64
+	runBounded(resilienceModuleConcurrency, len(work), func(i int) {
+		w := work[i]
+		info := rs.finishModule(ctx, w, granted[i])
+
+		// Enrich with maintainer data if available.
+		if mi, ok := maintainers[w.modPath]; ok {
+			info.HasMultipleMaintainers = mi.BusFactor > 1
+		}
+
+		info.Score = computeResilienceScore(info)
+		n := atomic.AddInt64(&done, 1)
+		rep.Progress(int(n), total)
+
+		mu.Lock()
+		results[w.modPath] = info
+		mu.Unlock()
+	})
 	return results
 }
 
+// runBounded calls fn(0..n-1) with at most limit calls in flight and waits for all.
+func runBounded(limit, n int, fn func(i int)) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, limit)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fn(i)
+		}()
+	}
+	wg.Wait()
+}
+
+// resilienceWork carries one module between the phases of ScanAll.
+type resilienceWork struct {
+	modPath string
+
+	// info is the final result when done is set (cached, or no version list).
+	info *ResilienceInfo
+	done bool
+
+	// Otherwise: the full version list, the dates to fetch (see sampleVersions)
+	// and the flags computed from the list.
+	versions      []string
+	sample        []string
+	oldest        string
+	flags         ResilienceInfo
+	majorVersions int
+}
+
+// analyzeModule analyses one module on its own: its date requests are reserved
+// from the budget as it goes. ScanAll uses the three phases instead.
 func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) *ResilienceInfo {
+	w := rs.planModule(ctx, modPath)
+	granted := 0
+	if !w.done {
+		granted = rs.reserveInfoRequests(len(w.sample))
+	}
+	return rs.finishModule(ctx, w, granted)
+}
+
+// planModule fetches the module's version list and derives what needs no date
+// request from it.
+func (rs *ResilienceScanner) planModule(ctx context.Context, modPath string) *resilienceWork {
 	rs.mu.Lock()
 	if cached, ok := rs.cache[modPath]; ok {
 		rs.mu.Unlock()
-		return cached
+		return &resilienceWork{modPath: modPath, info: cached, done: true}
 	}
 	rs.mu.Unlock()
-
-	info := &ResilienceInfo{}
 
 	// Fetch version list from Go proxy. An empty list means the proxy was
 	// unreachable or returned an error: leave DataAvailable false so callers
 	// know zero-values are not real.
 	versions := rs.fetchVersionList(ctx, modPath)
 	if len(versions) == 0 {
+		info := &ResilienceInfo{}
 		rs.mu.Lock()
 		rs.cache[modPath] = info
 		rs.mu.Unlock()
-		return info
+		return &resilienceWork{modPath: modPath, info: info, done: true}
 	}
 
+	w := &resilienceWork{modPath: modPath, versions: versions}
 	// Version list is available: all fields that follow are real data.
-	info.DataAvailable = true
-
-	info.TotalReleases = len(versions)
+	w.flags.DataAvailable = true
+	w.flags.TotalReleases = len(versions)
 
 	// Flags that need no request come from the full version list.
 	majorVersions := make(map[string]bool)
@@ -206,29 +268,43 @@ func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) 
 
 		// Check for stable release.
 		if !strings.HasPrefix(ver, "v0.") && strings.HasPrefix(ver, "v") && !strings.Contains(ver, "-") {
-			info.HasStableRelease = true
+			w.flags.HasStableRelease = true
 		}
 
 		// Check for pre-release markers.
 		if strings.Contains(ver, "-rc") || strings.Contains(ver, "-beta") || strings.Contains(ver, "-alpha") {
-			info.PreReleaseOnly = true // Will be overridden if stable found
+			w.flags.PreReleaseOnly = true // Will be overridden if stable found
 		}
 	}
-
-	if info.HasStableRelease {
-		info.PreReleaseOnly = false
+	if w.flags.HasStableRelease {
+		w.flags.PreReleaseOnly = false
 	}
+	w.majorVersions = len(majorVersions)
 
-	// Fetch timestamps for a bounded sample of the versions to compute cadence.
-	sample, oldest := sampleVersions(versions, maxResilienceVersionSamples)
-	timestamps, oldestFound := rs.fetchVersionTimes(ctx, modPath, sample, oldest)
-	if len(timestamps) < len(versions) {
+	// A bounded sample of the versions gets its dates fetched, to compute cadence.
+	w.sample, w.oldest = sampleVersions(versions, maxResilienceVersionSamples)
+	return w
+}
+
+// finishModule fetches the dates of the first granted versions of w's sample
+// and completes the analysis.
+func (rs *ResilienceScanner) finishModule(ctx context.Context, w *resilienceWork, granted int) *ResilienceInfo {
+	if w.done {
+		return w.info
+	}
+	modPath := w.modPath
+	info := &ResilienceInfo{}
+	*info = w.flags
+
+	timestamps, oldestFound := rs.fetchVersionTimes(ctx, modPath, w.sample[:min(granted, len(w.sample))], w.oldest)
+	if len(timestamps) < len(w.versions) {
 		info.Limited = true
 		info.SampledVersions = len(timestamps)
 	}
-	if len(timestamps) == 0 && len(sample) > 0 && rs.budgetSpent() {
-		// The budget left no date at all: say there is no data rather than
-		// scoring a cadence computed from nothing.
+	if len(timestamps) == 0 {
+		// No date at all, whether the budget left none or every request
+		// failed: say there is no data rather than scoring a cadence computed
+		// from nothing.
 		unavailable := &ResilienceInfo{Limited: true}
 		rs.mu.Lock()
 		rs.cache[modPath] = unavailable
@@ -236,36 +312,33 @@ func (rs *ResilienceScanner) analyzeModule(ctx context.Context, modPath string) 
 		return unavailable
 	}
 
-	info.MajorVersions = len(majorVersions)
+	info.MajorVersions = w.majorVersions
 
 	// Compute cadence from timestamps.
-	if len(timestamps) > 0 {
-		sort.Slice(timestamps, func(i, j int) bool {
-			return timestamps[i].Before(timestamps[j])
-		})
+	sort.Slice(timestamps, func(i, j int) bool {
+		return timestamps[i].Before(timestamps[j])
+	})
+	info.FirstReleaseDate = timestamps[0]
+	info.LastReleaseDate = timestamps[len(timestamps)-1]
+	info.ProjectAgeDays = int(rs.ScanStart.Sub(info.FirstReleaseDate).Hours() / 24)
 
-		info.FirstReleaseDate = timestamps[0]
-		info.LastReleaseDate = timestamps[len(timestamps)-1]
-		info.ProjectAgeDays = int(rs.ScanStart.Sub(info.FirstReleaseDate).Hours() / 24)
-
-		if len(timestamps) > 1 {
-			totalDays := info.LastReleaseDate.Sub(info.FirstReleaseDate).Hours() / 24
-			intervals := len(timestamps) - 1
-			if info.Limited && oldestFound {
-				// The sample spans the whole history, so spread it over the real
-				// release count; spacing it over the sample would overstate the
-				// gap between releases.
-				intervals = info.TotalReleases - 1
-			}
-			info.AvgDaysBetween = totalDays / float64(intervals)
+	if len(timestamps) > 1 {
+		totalDays := info.LastReleaseDate.Sub(info.FirstReleaseDate).Hours() / 24
+		intervals := len(timestamps) - 1
+		if info.Limited && oldestFound {
+			// The sample spans the whole history, so spread it over the real
+			// release count; spacing it over the sample would overstate the
+			// gap between releases.
+			intervals = info.TotalReleases - 1
 		}
+		info.AvgDaysBetween = totalDays / float64(intervals)
 	}
 
 	// Classify cadence.
 	info.ReleaseCadence = classifyCadence(rs.ScanStart, info)
 
 	// Classify version scheme.
-	info.VersionScheme = classifyVersionScheme(versions)
+	info.VersionScheme = classifyVersionScheme(w.versions)
 
 	// Check for governance files (if GitHub).
 	owner, repo := parseGitHubPath(modPath)
@@ -303,13 +376,6 @@ func sampleVersions(versions []string, limit int) (sample []string, oldest strin
 	return sample, oldest
 }
 
-// budgetSpent reports whether no version-date request is left in this scan.
-func (rs *ResilienceScanner) budgetSpent() bool {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	return rs.infoBudget <= 0
-}
-
 // reserveInfoRequests takes up to n requests from the per-scan budget and
 // returns how many it got.
 func (rs *ResilienceScanner) reserveInfoRequests(n int) int {
@@ -320,14 +386,12 @@ func (rs *ResilienceScanner) reserveInfoRequests(n int) int {
 	return n
 }
 
-// fetchVersionTimes fetches the release date of each sampled version, as many
-// as the per-scan budget allows (the sample is ordered by priority, so the
-// budget cuts the least important first), with at most resilienceInfoConcurrency
-// requests in flight scan-wide. It returns the dates that were obtained and
-// whether the date of oldest was among them.
+// fetchVersionTimes fetches the release date of each version in sample, whose
+// requests the caller has already reserved from the per-scan budget (the sample
+// is ordered by priority, so the budget cut the least important first), with at
+// most resilienceInfoConcurrency requests in flight scan-wide. It returns the
+// dates that were obtained and whether the date of oldest was among them.
 func (rs *ResilienceScanner) fetchVersionTimes(ctx context.Context, modPath string, sample []string, oldest string) (times []time.Time, oldestFound bool) {
-	granted := rs.reserveInfoRequests(len(sample))
-	sample = sample[:granted]
 	got := make([]time.Time, len(sample))
 	var wg sync.WaitGroup
 	for i, ver := range sample {

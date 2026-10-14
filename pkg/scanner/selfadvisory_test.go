@@ -91,7 +91,7 @@ func quietEnrichers(t *testing.T, base string, kev []string) SelfAdvisoryOptions
 	enricher := newEnricherWithTransport(t, transport, "", fixedClock)
 	ti := newThreatIntelWithTransport(t, &staticTransport{}, t.TempDir(), fixedClock)
 	ti.client.Transport = transport
-	return SelfAdvisoryOptions{BaseURL: base, Enricher: enricher, ThreatIntel: ti, clockFn: fixedClock}
+	return SelfAdvisoryOptions{BaseURL: base, Enricher: enricher, ThreatIntel: ti, Now: fixedClock}
 }
 
 const selfFullPage = `{"vulns":[

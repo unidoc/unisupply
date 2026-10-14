@@ -5,8 +5,9 @@ decided. The code is `pkg/grade`; if this page and the code disagree, the code w
 
 A grade is a statement about **known vulnerabilities and project upkeep** in the build that was scanned. **A** means
 that nothing in this assessment crossed a scoring threshold. It does not say the project is secure, actively supported
-or ready to release. The numbers below are policy values that pick a band. They are not probabilities of compromise and
-are not published as a score.
+or ready to release. The numbers below are policy values that pick a band. They are shown beside the letter (in each row, and in
+`grade.score`) for traceability: they let you check the arithmetic behind a letter. They are not a measurement, not a
+probability of compromise and not a risk score, and they carry no meaning outside the grade.
 
 ## One score per row
 
@@ -49,7 +50,9 @@ Reachability comes from govulncheck.
 - A row that is test-only (confirmed) halves the vulnerability score, capped at 50. A test-only known-exploited
   finding therefore lands at C. Unknown test-only status gets no discount.
 - Reachability that was not determined is scored as *called*. The finding says so.
-- A finding with no published severity is scored as medium, and the letter it decides is marked `C*`.
+- A finding with no published severity is scored as medium. The letter is marked with `*` (for example `C*`) when that estimate could change it: the grade is computed again with every such severity as low and as critical, and a different letter in either run marks the result, whichever row the unknown severity is on. When rows tie, a row that does not rest on an estimate decides, so the text never depends on module names.
+- A module that is confirmed not to be compiled in is graph-only whatever the reachability of its findings says.
+- A row's vulnerability score is capped at 100.
 
 ### Upkeep score
 
@@ -86,8 +89,21 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 
 1. the vulnerability scan failed or did not run;
 2. the scan did not finish (timeout or interruption);
-3. the module's own archived/deprecated status could not be read, or its own advisories could not be fetched;
-4. a dependency's maintenance data is missing and could still beat the worst row.
+3. the module's own advisories could not be fetched, or its own status (archived, deprecated) could not be read and the
+   worst it could be (35) would beat the worst row known;
+4. a dependency's maintenance data is missing and could still beat the worst row;
+5. `go mod verify` could not complete, so a checksum mismatch (F) cannot be ruled out;
+6. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
+   already F: one on that list would grade F.
+
+A Pending result publishes no letter, no deciding row and no score (`score` is 0 and means nothing then); `pending.known`
+says what is known. A module with no dependencies still runs the vulnerability scan: the standard library is part of every
+build, so such a module does not get a letter from a scan that never looked. A module with no Go package at all cannot be
+analysed by govulncheck, and its grade is Pending for the same reason.
+
+The standard library is graded as a row named `stdlib`, at the Go release the scan ran with (named in `grade.notes`): the
+same project can grade differently under another toolchain, and the report says which one it was. A row nobody assessed (the
+module itself without a published version, the standard library) has the upkeep state `not_assessed`, never `finished`.
 
 A gate must treat a missing letter as "no result", never as a pass.
 
@@ -97,7 +113,12 @@ With `--module-version v1.2.3` the module is graded as that published version: i
 assumed *called* (govulncheck does not check the module it starts from; whether a consumer imports the affected package
 is theirs to know, and each advisory names the packages). Its archived and deprecated status is read the same way as a
 dependency's. Without `--module-version` the module is not graded as a published module, and the result says so in
-`grade.notes`.
+`grade.notes`. The version must be a full one (`v1.2.3`, `v1.2.3-rc.1`, optionally `+incompatible`); `v1` and `v1.2` are
+rejected before anything is scanned, and OSV is asked for the version without `+incompatible`.
+
+A dependency whose archived flag could not be read because its repository is not on GitHub, is unknown, or was not found
+is not "not archived". It does not make the grade Pending (no retry could change it); one note in `grade.notes` names
+how many such modules there are and the first three, sorted.
 
 ## Response window
 
@@ -109,8 +130,13 @@ fixes in the past (the median over at least three fixes), as context and not a f
 
 ## What is not published
 
-The 0 to 100 score, the five headline candidates, the AI-generation heuristic, EPSS-adjusted scores and the takeover
-label are no longer published in any output. EPSS and KEV facts remain on each vulnerability as data.
+The old 0 to 100 risk score (overall and per dependency), the five headline candidates, the AI-generation heuristic,
+EPSS-adjusted scores and the takeover label are no longer published in any output. The 0 to 100 numbers that remain in
+the grade rows are the policy values described at the top of this page, shown for traceability, not a score.
+EPSS and KEV facts remain on each vulnerability as data.
+
+The CI/CD audit (`--scan-ci`, `--scan-workflows`) is not part of the grade. It keeps its own 0 to 100 score, which is
+reported in the CI/CD section of the output and is what the policy field `max_ci_score` gates on.
 
 ## JSON
 
@@ -128,9 +154,15 @@ The `grade` object of `--format json`:
 }
 ```
 
-`letter` is absent and `pending` present when the grade is Pending. `estimated: true` marks a `C*`.
+`letter` is absent and `pending` present when the grade is Pending. `estimated: true` marks a letter that an unpublished severity could change (`C*`).
 
 ## Policy
 
-`max_grade` in a policy file is the worst letter allowed (`"C"` fails D and F). Pending fails unless `allow_pending` is
-set. The old `max_risk_score` and `max_overall_score` are gone, and a policy file that still contains them is rejected.
+`max_grade` in a policy file is the worst letter allowed (`"C"` fails D and F). An enabled `max_grade` also fails when
+no grade is available (grading was not run), and it fails on Pending unless `allow_pending` is `true`. With
+`allow_pending`, a Pending grade passes the gate but is printed as a warning (`PASS (1 warning): ...`), so a gate that
+passed on "no result" is never silent. The old `max_risk_score` and `max_overall_score` are gone, and a policy file that
+still contains them is rejected. See [examples/policy-custom.md](../examples/policy-custom.md) for every policy field.
+
+The exit code reflects the grade only when a policy is given (`--policy` or `--policy-preset`): without one, a grade of
+F still exits 0.

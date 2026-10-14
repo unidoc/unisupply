@@ -21,7 +21,8 @@ type SBOMOptions struct {
 	// the root component's unisupply:go_version property; SPDX omits it.
 	GoVersion string
 
-	// Grade supplies each component's letter (Grading v2); nil leaves the grade properties out.
+	// Grade supplies each component's letter (Grading v2) and the overall letter on the root; nil leaves the grade
+	// properties out. A row with no letter (its upkeep could not be read) gets no property or annotation.
 	Grade *grade.Result
 }
 
@@ -94,6 +95,10 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		})
 	}
 
+	if v := overallGradeValue(opts.Grade); v != "" {
+		root.Properties = append(root.Properties, cdxProperty{Name: "unisupply:grade", Value: v})
+	}
+
 	bom := cdxBOM{
 		BOMFormat:    "CycloneDX",
 		SpecVersion:  "1.5",
@@ -132,9 +137,10 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 		}
 
 		// The row's grade (Grading v2): its letter and the one sentence that explains it.
-		if row, ok := rows[dep.Module.Path]; ok {
+		// A row without a letter carries no property: "no grade" is not a value.
+		if row, ok := rows[dep.Module.Path]; ok && row.Letter != "" {
 			comp.Properties = append(comp.Properties,
-				cdxProperty{Name: "unisupply:grade", Value: string(row.Letter)},
+				cdxProperty{Name: "unisupply:grade", Value: gradeRowLabel(&row)},
 				cdxProperty{Name: "unisupply:grade_reason", Value: row.Reason},
 			)
 		}
@@ -184,6 +190,7 @@ type spdxDocument struct {
 	CreationInfo      spdxCreationInfo   `json:"creationInfo"`
 	Packages          []spdxPackage      `json:"packages"`
 	Relationships     []spdxRelationship `json:"relationships"`
+	Annotations       []spdxAnnotation   `json:"annotations,omitempty"`
 }
 
 type spdxCreationInfo struct {
@@ -261,6 +268,15 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		RelatedSPDXElement: "SPDXRef-RootPackage",
 	})
 
+	if v := overallGradeValue(opts.Grade); v != "" {
+		doc.Annotations = append(doc.Annotations, spdxAnnotation{
+			AnnotationDate: now.Format(time.RFC3339),
+			AnnotationType: "REVIEW",
+			Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
+			Comment:        "grade=" + v,
+		})
+	}
+
 	rows := gradeRowsByModule(opts.Grade)
 	pkgIdx := 0
 	// Sorted order makes the SPDXRef-Package-N IDs map to the same modules on
@@ -286,12 +302,12 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		}
 
 		// The row's grade (Grading v2) as an annotation.
-		if row, ok := rows[dep.Module.Path]; ok {
+		if row, ok := rows[dep.Module.Path]; ok && row.Letter != "" {
 			pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
 				AnnotationDate: now.Format(time.RFC3339),
 				AnnotationType: "REVIEW",
 				Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
-				Comment:        fmt.Sprintf("grade=%s reason=%s", row.Letter, row.Reason),
+				Comment:        fmt.Sprintf("grade=%s reason=%s", gradeRowLabel(&row), row.Reason),
 			})
 		}
 
@@ -309,6 +325,19 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(doc)
+}
+
+// overallGradeValue is the overall grade for the SBOM root: the letter (with "*" when estimated), or "PENDING" followed
+// by the check that did not run. It is "" when no grade was given.
+func overallGradeValue(g *grade.Result) string {
+	if g == nil {
+		return ""
+	}
+	label := gradeLetterLabel(g)
+	if label == "PENDING" && g.Pending != nil && g.Pending.Check != "" {
+		label += " (" + g.Pending.Check + ")"
+	}
+	return label
 }
 
 // gradeRowsByModule indexes the grade's rows by module path. A nil grade yields an empty map.

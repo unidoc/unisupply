@@ -1,0 +1,109 @@
+{
+  "tool": "unisupply",
+  "version": "0.7.0-dev",
+  "generated_at": "2026-10-14T20:21:37Z",
+  "project": {
+    "module": "example.com/sample",
+    "go_version": "1.22",
+    "direct_dependencies": 1,
+    "transitive_dependencies": 0,
+    "total_dependencies": 1
+  },
+  "grade": {
+    "rule_version": 2,
+    "score": 90,
+    "rows": [
+      {
+        "module": "example.com/sample",
+        "version": "v1.0.0",
+        "self": true,
+        "score": 0,
+        "vulnerability_score": 0,
+        "upkeep_score": 0,
+        "letter": "A",
+        "reason": "nothing found",
+        "upkeep_state": "active"
+      },
+      {
+        "module": "gopkg.in/ini.v1",
+        "version": "v1.67.0",
+        "direct": true,
+        "score": 90,
+        "vulnerability_score": 90,
+        "upkeep_score": 0,
+        "letter": "F",
+        "reason": "called critical finding GO-2026-0001",
+        "upkeep_state": "active"
+      }
+    ],
+    "letter": "F",
+    "deciding": {
+      "module": "gopkg.in/ini.v1",
+      "reason": "called critical finding GO-2026-0001",
+      "score": 90
+    },
+    "tree_rows": [
+      {
+        "rule": "called_critical",
+        "score": 90,
+        "letter": "F",
+        "reason": "1 called critical finding across 1 module"
+      }
+    ]
+  },
+  "summary": {
+    "total_vulnerabilities": 1,
+    "unmaintained_2yr": 0,
+    "unmaintained_1yr": 0
+  },
+  "dependencies": [
+    {
+      "module": "gopkg.in/ini.v1",
+      "version": "v1.67.0",
+      "direct": true,
+      "dependency_path": [
+        "example.com/sample"
+      ],
+      "vulnerabilities": [
+        {
+          "id": "GO-2026-0001",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "summary": "example critical",
+          "severity": "CRITICAL",
+          "fixed_version": "v1.67.1",
+          "reachability": "called",
+          "epss_score": 0.5,
+          "in_kev": false
+        }
+      ]
+    }
+  ],
+  "ci_findings": null,
+  "build_file_findings": null,
+  "module_directives": {
+    "replace_count": 0,
+    "exclude_count": 0,
+    "redirect_count": 0,
+    "pseudo_version_count": 0,
+    "gosum_verified": "offline",
+    "findings": [
+      {
+        "category": "gosum_missing",
+        "severity": "HIGH",
+        "module": "example.com/sample",
+        "detail": "go.mod declares requirements but no go.sum is present — dependency checksums are not pinned",
+        "remediation": "Run `go mod tidy` and commit go.sum so every dependency download is verified against a pinned checksum."
+      }
+    ]
+  },
+  "time_bombs": [
+    {
+      "kind": "critical_cve",
+      "module": "gopkg.in/ini.v1",
+      "detail": "GO-2026-0001 (CRITICAL, called)",
+      "reachability": "called"
+    }
+  ]
+}

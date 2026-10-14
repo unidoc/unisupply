@@ -1276,6 +1276,42 @@ func TestResult_FormatText_Fail(t *testing.T) {
 	}
 }
 
+// TestResult_FormatText_PassWithWarning checks allow_pending is not silent: a PASS still prints its warning.
+func TestResult_FormatText_PassWithWarning(t *testing.T) {
+	p := &policy.Policy{MaxGrade: "A", AllowPending: true}
+	result := p.Evaluate(policy.EvalInput{
+		ProjectScore: &scorer.ProjectScore{},
+		Grade:        &grade.Result{Pending: &grade.Pending{Check: "vulnerability_scan", Reason: "the vulnerability scan did not run"}},
+	})
+	if !result.Pass {
+		t.Fatalf("expected pass: %+v", result)
+	}
+	text := result.FormatText(true)
+	for _, want := range []string{"PASS (1 warning)", "[max_grade]", "the vulnerability scan did not run"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}
+
+// TestResult_FormatText_FailCountsErrorsOnly checks the FAIL line counts errors, and warnings are listed apart.
+func TestResult_FormatText_FailCountsErrorsOnly(t *testing.T) {
+	result := &policy.Result{
+		Pass: false,
+		Violations: []policy.Violation{
+			{Rule: "no_archived", Module: "a/b", Detail: "repository is archived", Severity: "error"},
+			{Rule: "max_grade", Detail: "the grade is Pending (x)", Severity: "warning"},
+		},
+	}
+	text := result.FormatText(true)
+	if !strings.Contains(text, "FAIL: 1 policy violation(s) found.") {
+		t.Errorf("warning was counted as a violation:\n%s", text)
+	}
+	if !strings.Contains(text, "1 warning:") || !strings.Contains(text, "the grade is Pending (x)") {
+		t.Errorf("warning not listed separately:\n%s", text)
+	}
+}
+
 // Tests for FormatText - With color
 func TestResult_FormatText_Color(t *testing.T) {
 	result := &policy.Result{Pass: true, Violations: []policy.Violation{}}
@@ -1551,5 +1587,17 @@ func TestEvaluate_MaintenanceRules_TestOnlyNotExempt(t *testing.T) {
 	}}
 	if result := p.Evaluate(makeEvalInput(deps, 30)); result.Pass {
 		t.Errorf("Pass = true, want a no_archived violation for a test-only dep")
+	}
+}
+
+// A library caller may pass only the grade: Evaluate must not panic on the missing project score.
+func TestEvaluate_GradeOnlyInput(t *testing.T) {
+	r := policy.DefaultModeratePolicy().Evaluate(policy.EvalInput{Grade: &grade.Result{RuleVersion: 2, Letter: grade.LetterA}})
+	if !r.Pass {
+		t.Errorf("%+v", r.Violations)
+	}
+	r = policy.DefaultModeratePolicy().Evaluate(policy.EvalInput{Grade: &grade.Result{RuleVersion: 2, Letter: grade.LetterF}})
+	if r.Pass {
+		t.Error("an F passed the moderate preset")
 	}
 }

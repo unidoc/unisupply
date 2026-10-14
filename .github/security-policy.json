@@ -1,4 +1,5 @@
 {
   "max_grade": "C",
+  "allow_pending": true,
   "no_critical_vulns": true
 }

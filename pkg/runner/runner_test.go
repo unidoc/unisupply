@@ -3,6 +3,9 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +29,7 @@ func TestRun_NoDependencies(t *testing.T) {
 		t.Fatalf("writing fixture go.mod: %v", err)
 	}
 
+	stubGitHub(t, http.StatusOK) // hermetic: every request but a token probe is refused
 	result, err := Run(context.Background(), Options{
 		Path: tmpDir,
 		Now:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -54,8 +58,13 @@ func TestRun_NoDependencies(t *testing.T) {
 	if result.CIReport != nil {
 		t.Errorf("result.CIReport = %+v, want nil (ScanWorkflows/ScanCI were not requested)", result.CIReport)
 	}
-	if result.Grade == nil || result.Grade.Letter != "A" || result.Grade.Pending != nil {
-		t.Errorf("result.Grade = %+v, want a graded A for a module with nothing to scan", result.Grade)
+	// A module with no dependencies still runs the vulnerability scan (the standard library is part of every build). Here
+	// the network is refused, so the scan did not look: the grade is Pending, never an A.
+	if result.Grade == nil || result.Grade.Letter != "" || result.Grade.Pending == nil || result.Grade.Pending.Check != "vulnerability_scan" {
+		t.Errorf("result.Grade = %+v, want Pending (vulnerability_scan): the scan did not run", result.Grade)
+	}
+	if result.VulnScanErr == nil {
+		t.Error("result.VulnScanErr is nil although the vulnerability scan did not run")
 	}
 }
 
@@ -144,4 +153,36 @@ func TestTakeStdlibVulns(t *testing.T) {
 			t.Errorf("takeStdlibVulns() = %v, want nil", got)
 		}
 	})
+}
+
+// The fix-date stage has one deadline for all modules together, not one per
+// module: with a proxy that never answers, five modules take the stage
+// timeout, not five times the per-module timeout.
+func TestResolveAllFixDates_OneSharedDeadline(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer proxy.Close()
+
+	published := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	vulns := map[string][]scanner.Vulnerability{}
+	for i := range 5 {
+		vulns[fmt.Sprintf("example.com/m%d", i)] = []scanner.Vulnerability{{ID: "GO-1", FixedVersion: "v1.0.1", FixPublishedAt: &published}}
+	}
+	opts := scanner.FixDateOptions{ProxyURL: proxy.URL, Timeout: 400 * time.Millisecond}
+
+	start := time.Now()
+	resolveAllFixDates(context.Background(), opts, 400*time.Millisecond, vulns)
+	if d := time.Since(start); d > 1200*time.Millisecond {
+		t.Errorf("fix-date stage took %v for 5 stalled modules, want about the 400ms stage deadline", d)
+	}
+	// A stalled proxy leaves every finding on the advisory date.
+	for path, list := range vulns {
+		if list[0].FixDateSource != scanner.FixDateAdvisory {
+			t.Errorf("%s: FixDateSource = %q, want %q", path, list[0].FixDateSource, scanner.FixDateAdvisory)
+		}
+	}
 }

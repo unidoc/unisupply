@@ -1,14 +1,13 @@
-# Scanners and Risk Scoring
+# Scanners
 
-> **Grading v2.** The published grade is the letter described in [grading.md](grading.md). The 0-100 risk score, the
-> headline candidates and the per-dependency risk bands described under "Risk score" to "Headline candidates" below are
-> the scorer's internal measure: they are no longer published in the text, JSON, PDF or SBOM output, and policy gates
-> read the letter. The scanners, their data and their limits are unchanged.
+> **Grading v2.** The published result is the letter described in [grading.md](grading.md); policy gates read the
+> letter. This page describes the scanners, their data and their limits, and what each signal does to the grade. The
+> scorer's old 0-100 risk score and headline are not published in any output; what is left of them is kept short under
+> [Internal scorer (not published)](#internal-scorer-not-published) at the end.
 
-This document describes the scanners `unisupply` runs and the exact formula used
-to combine their results into a 0–100 risk score per dependency. It is the
-canonical reference for the algorithm; if the code in `pkg/scorer/risk.go` and
-this document disagree, the code wins — please open a PR fixing this file.
+This document describes the scanners `unisupply` runs and how their signals reach the grade. It is the reference for
+the scanners; if the code in `pkg/scanner` and this document disagree, the code wins, so please open a PR fixing this
+file.
 
 ## Scanners
 
@@ -19,11 +18,12 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
-| AI-generated     | Fresh modules, few releases, generic names                 | Resilience data (module proxy) — **not** offline-capable |
 | CI/CD            | Action pinning, permissions, secret exposure               | `.github/workflows/*.{yml,yaml}` |
 | Build files      | Unpinned Docker images, `curl \| bash` patterns            | Dockerfile, Makefile, *.sh |
 | Trust Index      | Curated trust scores (optional)                            | `unitrust` API             |
 | Integrity        | `go.mod` `replace`/`exclude` directive audit, `go.sum` verification, pseudo-version pin audit | `go.mod`/`go.sum` (offline) |
+
+The AI-generated-code heuristic no longer runs and nothing from it is published.
 
 A repository that GitHub has renamed or transferred answers with a redirect.
 The Maintainer scanner follows one hop, on `api.github.com` only, and reports
@@ -35,103 +35,6 @@ The CI/CD and Build-files scanners are off by default; enable them with
 `--scan-workflows` (workflow files `*.yml` and `*.yaml` only) or `--scan-ci`
 (workflows + Dockerfile + Makefile + shell scripts). The Trust Index scanner
 activates when `--trust-index-url` is supplied.
-
-## Risk score
-
-For each dependency, `unisupply` computes:
-
-```
-Risk Score (0–100) =
-    Vulnerabilities × 0.40
-  + Maintenance     × 0.25
-  + Depth           × 0.15
-  + Maintainer Risk × 0.10
-  + Maturity        × 0.10
-  + Typosquat Penalty      (0–20)  // typosquat.Confidence × 20
-  + AI-Gen Penalty         (0–15)  // aiGenRisk.Score × 0.15
-  + Low-Resilience Penalty (0–6)   // (30 − resilience.Score) × 0.2 when score < 30
-  + Replace Penalty        (0–20)  // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
-```
-
-Weights are defined in `pkg/scorer/risk.go` (`Weight*` constants). The final
-value is rounded and clamped to `[0, 100]`.
-
-### Unavailable axes
-
-An axis whose data could not be collected is dropped from **both** the numerator
-and the denominator, and the surviving weights renormalize to sum to 1.0:
-
-```
-Risk Score = Σ(measured axis × weight) / Σ(measured weight)  + penalties
-```
-
-| Axis | Excludable | Signal that it was unavailable |
-|------|-----------|--------------------------------|
-| Vulnerabilities (0.40) | yes | `ScoreInput.VulnScanUnavailable` — offline, or govulncheck failed |
-| Maintenance (0.25) | yes | no entry in the maintenance map (`ScanAll` inserts only on success) |
-| Maintainer Risk (0.10) | yes | `MaintainerInfo.DataAvailable == false` |
-| Depth (0.15) | no | derived from the resolved graph |
-| Maturity (0.10) | no | derived from the version string |
-
-Because depth and maturity are always available the denominator floors at 0.25.
-Each dependency reports `measured_weight` and `excluded_axes` in the JSON
-breakdown, and unmeasured component scores serialize as `null` rather than `0` —
-a consumer must be able to tell "nothing found" from "nothing looked".
-
-The two alternatives were both rejected: scoring an unmeasured axis as 0 reports
-a clean bill of health nobody earned, and scoring it with a hard-coded "unknown"
-constant reports a fabricated measurement as a finding.
-
-### Unexamined vs cleared: AI-generated-code detection
-
-Every indicator the AI-gen detector uses derives from the module's first-release
-date, which comes from the resilience scanner (module proxy). Without that date
-the detector cannot run at all — and the module is **unexamined**, not cleared.
-
-This mattered because both outcomes look identical in the output: a module the
-detector skipped and a module it examined and cleared (first released before the
-2022-11-01 ChatGPT cutoff) each produce `risk_level: "none"` with score 0, and
-`ScanAll` retains only scoring entries. An empty AI-gen result therefore read as
-"checked, nothing found" when it often meant "never checked".
-
-`AIGenRisk.data_available` now distinguishes them, and `ScanAll` returns a warning
-naming how many modules went unexamined. Offline that is every module, which is
-why AI-gen is not among the scanners `--offline` leaves intact.
-
-### Unscored headline
-
-Three of the five headline candidates (`severity_adjusted`, `cve_floor`, and the
-fix-age amplifier) are CVE-derived. When the vulnerability scan did not run they
-are all structurally 0, so the headline collapses onto `p95_dep_risk` — one
-voice of five, deciding alone, on whatever axes survived. Offline that means
-dependency-graph position and version scheme.
-
-In that case `overall_risk_level` is `UNKNOWN` and `headline_unscored_reason`
-explains why. `overall_risk_score` still carries the computed number for
-dashboards and policy gates, labelled indicative in the text and PDF reports.
-Per-dependency `risk_level` is unaffected and always carries a real band.
-
-Measured on UniDoc's own libraries, the guard is not hypothetical: without it an
-offline scan promoted UniOffice from LOW to MEDIUM on four untagged
-pseudo-version transitives, with no CVE check performed.
-
-The headline is also `UNKNOWN` when an **online** scan's govulncheck fails, not
-only offline — a failed scan found nothing because it never looked.
-
-**Policy gates deliberately still evaluate the indicative number.** `max_risk_score`
-and `max_overall_score` read `OverallScore`/`RiskScore`, which remain populated
-when the level is `UNKNOWN`, so the exit-code contract keeps working for CI jobs
-that run degraded. This is a deliberate choice, not an oversight: failing a gate
-open would be worse than gating on a partial measurement. The preset ceilings
-(strict 70/50, moderate 85/70) sit well above the range a degraded scan reaches,
-so in practice a scan that measured little will pass the score gates and fail (or
-pass) only on the categorical rules. A policy that must not run degraded should
-gate on `overall_risk_level != "UNKNOWN"` in the JSON output.
-
-One consequence worth expecting: because per-dependency bands are unchanged, a
-degraded scan can report medium-risk dependencies in the summary counts under a
-headline that says `UNKNOWN`. The per-dep number describes the measured axes; the
-headline withholds a verdict. Both are intentional.
 
 ### Vulnerability reachability
 
@@ -222,30 +125,16 @@ places that call the vulnerable code is not in its output; any number derived
 from it would be a lower bound that reads like an exact count. Neither
 `call_trace` nor `called_symbols` affects scoring or policy.
 
-#### Scoring effect
+#### Grade effect
 
-Reachability adjusts the vulnerability contribution at two levels:
+Reachability picks the column of the vulnerability table in [grading.md](grading.md#vulnerability-score):
 
-**Project-level headline** (`severityAdjustedVulnScore`): the worst observed
-CVE severity is downgraded before computing the headline score —
-- `imported`: the worst CVE's severity tier is dropped one level
-  (CRITICAL → HIGH, HIGH → MEDIUM, MEDIUM → LOW).
-- `required`: the worst CVE's severity tier is dropped two levels
-  (CRITICAL → MEDIUM, HIGH → LOW, MEDIUM → LOW).
+- `called` (or absent, or not determined): scored as called. The finding says when the tier was assumed.
+- `imported`: scored lower and capped at 50, so imported code alone can reach C but never D or F.
+- `required`: the module is in the graph but no package of it is built. The finding is shown and **not graded**.
 
-This downgrade is applied first; the existing test-only downgrade is applied on
-top of it.
-
-**Per-dependency weight multiplier** (inside `vulnScore`): each CVE's raw
-severity weight is scaled by a reachability factor before accumulation —
-- `called` (or absent): ×1.0 — full weight.
-- `imported`: ×0.7 — moderate discount.
-- `required`: ×0.3 — heavy discount.
-
-**Severity floor and level promotion**: a `required`-only CVE does **not**
-raise the per-dependency `risk_level` to HIGH (no floor of 51), and does not
-count toward the HIGH-and-above promotion logic. A `called` or `imported`
-CRITICAL or HIGH CVE still triggers the HIGH floor (score ≥ 51).
+A confirmed test-only row halves the vulnerability score (capped at 50), and a module confirmed outside the build is
+graph-only whatever the reachability of its findings says. An unknown build classification never discounts.
 
 #### Static-analysis caveat
 
@@ -298,9 +187,8 @@ advisory ID) and with the same evidence as a dependency vulnerability:
   before the vulnerability ID alias appendix, with the same per-vulnerability
   lines as a dependency block.
 
-They are not scored: the scorer does not read standard-library
-vulnerabilities, so they do not change any risk score, the `summary` counts or
-the headline.
+They are graded as a row named `stdlib` (see [grading.md](grading.md)) and are not
+counted in the `summary` counts.
 
 ### Vulnerability identifiers in report output
 
@@ -366,9 +254,9 @@ with 200 or 404, and NVD and GitHub (when a CVE alias exists) with 200.
 `enrichment_failed: true`, which means at least one lookup failed (network
 error, rate limiting such as NVD 429 or GitHub 403, HTTP 5xx, unparsable
 response). A failed lookup may have missed a published severity, so it is
-never reported as unscored. Scoring is the same for both: an
-unscored advisory is treated as MEDIUM, or HIGH when the vulnerable function is
-confirmed called. Only the label differs; the text report marks the two cases
+never reported as unscored. The grade treats both the same: an
+advisory with no published severity is scored as MEDIUM and the letter is marked
+estimated (`C*`) when it rests on that estimate. Only the label differs; the text report marks the two cases
 `[enrichment_failed]` and `[severity_unpublished]`, and the PDF lists unscored
 advisories in a separate Data-quality note. Unscored advisories are rechecked
 after one hour.
@@ -429,6 +317,11 @@ the fixed version exists. `fix_released_at` is the better date: the **later** of
 version (`GET <proxy>/<module>/@v/<version>.info`, the `Time` field; the module
 path and version are escaped as the proxy requires).
 
+`fix_published_at` is an **advisory publication date**, not a fix date, and it is read only when the severity
+enrichment ran for that finding (a finding with a published severity has none). So for such a finding whose fixed version
+the proxy cannot date, `fix_released_at` stays absent and the grade says "Fix release date unavailable": it never
+substitutes a date it does not know.
+
 | `fix_date_source` | Meaning |
 | ----------------- | ------- |
 | `module_proxy`    | The proxy's time was later than or equal to the advisory's date |
@@ -470,42 +363,14 @@ no CVE alias exists; a present `0.0` is a real score. `in_kev` absent means
 "not checked" (KEV fetch failed or no CVE alias); `false` means "checked and
 not listed".
 
-#### Scoring effect
+#### Grade effect
 
-Order of operations inside the project-level headline
-(`severityAdjustedVulnScore`), per CVE:
-
-1. Normalise severity (`effectiveTier`; UNKNOWN + confirmed-called → HIGH).
-2. Reachability downgrade (`imported` −1 tier, `required` −2 tiers).
-3. Test-only downgrade (−1 tier when the dep is confirmed test-only). Outside-the-build
-   status adds nothing here: the reachability tier in step 2 already encodes
-   "not linked in" (see [Build membership](#build-membership)).
-4. **EPSS amplifier** — `epss_score ≥ 0.5` and tier below CRITICAL: promote
-   one tier (LOW → MEDIUM, MEDIUM → HIGH, HIGH → CRITICAL).
-5. **KEV override** — `in_kev` true: force CRITICAL.
-6. Step function counts the resulting tier.
-
-The threat-intel rules apply **after** the downgrades because the downgrades
-encode "this code path isn't reachable in this project" — wild-exploitation
-status doesn't make an unreachable path more vulnerable. The most
-counter-intuitive consequence: **a downgrade-dropped CVE is not resurrected.**
-Once the reachability or test-only downgrade removes a CVE from the step
-function (e.g. a test-only LOW), neither EPSS nor KEV brings it back. Instead,
-a **hidden-risk warning** is emitted whenever a KEV-listed CVE (or one with
-EPSS ≥ 0.9) was downgraded: static analysis says the path isn't reachable, but
-the exploitation evidence warrants manual review.
-
-Per-dependency effects:
-
-- `vulnScore` gains an additive bonus of `max_epss_on_dep × 15`, capped at the
-  existing 100 ceiling (a dep with one EPSS-0.8 CVE gains +12).
-- Any KEV-listed CVE floors the dep at **76 (CRITICAL)** regardless of
-  severity and reachability — presence on KEV essentially mandates patching.
-- Any KEV-listed CVE also produces a `kev` TIME-BOMB entry in the report.
-
-The 0.5 EPSS threshold means FIRST.org estimates >50% exploitation likelihood
-within 30 days; promotion is bounded at one tier. KEV is binary and absolute.
-Neither threshold is operator-tunable — one default, documented rationale.
+EPSS is shown as data and is **not** an input of the grade. KEV is: a *called* finding on the CISA KEV list scores at
+least 76 (F), and a whole-tree rule raises the letter to F on a called KEV finding. A test-only KEV finding lands at C
+(the test-only discount halves the score, capped at 50), and a finding in a package that is never imported is shown and
+not graded. The text and JSON reports carry a warning when a KEV-listed finding was downgraded by test-only status or
+reachability, so the exploitation evidence is not lost behind the downgrade. A KEV-listed finding also produces a
+`kev` time-bomb entry. The thresholds are not operator-tunable.
 
 #### Cache and failure behavior
 
@@ -520,32 +385,11 @@ threat-intel unavailability never fails a scan.
 > CVEs are detected. Coverage is bounded by govulncheck + OSV enrichment, and
 > the same static-analysis limits described above apply.
 
-### Vulnerability floor
-
-Any dependency with at least one `called` or `imported` CVE has its score
-floored to **51** (HIGH). The rationale lives in `pkg/scorer/risk.go`:
-
-> A known CVE with a fix available is actionable and must not be buried in
-> MEDIUM/LOW where it looks safe.
-
-`required`-only CVEs do not trigger this floor — the module is in the graph
-but no package from it is compiled into your binary.
-
-### Component scoring
-
-| Component        | Range  | Notes                                                          |
-| ---------------- | ------ | -------------------------------------------------------------- |
-| Vulnerabilities  | 0–100  | CRITICAL = 100, HIGH = 80, MEDIUM = 50, LOW = 25; capped at 100 |
-| Maintenance      | 0–100  | 0 (<6 mo), 25 (<12 mo), 60 (<24 mo), 90 (≥24 mo), on the newer of the last release and the default branch's last commit; 100 if archived or deprecated; 30 if unknown |
-| Depth            | 0–100  | 0 (direct), 20 (depth 1), 40 (deeper)                          |
-| Maintainer       | 0–100  | 0 for trusted namespaces / multi-maintainer; 50 for bus factor 1; 30 if unknown |
-| Maturity         | 0–100  | 0 for trusted namespaces or v1+; 30 for v0.x; 50 if untagged   |
-
 ### Maintenance age and deprecation
 
-The Maintenance axis does not rest on release tags alone. A repository that is
-worked on but rarely tagged would otherwise read as abandoned, so the axis
-bands on the newer of two dates:
+A project's upkeep does not rest on release tags alone. A repository that is
+worked on but rarely tagged would otherwise read as abandoned, so the age
+is taken from the newer of two dates:
 
 - **Last release:** the latest version's time from the module proxy
   (`months_since_release`).
@@ -575,7 +419,7 @@ repository gives up and then repeats for a while. On a transient failure with a
 GitHub token set, the GitHub commits API
 (`/repos/{owner}/{repo}/commits?per_page=1`, which lists the default branch) is
 asked instead; without a token, or if that fails too, the module is counted in
-a scan warning. Without activity the axis uses the release age alone, as
+a scan warning. Without activity the release age alone is used, as
 before; archived modules are not looked up.
 
 A resolved branch answer, and the latest version's `go.mod` (read for
@@ -585,18 +429,17 @@ responses, so a rerun within the day does not ask again.
 The JSON `maintenance` object reports `last_activity`, `months_since_activity`,
 `activity_source` (`proxy_branch` or `github_commits`) and `activity_branch`
 when activity is known; the text and PDF reports show "Last commit (branch)".
-The `unmaintained` risk factor, the `unmaintained_1yr` / `unmaintained_2yr`
-counts and the `no_unmaintained_months` policy rule use the same combined
-value, so the report, the score and the policy agree.
+The `unmaintained_1yr` / `unmaintained_2yr` summary counts and the
+`no_unmaintained_months` policy rule use the same combined value, so the report
+and the policy agree. Age alone never lowers the grade: only archived and
+deprecated (including retracted) rows count there, and only up to C.
 
-GitHub's `pushed_at` is **not** used for the Maintenance axis. It moves on a
+GitHub's `pushed_at` is **not** used for the age above. It moves on a
 push to any branch, Dependabot branches included, so a repository whose default
 branch stopped moving years ago can look active. It is reported as
 `maintainer.last_commit_date`, and in the text report's maintainer section as
-"Last push (any branch)". It still sets `maintainer.activity_pattern`, which
-drives the `maintainer_inactive` risk factor and the `takeover_candidate` flag,
-so those two can disagree with the Maintenance axis until they move to the
-default-branch date.
+"Last push (any branch)", and it sets `maintainer.activity_pattern`. The grade
+reads neither.
 
 **Deprecation.** A module is deprecated when the `go.mod` of its latest version
 carries a `// Deprecated:` notice on its `module` directive (the rule `go list
@@ -604,10 +447,10 @@ carries a `// Deprecated:` notice on its `module` directive (the rule `go list
 module proxy answers `@v/list` with 410. The notice usually names the
 successor and is reported as `maintenance.deprecation_message`, in the text and
 PDF reports and in the `no_deprecated` policy violation. Deprecated, like
-archived, sets the Maintenance component to 100 whatever the dates: the
-maintainers have said to move off the module, and a recent commit (for example
-on `github.com/golang/protobuf`) does not change that. Deprecation does not set
-the `archived_floor` headline candidate.
+archived, is an upkeep state whatever the dates: the maintainers have said to
+move off the module, and a recent commit (for example on
+`github.com/golang/protobuf`) does not change that. Both count in the grade, but
+only up to C (see [grading.md](grading.md#upkeep-score)).
 
 **Retraction.** The same go.mod read (one request, no extra) is searched for
 `retract` directives. When the module's **pinned** version, the one in the
@@ -618,6 +461,15 @@ comment, "" when they gave none). A retracted version reads as deprecated to
 consumers, but the scanner does **not** set `deprecated` for it: the two stay
 separate evidence, and the grade treats `retracted || deprecated` as one
 state. A pinned version that is not valid semver is never reported retracted.
+
+**Unchecked is not clean.** When the go.mod of the latest version cannot be read
+(a transport error or non-200 answer, an unparsable file) or the proxy has no
+latest version, the scanner sets `mod_check_failed: true` and reports neither
+deprecation nor retraction from it. `deprecated: false, retracted: false` then
+means "not checked", and the grade treats the module's upkeep as missing data
+(Pending) unless the module is archived anyway. The pinned version passed to the
+proxy must be a full canonical version (`vMAJOR.MINOR.PATCH[-pre]`, optionally
+`+incompatible`); anything else is not requested.
 
 **Repository and archive status.** The repository behind a module path is
 resolved first, from the `Origin` the module proxy records for the latest (else
@@ -660,12 +512,6 @@ all. The Resilience scanner's governance-file probes (3 `HEAD` requests per
 `github.com` module) are separate and not yet cached. Conditional requests
 (ETags) are not used.
 
-The maintainer and maturity components fall back to **0** for trusted
-namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,
-`go.opentelemetry.io/`, `github.com/golang/`, `github.com/google/`,
-`github.com/googleapis/`, etc.) — these projects use v0.x and centralized
-maintainership by design, not neglect.
-
 ### Resilience request bounds
 
 The resilience check asks the module proxy (`proxy.golang.org`) for the version
@@ -685,8 +531,8 @@ requests is bounded:
   resilience result. When the sample includes the oldest release,
   `avg_days_between_releases` is the span divided by the full release count.
   When the budget leaves no date at all, the module reports
-  `data_available: false`, so its axis is excluded rather than scored from
-  nothing.
+  `data_available: false`, so it is reported as unavailable rather than
+  measured from nothing.
 
 On a fake proxy serving 5,000 versions for one module the old code made 5,001
 requests (one list, 5,000 dates); the bounded code makes 25 (one list, 24
@@ -698,36 +544,26 @@ The Integrity scanner audits `go.mod` `replace` and `exclude` directives —
 pure offline analysis, no network calls. Every `replace` directive is
 classified by comparing the replacement module path against the original:
 
-| Class                 | Condition                                                                                     | Severity | Score effect                                    |
+| Class                 | Condition                                                                                     | Severity | Grade effect                                    |
 | --------------------- | ---------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------ |
 | Version-pin           | Replacement path equals the original path                                                       | LOW      | None — expected, pins a specific version          |
-| Local-path            | Replacement path is a filesystem path — relative, absolute, UNC, or drive-letter; both Unix and Windows syntaxes are recognized regardless of host OS | MEDIUM   | +8 per-dependency penalty                         |
-| Major-version redirect | Replacement path is the original module gaining or swapping a `/vN` (N ≥ 2) semantic-import-versioning suffix (same underlying module) | MEDIUM   | +8 per-dependency penalty                         |
-| Redirect              | Replacement path points to a genuinely different module                                         | HIGH     | +20 per-dependency penalty; floors the project headline to HIGH (51, or 60 for a direct dependency) |
+| Local-path            | Replacement path is a filesystem path — relative, absolute, UNC, or drive-letter; both Unix and Windows syntaxes are recognized regardless of host OS | MEDIUM   | None (shown only)                                 |
+| Major-version redirect | Replacement path is the original module gaining or swapping a `/vN` (N ≥ 2) semantic-import-versioning suffix (same underlying module) | MEDIUM   | None (shown only)                                 |
+| Redirect              | Replacement path points to a genuinely different module                                         | HIGH     | None on the letter; shown in the integrity findings, and the `forbid_replace_redirect` policy rule fails on it |
 
-Every `exclude` directive renders as an INFO finding for transparency — it
-carries no score effect. A dependency with an applicable replace directive
-gets the `replaced` risk factor regardless of class; only MEDIUM/HIGH classes
-add to the score. A version-scoped replace (`replace A v1.2.3 => …`) only
-marks the dependency as replaced when the selected version matches; the
-directive itself still appears as a finding, annotated with the version it
-applies to.
-
-A HIGH-severity (redirect) replace on a non-test-only dependency is the
-`integrity_floor` headline candidate — it floors the project's overall score
-into the HIGH band even when no other signal would. LOW and MEDIUM replace
-classes never move the headline; this is deliberate — version pins, local
-development overrides, and same-module major-version redirects are common and
-must not trigger noisy false alarms.
+Every `exclude` directive renders as an INFO finding for transparency. A
+version-scoped replace (`replace A v1.2.3 => …`) only marks the dependency as
+replaced when the selected version matches; the directive itself still appears
+as a finding, annotated with the version it applies to. Replace directives are
+integrity findings and policy inputs; they do not change the letter.
 
 Enable the `forbid_replace_redirect` policy rule (on by default in the strict
-preset) to fail CI when a redirect replace is present. Note the deliberate
-asymmetry with the headline: the `integrity_floor` headline candidate skips
-test-only dependencies, but the `forbid_replace_redirect` policy rule does
-not — test-time code still executes in CI (with access to CI secrets), so a
-hijacked test-only dependency is not a safe blind spot for policy purposes.
+preset) to fail CI when a redirect replace is present. The rule also fires on
+test-only dependencies — test-time code still executes in CI (with access to CI
+secrets), so a hijacked test-only dependency is not a safe blind spot for
+policy purposes.
 
-Neither `integrity_floor` nor `forbid_replace_redirect` looks at `in_build`.
+The rule does not look at `in_build`.
 A `replace` directive is a `go.mod`-level statement about how the module graph
 is resolved, and it applies whether or not any package of the replaced module
 is currently imported; a redirect that is dormant today becomes live the
@@ -737,11 +573,11 @@ moment an import is added.
 
 The Integrity scanner also audits `go.sum`:
 
-| Finding            | Condition                                                                    | Severity | Headline effect                      |
+| Finding            | Condition                                                                    | Severity | Grade effect                         |
 | ------------------ | ---------------------------------------------------------------------------- | -------- | ------------------------------------ |
-| `gosum_missing`    | `go.mod` declares requirements but no `go.sum` exists                        | HIGH     | None — noise-rule exempt             |
-| `gosum_incomplete` | A direct (non-replaced) dependency's resolved version has no `go.sum` entry  | MEDIUM   | None — noise-rule exempt             |
-| `gosum_mismatch`   | `go mod verify` reports a checksum mismatch (local module cache does not match `go.sum`) | CRITICAL | Floors the headline to CRITICAL (76) |
+| `gosum_missing`    | `go.mod` declares requirements but no `go.sum` exists                        | HIGH     | None                                 |
+| `gosum_incomplete` | A direct (non-replaced) dependency's resolved version has no `go.sum` entry  | MEDIUM   | None                                 |
+| `gosum_mismatch`   | `go mod verify` reports a checksum mismatch (local module cache does not match `go.sum`) | CRITICAL | Whole-tree rule: the letter is F (`grade.checksum_mismatch`, `checksum_detail`) |
 
 The completeness check covers **direct dependencies only** — under Go 1.17+
 module graph pruning, transitive modules listed by `go mod graph` can
@@ -764,7 +600,7 @@ be run, the scan was cancelled, or verify failed for a non-integrity reason
 such as a cold module cache with no network). A non-zero exit is only treated
 as a mismatch when the output carries an actual integrity marker
 (`has been modified`, `checksum mismatch`, `SECURITY ERROR`). Only a confirmed
-mismatch floors the headline or fails the `require_gosum_verified` policy rule
+mismatch makes the letter F or fails the `require_gosum_verified` policy rule
 (on by default in the strict preset) — UNKNOWN states are never treated as
 failures.
 
@@ -782,38 +618,21 @@ including the "pseudo-version on top of a tag" form
 `v0.4.1-0.20220921163831-...`), using
 `golang.org/x/mod/module.IsPseudoVersion` — no custom regex.
 
-| Condition                                     | Severity | Score effect                    |
+| Condition                                     | Severity | Grade effect                    |
 | ---------------------------------------------- | -------- | -------------------------------- |
 | Confirmed test-only (`IsTestOnly == &true`)     | INFO     | None — surfaced for transparency  |
 | Confirmed outside the build (`InBuild == &false`) | INFO   | None — surfaced for transparency  |
-| Direct dependency, otherwise                    | MEDIUM   | +4 per-dependency penalty         |
-| Transitive dependency, otherwise                | LOW      | +2 per-dependency penalty         |
+| Direct dependency, otherwise                    | MEDIUM   | None (shown only)                 |
+| Transitive dependency, otherwise                | LOW      | None (shown only)                 |
 
 An unknown classification (`IsTestOnly == nil` or `InBuild == nil`) is treated
 as neither test-only nor outside the build, consistent with the scorer's
 general convention of under-discounting rather than silently applying a
 discount on unverified data.
 
-This is a **distinct signal** from the AI-generated-code scanner's
-`pseudo_version_only` indicator (see above): that indicator fires when a
-module has **zero tagged releases ever** — a historical property of the
-module proxy's published version list (`ResilienceInfo.VersionScheme ==
-"pseudo" && TotalReleases == 0`). The integrity check here fires on the
-version **currently pinned** in `go.mod`, which can happen even for a module
-with real tagged releases (e.g. pinned to a commit between tags). A
-dependency can trigger both signals at once, and the two contributions are
-additive: the `pseudo_version_only` indicator adds 10 to the aigen score,
-i.e. 1.5 points here (10 × 0.15), and the pseudo-version bonus adds at most 4
-— so the pseudo-version-related contributions sum to at most 5.5, which alone
-cannot promote a dependency into the HIGH band. Note this is not an enforced
-cap: the aigen bonus as a whole can reach 15 when other aigen indicators fire
-alongside `pseudo_version_only`.
-
-Pseudo-version pins are **per-dependency risk factors only** — they do not
-feed the `integrity_floor` headline candidate and cannot, on their own, push
-a project's overall score into the HIGH band. This is deliberate: routine
-pins such as `golang.org/x/telemetry` (which has no tagged releases) are
-common in the Go ecosystem and must not push projects to HIGH.
+Pseudo-version pins are findings and policy inputs only: they do not change the
+letter. This is deliberate: routine pins such as `golang.org/x/telemetry` (which
+has no tagged releases) are common in the Go ecosystem.
 
 Enable the `forbid_pseudo_versions` policy rule (on by default in the strict
 preset) to fail CI on any pseudo-version pin that is not test-only and not
@@ -827,8 +646,8 @@ not the relevant threat model here.
 
 A module can be in the dependency graph without being part of what you ship:
 `go.mod` requires it (often through a dependency's own `go.mod`), but no package
-of it is imported by your code. Scoring such a module as if it were compiled in
-makes it drive the headline for a risk it cannot cause. After the graph is
+of it is imported by your code. Grading such a module as if it were compiled in
+would let it decide the letter for a risk it cannot cause. After the graph is
 resolved, `unisupply` therefore classifies every module against the main
 module's own package graph and records three facts per dependency in the JSON
 report.
@@ -858,7 +677,7 @@ or newer, `all` and `all -test` contain the same modules, so comparing them can
 never report a test-only module. Below go 1.16, `all` additionally contains the
 packages needed by the *dependencies'* own tests, so a module such as
 `gopkg.in/check.v1`, used only by a dependency's tests, would be classified as
-production (this is what put it at the top of the `spf13/cobra` headline). The
+production (this is what once put it at the top of the `spf13/cobra` result). The
 `-deps ./...` lists do not have either problem, whatever `go` version `go.mod`
 declares.
 
@@ -925,7 +744,7 @@ show an `outside build` label next to `test-only` under the same rule.
   so no list contains it. The build-tag guard above therefore applies: the tool
   and every module reachable from it in the module graph that `go.mod` lists are left unknown and
   counted as built. For a large tool such as a linter, that is its whole
-  dependency tree, and those modules can then raise the headline. This errs
+  dependency tree, and those modules can then be graded. This errs
   toward counting too much, never too little. Declaring the same tool with a go
   1.24 `tool` directive instead gets `in_build: false` for its modules. A
   package-level refinement that would narrow this is tracked in
@@ -948,76 +767,14 @@ show an `outside build` label next to `test-only` under the same rule.
 
 | Consumer | Test-only | Outside the build | Notes |
 |----------|-----------|-------------------|-------|
-| `p95_dep_risk` population | excluded | excluded | See [Headline candidates](#headline-candidates) |
-| `archived_floor` | skipped | skipped | An archived module that is never compiled in cannot be an unpatchable risk to the build |
+| Vulnerability score of a row | halved, capped at 50 | graph-only: shown, not graded | A finding in a module that is not compiled in cannot be exploited through the build |
+| Upkeep score (archived, deprecated) | 10 | 10 | A module that is not compiled in cannot be an unpatchable risk to the build; see [grading.md](grading.md#upkeep-score) |
 | Time bombs (archived, KEV, CRITICAL CVE) | skipped | skipped | Nothing that is not compiled in can detonate in the shipped code |
-| Pseudo-version pin severity and penalty | INFO, no penalty | INFO, no penalty | See [Pseudo-version pins](#pseudo-version-pins) |
+| Pseudo-version pin severity | INFO | INFO | See [Pseudo-version pins](#pseudo-version-pins) |
 | `forbid_pseudo_versions` policy rule | exempt | exempt | Same reason |
-| `no_unmaintained_months`, `no_archived`, `no_deprecated` policy rules | not exempt | exempt | The scorer's archived floor and time bombs already skip modules that are not compiled in; the gate now agrees. An unknown `InBuild` is still checked |
-| CVE severity downgrade (`severity_adjusted`) | −1 tier | not applied | Reachability already downgrades a CVE in a module that is not linked in (`required` tier); a second discount would count the same fact twice |
-| `cve_floor` | skipped | not applied | Same reason |
-| `integrity_floor`, `forbid_replace_redirect` | `integrity_floor` skips; policy rule does not | not applied | A `replace` directive is a `go.mod`-level signal; see [Integrity](#integrity) |
+| `no_unmaintained_months`, `no_archived`, `no_deprecated` policy rules | not exempt | exempt | The upkeep score and the time bombs already treat modules that are not compiled in separately; the gate agrees. An unknown `InBuild` is still checked |
+| `forbid_replace_redirect` | not exempt | not exempt | A `replace` directive is a `go.mod`-level signal; see [Integrity](#integrity) |
 
-Because test-only classification now works, every test-only discount above
-applies to real scans for the first time, so scores and policy results can
-change for repositories with test-only dependencies.
-
-## Risk bands
-
-| Level    | Score   |
-| -------- | ------- |
-| LOW      | 0–25    |
-| MEDIUM   | 26–50   |
-| HIGH     | 51–75   |
-| CRITICAL | 76–100  |
-
-## Overall project score
-
-The project-level score in the report header is the highest of five
-candidates; see `pkg/scorer/risk.go` for the exact aggregation. A tie between
-candidates is resolved in this order: `severity_adjusted`, `p95_dep_risk`,
-`archived_floor`, `cve_floor`, `integrity_floor`.
-
-### Headline candidates
-
-| Candidate | What it measures |
-|-----------|------------------|
-| `severity_adjusted` | Step function over the reachability- and test-only-downgraded CVE counts |
-| `p95_dep_risk` | 95th percentile (nearest rank) of per-dependency risk scores over the modules that are built |
-| `archived_floor` | 51 (HIGH) for an archived built module, 60 for a direct one |
-| `cve_floor` | Floor from the post-reachability tier of the worst CVE |
-| `integrity_floor` | 51 or 60 for a redirect `replace`; CRITICAL on a `go.sum` mismatch |
-
-**`p95_dep_risk` population.** Confirmed test-only modules and confirmed
-outside-the-build modules (`in_build: false`) are not in the population. A
-module whose classification is unknown (`nil`) is counted: unavailable
-classification means "assume built", which under-discounts rather than hiding a
-module. If every dependency is filtered out the candidate is 0, as for an empty
-graph. The non-normative `mean_dep_risk_score` and
-`diagnostics.max_dep_risk_score` still cover the whole graph, while
-`diagnostics.p95_dep_risk_score` mirrors this candidate.
-
-**Deterministic driver, `tied_with`.** Scores tie often (a 4-way tie at the p95
-index is common), and which tied module is named used to depend on map order.
-Modules are now ordered by score and then by module path, so the same inputs
-always name the same module. When other built modules share the p95 score the
-headline candidate carries `tied_with` (the number of *other* modules at that
-score) and its reason reads "one of N modules at S"; the `driving_item` is then
-one of N equally scored modules, not the sole cause.
-
-**Archived floor.** Only built modules can set it, with the same
-unknown-counts rule as the p95 population.
-
-**Health-only headline.** When the vulnerability scan ran and
-`severity_adjusted`, `cve_floor` and `integrity_floor` are all 0, the grade is
-decided by dependency health alone. The headline reason then starts with "no
-reachable vulnerabilities; grade reflects dependency health (maintenance,
-maturity) of built modules", so a reader does not take the driving module for a
-vulnerability finding. This is an explanation only; the score and level are
-unchanged. When no dependency has an `in_build` verdict the reason says "of all
-modules in the dependency graph (build classification unavailable)" instead.
-The separate case where the vulnerability scan did not run is the
-[unscored headline](#unscored-headline).
 
 ## Response history
 
@@ -1055,9 +812,22 @@ days = first sampled release of M whose go.mod requires D >= F   (its time)
 
 The scan fails only when offline mode is on or M's own version list cannot be
 read. Any other failed lookup (one go.mod, one release time, one dependency's
-advisories) skips that item. Work is bounded by `MaxVersions` and
-`MaxDependencies` (default 60), at most 8 requests run at once, and a go.mod or
-release time is requested once per scan. Nothing is cached on disk.
+advisories) skips that item. Work is bounded in five ways, so a module with many
+dependencies or advisories cannot hold the scan:
+
+- `MaxVersions` (default 40) releases of M and `MaxDependencies` (default 60)
+  dependencies;
+- at most the newest 20 fixes of each dependency (fixes ascend by version);
+- the release time of a fix is requested only when a sampled release of M
+  adopted it; a fix nobody adopted is not a sample, so it costs no request;
+- a request budget of `MaxRequests` (default 2000) for the whole call, proxy and
+  OSV together: once spent, every further lookup counts as failed and is skipped;
+- one overall `Deadline` (default 2 minutes) for the whole call, after which
+  pending work is skipped.
+
+A call with no dependencies makes no request. At most 8 requests run at once,
+and a go.mod, release time or advisory list is requested once per scan. Nothing
+is cached on disk.
 
 ### Endpoints
 
@@ -1069,3 +839,14 @@ release time is requested once per scan. Nothing is cached on disk.
 | `POST /v1/query` with `{"package":{"name":D,"ecosystem":"Go"}}`, up to 5 pages | `responsehistory:osv` | `api.osv.dev` |
 
 Only module paths and versions are sent. It is not available offline.
+
+## Internal scorer (not published)
+
+`pkg/scorer` still computes the pre-grading 0-100 risk score, per-dependency bands (LOW 0-25, MEDIUM 26-50, HIGH
+51-75, CRITICAL 76-100) and a five-candidate project headline (`severity_adjusted`, `p95_dep_risk`, `archived_floor`,
+`cve_floor`, `integrity_floor`). None of it is published in the text, JSON, PDF or SBOM output, and no policy gate reads
+it: the letter is decided by `pkg/grade` from the scanners' signals (vulnerabilities with their reachability, upkeep
+state, build membership, checksum verification). The scorer's formula is in `pkg/scorer/risk.go`, which is the only
+authoritative description of it; its warnings that mention axis weights or comparability between scores are not
+published either. The grade does not use the maintainer, resilience, maturity, depth or typosquat signals; those stay
+on each dependency as data.

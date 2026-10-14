@@ -427,10 +427,15 @@ func preferCalled(candTrace []traceEntry, candPath []string, candFrames []CallFr
 
 // callCondition names, in one short sentence, what the project must do to reach
 // a called finding, read only from the chosen trace (innermost frame first):
-// the first frame outside the project's own code that follows a project frame,
-// rendered package.Receiver.Function. It returns "" when no frame of the trace
-// is a project frame (roots unknown, or the path starts inside a dependency) or
-// when no frame follows one. It never says anything about configuration.
+// the first frame, after the first project frame, that belongs neither to the
+// project nor to the Go standard library, rendered package.Receiver.Function.
+// Standard-library frames are skipped because a path that goes through a
+// callback (main -> net/http.ServeMux.ServeHTTP -> the project's handler ->
+// the dependency) would otherwise be explained by the standard library's
+// dispatcher, which says nothing the project can act on. It returns "" when no
+// frame of the trace is a project frame (roots unknown, or the path starts
+// inside a dependency) or when no such frame follows one. It never says
+// anything about configuration.
 func callCondition(trace []traceEntry, roots map[string]bool) string {
 	sawProject := false
 	for i := len(trace) - 1; i >= 0; i-- { // outermost first
@@ -446,9 +451,19 @@ func callCondition(trace []traceEntry, roots map[string]bool) string {
 			// The path starts inside a dependency: there is no project call to name.
 			return ""
 		}
+		if isStdlibFrame(t) {
+			continue
+		}
 		return "reached through " + frameName(t)
 	}
 	return ""
+}
+
+// isStdlibFrame reports whether a trace frame is in the Go standard library:
+// govulncheck names the module of those frames "stdlib" (also what the rest of
+// this file keys on).
+func isStdlibFrame(t traceEntry) bool {
+	return t.Module == "stdlib"
 }
 
 // frameName renders a trace frame the way govulncheck prints it: package, then

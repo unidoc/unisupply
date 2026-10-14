@@ -104,10 +104,16 @@ func gradeTestInput() (*scorer.ProjectScore, func() *TextOptions) {
 
 func renderGradeText(t *testing.T, g *grade.Result) string {
 	t.Helper()
+	return renderGradeTextV(t, g, false)
+}
+
+func renderGradeTextV(t *testing.T, g *grade.Result, verbose bool) string {
+	t.Helper()
 	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/dep", Version: "v1.2.3", Direct: true, Depth: 0})
 	ps, mk := gradeTestInput()
 	opts := mk()
 	opts.Grade = g
+	opts.Verbose = verbose
 	if err := WriteText(graph, ps, opts); err != nil {
 		t.Fatalf("WriteText: %v", err)
 	}
@@ -133,8 +139,12 @@ func requireNone(t *testing.T, out string, nots ...string) {
 }
 
 func TestGradeText_A(t *testing.T) {
-	out := renderGradeText(t, gradeCases()["A"])
+	out := renderGradeTextV(t, gradeCases()["A"], true)
 	requireAll(t, out, "SUPPLY-CHAIN GRADE: A\n", "GRADE TABLE", "example.com/app (this module)", "no findings, actively maintained")
+	// Without --verbose the two quiet A rows are one line.
+	out = renderGradeText(t, gradeCases()["A"])
+	requireAll(t, out, "2 more rows graded A with nothing found")
+	requireNone(t, out, "no findings, actively maintained")
 	requireNone(t, out, "Decided by", "A*", "Estimated:", "PENDING", "No grade")
 }
 
@@ -157,6 +167,7 @@ func TestGradeText_FWithDecidingAndTreeRule(t *testing.T) {
 	)
 	requireNone(t, out, "Risk: 77/100", "77/100")
 	// Worst row first in the table.
+	out = renderGradeTextV(t, gradeCases()["F"], true)
 	if strings.Index(out, "example.com/dep  v1.2.3") > strings.Index(out, "example.com/app (this module)") {
 		t.Errorf("rows are not worst first:\n%s", out)
 	}

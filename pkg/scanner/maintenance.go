@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
@@ -71,6 +72,14 @@ type MaintenanceInfo struct {
 	// `Retracted || Deprecated` as one state, so the two flags stay separate evidence.
 	Retracted         bool   `json:"retracted,omitempty"`
 	RetractionMessage string `json:"retraction_message,omitempty"`
+
+	// ModCheckFailed is true when the deprecation and retraction notices could not be read: the proxy
+	// has no latest version for the module, or the go.mod of the latest version could not be fetched
+	// (transport error or non-200 answer) or parsed. Deprecated == false and Retracted == false then
+	// mean "not checked", never "not deprecated" or "not retracted"; the grade treats the upkeep of
+	// such a module as missing data (Pending) unless the module is archived anyway. A 410 on the
+	// version list still sets Deprecated.
+	ModCheckFailed bool `json:"mod_check_failed,omitempty"`
 
 	// RepositoryURL is the repository the module is published from (https://host/owner/repo), resolved from
 	// the module path via the module proxy's origin record, so a vanity path (gopkg.in/yaml.v3, k8s.io/api) can
@@ -276,6 +285,8 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 	info := &MaintenanceInfo{}
 
 	// Get version info for the specific version used.
+	// A pinned version that is not a full canonical version is never sent to
+	// the proxy: the request would name a version no release has.
 	versionInfo, versionErr := ms.fetchVersionInfo(ctx, modPath, version)
 	if versionErr == nil && versionInfo != nil {
 		info.LastRelease = versionInfo.Time
@@ -317,6 +328,9 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 	ms.checkDeprecation(ctx, modPath, info)
 	if latestVersion != "" {
 		ms.checkGoModDeprecation(ctx, modPath, latestVersion, version, info)
+	} else {
+		// No latest version, so no go.mod to read the notices from.
+		info.ModCheckFailed = true
 	}
 
 	ms.mu.Lock()
@@ -327,8 +341,11 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 }
 
 func (ms *MaintenanceScanner) fetchVersionInfo(ctx context.Context, modPath, version string) (*proxyVersionInfo, error) {
+	if err := CheckModuleVersion(version); err != nil {
+		return nil, err
+	}
 	escapedPath := encodeModulePath(modPath)
-	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, escapedPath, version)
+	url := fmt.Sprintf("%s/%s/@v/%s.info", ms.proxyURL, escapedPath, encodeModulePath(version))
 
 	body, resp, err := ms.client.Get(ctx, url, GetOptions{
 		Host:    proxyHost(ms.proxyURL),
@@ -407,8 +424,9 @@ func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath stri
 // Go modules reference reads both from the latest version's go.mod, so
 // a notice in an older version does not count, and a comment elsewhere in the
 // file is not a deprecation. The go.mod of a version never changes, so a
-// fetched one is kept in the disk cache. A failed fetch or an unparsable go.mod leaves
-// info unchanged: no deprecation or retraction is reported rather than a wrong one.
+// fetched one is kept in the disk cache. A failed fetch or an unparsable go.mod sets
+// info.ModCheckFailed and reports no deprecation or retraction rather than a wrong one;
+// ModCheckFailed is what tells "not checked" from "not deprecated".
 // A retracted pinned version sets Retracted, not Deprecated.
 func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath, latest, pinned string, info *MaintenanceInfo) {
 	url := fmt.Sprintf("%s/%s/@v/%s.mod", ms.proxyURL, encodeModulePath(modPath), encodeModulePath(latest))
@@ -421,9 +439,14 @@ func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath
 			Purpose: "maintenance:go-mod",
 		})
 		if err != nil || resp.StatusCode != http.StatusOK {
+			info.ModCheckFailed = true
 			return
 		}
 		ms.putProxyBody(url, body)
+	}
+	if _, err := modfile.ParseLax("go.mod", body, nil); err != nil {
+		info.ModCheckFailed = true
+		return
 	}
 	if msg := goModDeprecation(body); msg != "" {
 		info.Deprecated = true
@@ -527,6 +550,13 @@ func (ms *MaintenanceScanner) resolveRepository(modPath string, info *Maintenanc
 			info.RepositoryURL = normalizeRepositoryURL("https://github.com/" + owner + "/" + repo)
 		}
 	}
+	if info.RepositoryURL == "" {
+		// The module proxy records no origin for most gopkg.in modules, but the host's own convention names the repository:
+		// gopkg.in/pkg.vN is github.com/go-pkg/pkg and gopkg.in/user/pkg.vN is github.com/user/pkg.
+		if u := gopkgInRepository(modPath); u != "" {
+			info.RepositoryURL = u
+		}
+	}
 	if info.RepositoryURL != "" {
 		if _, _, ok := githubRepoFromURL(info.RepositoryURL); !ok {
 			info.ArchivedCheck = ArchivedUnsupported
@@ -534,17 +564,25 @@ func (ms *MaintenanceScanner) resolveRepository(modPath string, info *Maintenanc
 	}
 }
 
-// normalizeRepositoryURL returns raw as https://host/path (no credentials, port
-// query or ".git" suffix; a GitHub URL is cut to owner/repo), or "" when it is
-// not an https repository URL or a GitHub URL with names GitHub does not allow.
+// normalizeRepositoryURL returns raw as https://host/path (no credentials,
+// default port :443, query or ".git" suffix; a GitHub URL is cut to owner/repo),
+// or "" when it is not an https repository URL, its path holds a control
+// character or whitespace, or it is a GitHub URL with names GitHub does not
+// allow. Any other explicit port is kept: it names a different server.
 func normalizeRepositoryURL(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme != "https" || u.User != nil || u.Host == "" {
 		return ""
 	}
 	host := strings.ToLower(u.Host)
+	if u.Port() == "443" {
+		host = strings.ToLower(u.Hostname())
+		if strings.Contains(host, ":") { // IPv6 literal
+			host = "[" + host + "]"
+		}
+	}
 	path := strings.TrimSuffix(strings.Trim(u.Path, "/"), ".git")
-	if path == "" {
+	if path == "" || strings.ContainsFunc(path, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) {
 		return ""
 	}
 	if host == "github.com" {
@@ -648,3 +686,32 @@ const (
 	ArchivedCheckFailed = "failed"
 	ArchivedUnsupported = "unsupported"
 )
+
+// gopkgInRepository is the GitHub repository a gopkg.in module path stands for, by the host's documented convention:
+// gopkg.in/pkg.vN -> github.com/go-pkg/pkg, gopkg.in/user/pkg.vN -> github.com/user/pkg. It returns "" for any other
+// path, or one that does not end in a .vN version.
+func gopkgInRepository(modPath string) string {
+	rest, ok := strings.CutPrefix(modPath, "gopkg.in/")
+	if !ok {
+		return ""
+	}
+	parts := strings.Split(rest, "/")
+	last := parts[len(parts)-1]
+	dot := strings.LastIndex(last, ".v")
+	if dot <= 0 || len(last) == dot+2 {
+		return ""
+	}
+	for _, r := range last[dot+2:] {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	name := last[:dot]
+	switch len(parts) {
+	case 1:
+		return normalizeRepositoryURL("https://github.com/go-" + name + "/" + name)
+	case 2:
+		return normalizeRepositoryURL("https://github.com/" + parts[0] + "/" + name)
+	}
+	return ""
+}

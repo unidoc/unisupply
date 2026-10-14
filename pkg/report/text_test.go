@@ -746,34 +746,6 @@ func TestWriteText_OnlyNotesHasNoLimitations(t *testing.T) {
 	}
 }
 
-// TestWriteDebugScoring_SeverityLabels verifies the per-CVE label separating a
-// failed lookup from an advisory whose severity is not published yet.
-func TestWriteDebugScoring_SeverityLabels(t *testing.T) {
-	d := &scorer.DebugScoring{
-		EnrichedCVEs: []scorer.DebugCVE{
-			{ID: "GO-2026-0001", Module: "example.com/a", OriginalTier: "UNKNOWN", EnrichmentFailed: true},
-			{ID: "GO-2026-0002", Module: "example.com/b", OriginalTier: "UNKNOWN", SeverityUnscored: true},
-		},
-	}
-	var buf bytes.Buffer
-	writeDebugScoring(&buf, func(_, s string) string { return s }, d)
-	out := buf.String()
-
-	for _, line := range strings.Split(out, "\n") {
-		switch {
-		case strings.Contains(line, "GO-2026-0001") && !strings.Contains(line, "[enrichment_failed]"):
-			t.Errorf("failed lookup line lacks [enrichment_failed]: %q", line)
-		case strings.Contains(line, "GO-2026-0002") && !strings.Contains(line, "[severity_unpublished]"):
-			t.Errorf("unscored line lacks [severity_unpublished]: %q", line)
-		case strings.Contains(line, "GO-2026-0002") && strings.Contains(line, "[enrichment_failed]"):
-			t.Errorf("unscored line must not be labelled enrichment_failed: %q", line)
-		}
-	}
-	if !strings.Contains(out, "[severity_unpublished]") {
-		t.Errorf("no [severity_unpublished] label in output:\n%s", out)
-	}
-}
-
 // renderDetailed renders one detailed dependency block holding vulns.
 func renderDetailed(vulns ...scanner.Vulnerability) string {
 	ds := &scorer.DependencyScore{

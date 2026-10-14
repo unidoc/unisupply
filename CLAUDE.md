@@ -2,7 +2,7 @@
 
 ## What is this?
 
-An open-source CLI tool that **analyzes Go module dependency chains and produces supply chain risk assessment reports**. It scans for vulnerabilities, evaluates maintainer health, detects typosquatting, flags AI-generated code risks, audits CI/CD pipelines, and generates enterprise-grade PDF reports.
+An open-source CLI tool that **analyzes Go module dependency chains and produces a supply chain assessment: one letter grade, A to F, with the evidence behind it**. It scans for vulnerabilities, evaluates project upkeep and maintainer health, detects typosquatting, audits CI/CD pipelines, and generates enterprise-grade PDF reports.
 
 Open source credibility builder for UniDoc's enterprise services. Dogfoods UniDoc's own products (UniPDF for PDF generation).
 
@@ -13,18 +13,17 @@ CLI (pflag)
   │
   ├── Parse go.mod / go.sum          pkg/parser/
   ├── Resolve dependency graph        pkg/resolver/
-  ├── Run 10 security scanners       pkg/scanner/
+  ├── Run 9 security scanners        pkg/scanner/
   │   ├── Vulnerability (govulncheck)
   │   ├── Maintenance health
   │   ├── Maintainer analysis (GitHub API)
   │   ├── Typosquatting detection
   │   ├── Resilience scoring
-  │   ├── AI-generated code risk
   │   ├── CI/CD pipeline audit
   │   ├── Build file scanning
   │   ├── Integrity (go.mod replace/exclude audit)
   │   └── Trust Index lookup (unitrust)
-  ├── Compute risk scores             pkg/scorer/
+  ├── Grade (A to F)                  pkg/grade/ (fed by pkg/scorer/ signals)
   ├── Evaluate org policies           pkg/policy/
   └── Generate reports                pkg/report/
       ├── Text (colored terminal)
@@ -33,47 +32,36 @@ CLI (pflag)
       └── SBOM (CycloneDX, SPDX)
 ```
 
-## Risk Scoring
+## Grading (rules version 2)
+
+The published result is one letter, A to F. The reference is `docs/grading.md`; the code is `pkg/grade`, and if they
+disagree the code wins.
 
 ```
-Risk Score (0-100) =
-    Vulnerabilities × 0.40
-  + Maintenance     × 0.25
-  + Depth           × 0.15
-  + Maintainer Risk × 0.10
-  + Maturity        × 0.10
-  + Typosquat Penalty      (0-20)
-  + AI-Gen Penalty         (0-15)
-  + Low-Resilience Penalty (0-6) // adds when resilience score < 30
-  + Replace Penalty        (0-20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
+row score = max(vulnerability score, upkeep score)      // per row; the module itself is a row too
+letter    = band of the worst row                       // A 0-10, B 11-25, C 26-50, D 51-75, F 76-100
 ```
 
-Levels: LOW (0-25), MEDIUM (26-50), HIGH (51-75), CRITICAL (76-100)
+- **Vulnerability score** comes from the severity and the govulncheck reachability tier (called, imported, graph-only).
+  A called finding on the CISA KEV list is at least F. Graph-only findings are shown, not graded.
+- **Upkeep score**: archived or deprecated rows count, but only up to C. A quiet project scores 0.
+- **Whole-tree rules** only raise the letter (many called high or critical findings, a called KEV finding, a checksum
+  mismatch from `go mod verify`).
+- **Pending**: when a check the letter needs did not run (vulnerability scan, scan did not finish, the module's own
+  status, a dependency's maintenance data), there is **no letter**. `grade.pending` names the check. A row whose upkeep
+  could not be read has an empty letter (`-`). A gate must treat Pending as "no result", never as a pass.
+- **Estimated**: a letter that an unpublished severity (scored as medium) could change is shown with `*` (`C*`): the grade is recomputed with every such severity as low and as critical.
+- The 0-100 numbers in the rows (and `grade.score`) are policy values that pick a band. They are shown beside the
+  letter for traceability; they are not a measurement and not a risk score.
+- **Build membership**: a module confirmed outside the build (`in_build: false`) or confirmed test-only is discounted or
+  not graded as the rules say; an unknown classification never discounts.
+- The CI/CD audit is not part of the grade. It keeps its own 0-100 score (`max_ci_score`).
+- The old 0-100 risk score, headline candidates (`overall_risk_*`, `headline*`), AI-generation penalty and the takeover
+  list are **not published** in any output. `pkg/scorer` still computes them internally (see "Internal scorer (not
+  published)" in `docs/scanners.md`); only its signals (reachability, build membership, test-only, maintenance state)
+  feed the grade.
 
-**Unavailable axes are excluded, not fabricated.** When a signal could not be
-collected (offline, rate-limited, scan failed) its weight is dropped from both
-the numerator and the denominator, and the surviving weights renormalize to 1.0.
-Vulnerabilities, Maintenance and Maintainer Risk are all excludable; Depth and
-Maturity never are, so the denominator floors at 0.25. Scoring an unmeasured
-axis as 0 would report a clean bill of health nobody earned; scoring it with an
-"unknown" constant reports a fabricated measurement as a finding.
-
-**p95 and the archived floor count only modules in the build.** A module
-confirmed outside the build (`in_build: false`, in the module graph only) or
-confirmed test-only never sets `p95_dep_risk` or `archived_floor`; a nil
-classification (unavailable, a direct requirement no `go list` found, or a
-module listed in go.mod and reachable from one in the module graph) is assumed built and still
-counts. Ties at the p95 index resolve by module path
-and are reported as `tied_with`.
-
-**A headline band requires enough measurement to earn one.** If the
-vulnerability scan did not run, three of the five headline candidates are
-CVE-derived and score 0, leaving the headline to rest on graph position and
-version scheme alone. In that case `overall_risk_level` is `UNKNOWN` with
-`headline_unscored_reason` set; `overall_risk_score` is still reported but is
-indicative only. Per-dependency `risk_level` always carries a real band.
-
-## The 10 Scanners
+## The 9 Scanners
 
 | Scanner | What it checks | Data source |
 |---------|---------------|-------------|
@@ -82,7 +70,6 @@ indicative only. Per-dependency `risk_level` always carries a real band.
 | **Maintainer** | Contributors, bus factor, activity, org verification | GitHub API |
 | **Typosquatting** | Similar names to well-known packages (Levenshtein) | Built-in list (~75 modules) |
 | **Resilience** | Release cadence, governance files, version scheme | GitHub API |
-| **AI-Generated** | Fresh modules, few releases, generic names | Heuristics |
 | **CI/CD** | Action pinning, permissions, secret exposure | .github/workflows/*.yml |
 | **Build Files** | Unpinned Docker images, curl\|bash patterns | Dockerfile, Makefile, *.sh |
 | **Integrity** | `go.mod` replace/exclude directive audit | `go.mod` (offline) |
@@ -120,12 +107,12 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 | `pkg/scanner/maintainer.go` | GitHub maintainer analysis |
 | `pkg/scanner/typosquat.go` | Typosquatting detection |
 | `pkg/scanner/resilience.go` | Resilience scoring |
-| `pkg/scanner/aigen.go` | AI-generated code detection |
+| `pkg/scanner/aigen.go` | AI-generation heuristic (no longer run; not published) |
 | `pkg/scanner/ci.go` | CI/CD pipeline audit |
-| `pkg/scanner/buildfiles.go` | Dockerfile/Makefile scanning |
 | `pkg/scanner/trustindex.go` | unitrust API integration |
 | `pkg/scanner/integrity.go` | `go.mod` replace/exclude directive audit |
-| `pkg/scorer/risk.go` | Risk score computation |
+| `pkg/grade/` | The grade: rows, letter, Pending (Grading v2) |
+| `pkg/scorer/risk.go` | Scanner signals and the internal (unpublished) 0-100 score |
 | `pkg/policy/engine.go` | Organizational policy evaluation |
 | `pkg/report/text.go` | Terminal output |
 | `pkg/report/json.go` | JSON output |
@@ -156,7 +143,7 @@ unisupply ./ --format sbom-cyclonedx --output sbom.json
 unisupply ./ --policy-preset strict
 unisupply ./ --policy ./my-policy.json
 
-# Filter output
+# Also grade the module itself at a published version
 unisupply ./ --module-version v1.4.0
 
 # Progress output (default: auto — TTY spinner if stderr is a terminal,
@@ -192,6 +179,7 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
   "max_ci_score": 50,
   "forbid_replace_redirect": true,
   "require_gosum_verified": true,
+  "allow_pending": false,
   "blocked_modules": ["github.com/suspicious/pkg"],
   "allowed_modules": ["golang.org/x/", "github.com/unidoc/"]
 }
@@ -200,7 +188,9 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
 See `pkg/policy/engine.go` for the full schema and `examples/policy-custom.json`
 for an example reference.
 
-Exit code 2 on policy violation — designed for CI/CD fail-fast.
+`max_grade` is the worst letter allowed (`"C"` fails D and F). It also fails when there is no grade or the grade is
+Pending, unless `allow_pending` is true (then it is a printed warning). Exit code 2 on policy violation — designed for
+CI/CD fail-fast. Without `--policy` or `--policy-preset` the exit code ignores the grade.
 
 ## Building
 
@@ -263,7 +253,7 @@ just clean                     # remove artifacts
 
 ## Status
 
-**v0.6.0 — Feature complete.** All 10 scanners, 4 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
+**v0.6.0 — Feature complete.** All 9 scanners, 5 output formats, policy engine, trust index integration, SBOM generation. Production-ready.
 
 ## Relationship to UniDoc ecosystem
 

@@ -2,7 +2,6 @@ package grade
 
 import (
 	"fmt"
-	"sort"
 )
 
 // treeRule is the whole-tree rules: F only for confirmed problems, counted across the tree with confirmed test-only
@@ -29,7 +28,7 @@ func treeRule(in *Input, rows []RowResult) *TreeRow {
 		}
 		for i := range r.Findings {
 			f := &r.Findings[i]
-			sf := scoreFinding(f, r.Self)
+			sf := scoreFinding(f, &r)
 			k := key{r.Module, f.ID}
 			if sf.tier == TierCalled && highOrCritical(sf.sev) {
 				calledHC[k] = true
@@ -66,6 +65,5 @@ func treeRule(in *Input, rows []RowResult) *TreeRow {
 		return &TreeRow{Rule: "imported_and_called_findings", Score: treeDScore, Letter: LetterD,
 			Reason: fmt.Sprintf("%d called or imported high or critical findings across %d module%s", len(anyHC), len(modulesAny), plural(len(modulesAny), "", "s"))}
 	}
-	_ = sort.Strings
 	return nil
 }

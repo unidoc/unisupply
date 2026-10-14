@@ -233,35 +233,18 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 
 	writeTimeBombsSection(c, ps, regular, bold)
 
-	// Data-quality notes: list vulns where enrichment failed, and separately
-	// those whose severity is simply not published yet.
-	var failedVulns, unscoredVulns []*scanner.Vulnerability
+	// Data-quality note, from the grade: the advisories that were graded on an estimated severity.
+	failed := map[string]bool{}
 	for _, ds := range ps.Dependencies {
 		for i := range ds.Vulns {
-			switch {
-			case ds.Vulns[i].EnrichmentFailed:
-				failedVulns = append(failedVulns, &ds.Vulns[i])
-			case ds.Vulns[i].SeveritySource == "unscored":
-				unscoredVulns = append(unscoredVulns, &ds.Vulns[i])
+			if ds.Vulns[i].EnrichmentFailed {
+				failed[ds.Vulns[i].ID] = true
 			}
 		}
 	}
-	if len(failedVulns) > 0 || len(unscoredVulns) > 0 {
+	if intro, bullets := dataQualityNote(opts.Grade, failed); len(bullets) > 0 {
 		subheading(c, "Data-quality Notes", bold)
-	}
-	if len(failedVulns) > 0 {
-		writeDataQualityList(c, regular, failedVulns, fmt.Sprintf(
-			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
-				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
-			len(failedVulns),
-		), true)
-	}
-	if len(unscoredVulns) > 0 {
-		writeDataQualityList(c, regular, unscoredVulns, fmt.Sprintf(
-			"%d advisory(ies) have no published severity. "+
-				"No public CVSS severity has been published yet for these advisories; they are scored conservatively as MEDIUM (HIGH when called).\n",
-			len(unscoredVulns),
-		), false)
+		writeDataQualityList(c, regular, intro, bullets)
 	}
 
 	// Scan notes are informational and say nothing is missing, so they are
@@ -280,21 +263,47 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	}
 }
 
-// writeDataQualityList draws one data-quality paragraph: an intro sentence
-// followed by one bullet per vulnerability. withErrors appends the first
-// enrichment error to each bullet, which only failed lookups have.
-func writeDataQualityList(c *creator.Creator, regular *model.PdfFont, vulns []*scanner.Vulnerability, intro string, withErrors bool) {
+// dataQualityNote is the data-quality note from the grade data: one bullet per finding that was graded (counted) on an
+// estimated severity. An advisory with no published severity is scored as MEDIUM whatever its reachability, and the letter
+// is marked * only when that estimate could change it. A graph-only finding is not graded, so it is not listed. failed
+// holds the advisory IDs whose severity lookup failed, which is said on their bullet. No bullets: no note.
+func dataQualityNote(g *grade.Result, failed map[string]bool) (intro string, bullets []string) {
+	if g == nil {
+		return "", nil
+	}
+	for i := range g.Rows {
+		r := &g.Rows[i]
+		for j := range r.Findings {
+			f := &r.Findings[j]
+			if !f.Estimated || !f.Counted {
+				continue
+			}
+			line := fmt.Sprintf("  • %s (%s) — scored %s", f.ID, r.Module, f.Severity)
+			if failed[f.ID] {
+				line += " (severity lookup failed across OSV, NVD and GitHub Advisory)"
+			}
+			bullets = append(bullets, line)
+		}
+	}
+	if len(bullets) == 0 {
+		return "", nil
+	}
+	intro = fmt.Sprintf("%d graded advisory(ies) have no published severity. "+
+		"An advisory with no published severity is scored as MEDIUM, whatever its reachability. "+
+		"The letter is marked * only when that estimate could change it. "+
+		"Advisories that are not graded (graph only) are not listed.\n", len(bullets))
+	return intro, bullets
+}
+
+// writeDataQualityList draws the data-quality paragraph: an intro sentence followed by one bullet per advisory.
+func writeDataQualityList(c *creator.Creator, regular *model.PdfFont, intro string, bullets []string) {
 	notePara := c.NewStyledParagraph()
 	notePara.SetMargins(0, 0, 5, 0)
 	notePara.SetLineHeight(1.6)
 	noteIntro := notePara.Append(intro)
 	noteIntro.Style.Font = regular
 	noteIntro.Style.FontSize = 11
-	for _, v := range vulns {
-		line := fmt.Sprintf("  • %s — scored %s", v.ID, scorer.ScoredSeverity(v))
-		if withErrors && len(v.EnrichmentErrors) > 0 {
-			line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
-		}
+	for _, line := range bullets {
 		chunk := notePara.Append(line + "\n")
 		chunk.Style.Font = regular
 		chunk.Style.FontSize = 10
@@ -463,20 +472,32 @@ func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, stdlib 
 	_ = c.Draw(table)
 }
 
+// methodologySection is one titled paragraph of the methodology page.
+type methodologySection struct {
+	title string
+	body  string
+}
+
+// methodologySections is the text of the methodology page. It restates docs/grading.md (rules version 2); the numbers are
+// policy values that pick a band.
+func methodologySections() []methodologySection {
+	return []methodologySection{
+		{"Grading", "Every row (the module itself and each dependency) gets one score: the larger of its vulnerability score and its upkeep score. The letter comes from the worst row, and the report names that row and says why. The bands are A (0 to 10), B (11 to 25), C (26 to 50), D (51 to 75) and F (76 to 100). A means nothing crossed a scoring threshold: it does not say the project is secure or supported. D and F mean a confirmed problem: a known vulnerability in code that is reached, or a checksum that does not match. The numbers are policy values that pick a band. They are shown for traceability, and they are not a measurement, a probability of compromise or a risk score."},
+		{"Vulnerabilities", "Dependencies are checked against the Go Vulnerability Database (vuln.go.dev) with govulncheck, which says how far each advisory reaches. Called: a path reaches the vulnerable function. Imported: the package is imported but no path reaches the function; this never scores above 50, so it cannot reach D. Graph only: the package with the bug is never imported, so its code is not compiled in; it is shown and not graded. Reachability that could not be determined is scored as called. Each further called high or critical advisory on a row adds 5, and a called advisory on CISA's Known Exploited Vulnerabilities list scores at least 76 (F). A row that is confirmed test-only has its vulnerability score halved, at most 50; a module confirmed not to be compiled in is graph only."},
+		{"Estimates (*)", "An advisory with no published severity is scored as MEDIUM, whatever its reachability. The letter is marked with * only when that estimate could change it: a C that no other row or rule certifies."},
+		{"Upkeep", "An archived module, a deprecated module or a retracted version scores 35 when it is the module itself, 20 when it is a dependency and 10 when it is test-only or not compiled in. A quiet project with nothing open scores 0: being quiet is not a finding. Upkeep alone can reach C, never D or F."},
+		{"Whole-tree rules", "These only raise the letter. Three or more called high or critical findings across the tree, any called critical finding, a called known-exploited finding or a checksum mismatch (go mod verify) give F. Five or more called or imported high or critical findings give at least D. Test-only dependencies are left out of the counts; a checksum mismatch applies in full everywhere."},
+		{"Pending", "A letter needs its checks. When a check that could change the letter did not run (the vulnerability scan failed or did not finish, the module's own status or advisories could not be read, or a dependency's maintenance data is missing and could still beat the worst row), the grade is PENDING: there is no letter, and the report says which check failed and what is known. Treat a missing letter as no result, never as a pass."},
+		{"Response window", "A fix released recently still counts: current exposure is shown at once. Each finding is labelled with the date of the fix and the end of a 14-day response window. The window never changes the letter. A known-exploited finding has no window."},
+		{"CI/CD Assessment", "GitHub Actions workflows, Dockerfiles, and build scripts are analyzed for security misconfigurations including unpinned actions, excessive permissions, and dangerous command patterns. This audit has its own 0 to 100 score and is not part of the grade."},
+	}
+}
+
 func writeMethodologyPage(c *creator.Creator, regular, bold *model.PdfFont) {
 	c.NewPage()
 	heading(c, "Methodology", bold)
 
-	content := []struct {
-		title string
-		body  string
-	}{
-		{"Grading", "Every row (the module itself and each dependency) gets one score, and the letter comes from the worst row: A, B, C, D or F. D and F mean a confirmed problem: a known vulnerability in code that is actually reached, or a checksum that does not match. Vulnerable code that is never compiled is shown, not graded. Upkeep counts, but only up to C. A check that did not run makes the grade PENDING, never a letter. A letter with * rests on at least one finding that had no published severity and was scored as medium."},
-		{"Vulnerability Scanning", "Dependencies are checked against the Go Vulnerability Database (vuln.go.dev) for known CVEs and security advisories."},
-		{"Maintenance Assessment", "Module release history and the latest commit on the repository's default branch are obtained from the Go Module Proxy (proxy.golang.org); the newer of the two sets the maintenance age. Archived and deprecated modules (including a go.mod Deprecated notice) receive the highest maintenance risk."},
-		{"Maintainer Analysis", "For GitHub-hosted modules, contributor data is analyzed to determine bus factor and activity patterns."},
-		{"CI/CD Assessment", "GitHub Actions workflows, Dockerfiles, and build scripts are analyzed for security misconfigurations including unpinned actions, excessive permissions, and dangerous command patterns."},
-	}
+	content := methodologySections()
 
 	for _, section := range content {
 		subheading(c, section.title, bold)
@@ -632,24 +653,72 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 	}
 }
 
-// addVulnBullets appends the bullet lines describing one vulnerability: its
-// ID, severity, reachability tag and threat-intel badges, the fix, the call
-// path and the vulnerable symbols called. withSummary adds the advisory
-// summary after the first line; dependency blocks omit it.
-func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, withSummary bool, font *model.PdfFont) {
-	// Append an inline reachability tag when the tier is not "called" (the
-	// most-severe tier).  Empty Reachability is treated as called for
-	// backward compatibility with non-govulncheck CVE sources.
-	reachTag := ""
-	switch v.Reachability {
-	case "imported", "required":
-		reachTag = fmt.Sprintf(" (%s)", v.Reachability)
+// gradeFindingByID is the row's finding for an advisory ID, or nil when the row or the finding is not there.
+func gradeFindingByID(r *grade.RowResult, id string) *grade.FindingResult {
+	if r == nil {
+		return nil
 	}
+	for i := range r.Findings {
+		if r.Findings[i].ID == id {
+			return &r.Findings[i]
+		}
+	}
+	return nil
+}
+
+// vulnTierText names a tier in Grading v2 words.
+func vulnTierText(tier string) string {
+	switch tier {
+	case grade.TierCalled:
+		return "called"
+	case grade.TierImported:
+		return "imported"
+	case grade.TierGraphOnly:
+		return "graph only: shown, not graded"
+	}
+	return tier
+}
+
+// vulnLine is the first line of a vulnerability: its ID and, from the grade's finding when there is one, the tier, the
+// VEX status and the severity as scored. Without a finding (grading did not cover it, e.g. the standard library) it says
+// what the scanner reported, in the same words, and does not claim it was graded.
+func vulnLine(v *scanner.Vulnerability, f *grade.FindingResult) string {
+	if f != nil {
+		tier := vulnTierText(f.Tier)
+		if f.TierAssumed {
+			tier += " (assumed)"
+		}
+		return fmt.Sprintf("Vulnerability: %s (%s; VEX %s; severity %s)", v.ID, tier, gradeVEXText(f.VEX), gradeFindingSeverity(f))
+	}
+	var tier string
+	switch v.Reachability {
+	case "called":
+		tier = "called"
+	case "imported":
+		tier = "imported"
+	case "required":
+		tier = "graph only: shown, not graded"
+	default:
+		tier = "reachability not determined"
+	}
+	sev := v.Severity
+	if sev == "" || strings.EqualFold(sev, "UNKNOWN") {
+		sev = "not published"
+	}
+	return fmt.Sprintf("Vulnerability: %s (%s; severity %s)", v.ID, tier, sev)
+}
+
+// addVulnBullets appends the bullet lines describing one vulnerability: its
+// ID, tier, VEX status, severity as scored and threat-intel badges, the fix,
+// the call path and the vulnerable symbols called. f is the grade's finding
+// for it (nil when there is none). withSummary adds the advisory summary after
+// the first line; dependency blocks omit it.
+func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *grade.FindingResult, withSummary bool, font *model.PdfFont) {
 	ti := ""
 	if v.InKEV {
 		ti = " [KEV — exploited in the wild]"
 	}
-	addBullet(p, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), font)
+	addBullet(p, vulnLine(v, f)+ti, font)
 	if withSummary && v.Summary != "" {
 		addBullet(p, "  Summary: "+v.Summary, font)
 	}
@@ -686,12 +755,12 @@ func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, r
 		details := c.NewStyledParagraph()
 		details.SetMargins(20, 0, 0, 6)
 		details.SetLineHeight(1.5)
-		addVulnBullets(details, &vulns[i], true, regular)
+		addVulnBullets(details, &vulns[i], nil, true, regular)
 		_ = c.Draw(details)
 	}
 }
 
-func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, letter string, regular, bold *model.PdfFont, detailed bool) {
+func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, row *grade.RowResult, letter string, regular, bold *model.PdfFont, detailed bool) {
 	color := pdfLetterColor(letter)
 
 	// Build the classification label for the module header.
@@ -737,7 +806,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, letter
 		return false
 	})
 	for i := range vulns {
-		addVulnBullets(details, &vulns[i], false, regular)
+		addVulnBullets(details, &vulns[i], gradeFindingByID(row, vulns[i].ID), false, regular)
 	}
 
 	// Maintenance.

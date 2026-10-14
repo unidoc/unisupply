@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,7 +68,11 @@ type Options struct {
 	// project directory) if empty, matching the CLI's own default.
 	WorkflowPath string
 
-	DebugScoring bool
+	// ExcludeStdlibFromGrade leaves the Go standard library out of the grade: its advisories are still listed in
+	// Result.StdlibVulns, but no row for them is graded. Set it when the toolchain the scan runs with is not the one the
+	// project is built with (a service that scans other people's repositories), so the grade does not rest on the
+	// scanner's own Go. The CLI scans with the project's toolchain and leaves it false.
+	ExcludeStdlibFromGrade bool
 
 	// SelfVersion is the version of the module being scanned, as published (a tag such as v1.4.0). It lets the grade
 	// look up the module's own advisories (OSV) and its own archived/deprecated status. Empty means the module is not
@@ -115,9 +120,9 @@ type Result struct {
 	// (govulncheck failed, or produced no usable output). Run still returns a
 	// Result in that case - the dependency graph and the other scanners ran -
 	// but the vulnerability data is EMPTY, which a caller must not present as
-	// "no vulnerabilities". It is nil on the zero-dependency path, where there
-	// is nothing to scan: govulncheck is not run, so the standard library is not
-	// checked either, and IntegrityReport.GoSumVerified is empty.
+	// "no vulnerabilities". A module with no dependencies still runs govulncheck
+	// (the standard library is part of every build), so it can fail there too;
+	// IntegrityReport.GoSumVerified is empty on that path, as there is no go.sum to verify.
 	VulnScanErr error
 	// Interrupted is true when the context ended before every scanner finished,
 	// so the report may be incomplete.
@@ -207,7 +212,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	// cleared value. An empty graph uses no token, so it is only probed when
 	// the caller made a valid token a precondition.
 	tokenStatus := tokenCheck{token: opts.GithubToken}
-	if len(graph.Dependencies) > 0 || opts.RequireGithubToken {
+	if len(graph.Dependencies) > 0 || opts.RequireGithubToken || opts.SelfVersion != "" {
 		tokenStatus, err = checkGitHubToken(ctx, opts.GithubToken, opts.RequireGithubToken, offlineMode, timeout)
 		if err != nil {
 			return nil, err
@@ -216,21 +221,37 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	githubToken := tokenStatus.token
 
 	if len(graph.Dependencies) == 0 {
-		// Same shortcut as the original CLI code: nothing to scan, so skip
-		// every scanner's outbound calls entirely rather than running them
-		// against an empty graph. scorer.ScoreAll (not a hand-built zero
-		// value) still computes ProjectScore, so its shape matches exactly
-		// what a real empty-graph score looks like.
+		// No dependency means no per-dependency scanner has anything to do, but the standard library is part of every
+		// build and is graded: govulncheck still runs, so a module with no dependencies does not get a letter that never
+		// saw its one possible finding.
+		rep.Stage("Scanning vulnerabilities (govulncheck)")
+		vulns, vulnWarnings, vulnScanned, verr := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey})
+		if verr != nil {
+			rep.Warn("Vulnerability scan failed: %v", verr)
+		}
+		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
+		for _, w := range vulnWarnings {
+			rep.Warn("%s", w)
+		}
+		rep.Done("%d standard library advisories", len(vulns["stdlib"]))
+		resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
+		stdlibVulns := takeStdlibVulns(vulns)
+
+		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
+		// real empty-graph score looks like.
 		projectScore := scorer.ScoreAll(scorer.ScoreInput{
-			Graph:     graph,
-			Now:       scanStart,
-			DebugMode: opts.DebugScoring,
+			Graph:               graph,
+			Now:                 scanStart,
+			VulnScanUnavailable: !vulnScanned,
 		})
 		g := gradeAll(ctx, &gradeRun{
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
-			Timeout: timeout, ScanStart: scanStart, VulnScanned: true,
+			Timeout: timeout, ScanStart: scanStart, ProjectDir: projectDir,
+			Stdlib:      gradedStdlib(&opts, stdlibVulns),
+			VulnScanned: emptyVulnErr == nil, VulnScanReason: errString(emptyVulnErr),
 		})
-		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport}, nil
+		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
+			StdlibVulns: stdlibVulns, VulnScanErr: emptyVulnErr}, nil
 	}
 
 	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
@@ -259,14 +280,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	// The date each fix was released (from the module proxy), so a finding can say whether it is inside the response
 	// window. Best effort: a failed lookup leaves the advisory's own date, or none.
-	fixOpts := scanner.FixDateOptions{Timeout: timeout}
-	for path, list := range vulns {
-		if path == stdlibModule {
-			scanner.ResolveStdlibFixDates(ctx, fixOpts, list)
-		} else {
-			scanner.ResolveFixDates(ctx, fixOpts, path, list)
-		}
-	}
+	resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
 
 	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(timeout)
@@ -366,8 +380,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 		VulnScanUnavailable: vulnScanUnavailable,
 
-		DebugMode: opts.DebugScoring,
-		Now:       scanStart,
+		Now: scanStart,
 	})
 	// Resolver degradations change the numbers, so they belong in the report.
 	// So does the token outcome: under --progress none, or for a library
@@ -419,7 +432,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	gradeResult := gradeAll(ctx, &gradeRun{
 		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 		Timeout: timeout, ScanStart: scanStart,
-		Vulns: vulns, Stdlib: stdlibVulns, Maintenance: maintenance,
+		ProjectDir: projectDir,
+		Vulns:      vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
 	})
 
@@ -482,4 +496,32 @@ func takeStdlibVulns(vulns map[string][]scanner.Vulnerability) []scanner.Vulnera
 		return strings.Compare(a.ID, b.ID)
 	})
 	return list
+}
+
+// fixDateStageTimeout bounds the whole fix-date stage, all modules together. The
+// stage is best effort, so a slow or stalled proxy must not hold the scan for
+// the per-module timeout times the number of affected modules.
+const fixDateStageTimeout = 60 * time.Second
+
+// resolveAllFixDates resolves the fix-release dates of every module's findings
+// under one shared deadline of stage. Lookups still pending at the deadline
+// leave their findings on the advisory date. Modules are visited in sorted
+// order so the outcome does not depend on map order.
+func resolveAllFixDates(ctx context.Context, opts scanner.FixDateOptions, stage time.Duration, vulns map[string][]scanner.Vulnerability) {
+	ctx, cancel := context.WithTimeout(ctx, stage)
+	defer cancel()
+	paths := make([]string, 0, len(vulns))
+	for path := range vulns {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		// Past the deadline the calls still run, instantly and without a
+		// request, so each finding falls back to its advisory date.
+		if path == stdlibModule {
+			scanner.ResolveStdlibFixDates(ctx, opts, vulns[path])
+		} else {
+			scanner.ResolveFixDates(ctx, opts, path, vulns[path])
+		}
+	}
 }

@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/unidoc/unisupply/pkg/grade"
@@ -68,6 +69,69 @@ func gradeNeedsDetail(r *grade.RowResult) bool {
 	return false
 }
 
+// gradeRowCarriesInfo is true for a row that tells the reader something: a letter other than A, any finding, or an upkeep
+// state other than finished/active (parked, deprecated, archived, unknown). The rest are "A, nothing found".
+func gradeRowCarriesInfo(r *grade.RowResult) bool {
+	if r.Letter != grade.LetterA || len(r.Findings) > 0 || r.UpkeepNote != "" {
+		return true
+	}
+	return r.UpkeepState != grade.StateFinished && r.UpkeepState != grade.StateActive
+}
+
+// gradeRowsToShow picks the rows of the rows table, worst first. all lists every row (--verbose); otherwise only the rows
+// that carry information. quiet is the number of rows left out: all graded A with nothing found.
+func gradeRowsToShow(g *grade.Result, all bool) (shown []*grade.RowResult, quiet int) {
+	for i := range g.Rows {
+		r := &g.Rows[i]
+		if all || gradeRowCarriesInfo(r) {
+			shown = append(shown, r)
+		} else {
+			quiet++
+		}
+	}
+	sort.SliceStable(shown, func(i, j int) bool { return shown[i].Score > shown[j].Score })
+	return shown, quiet
+}
+
+// gradeQuietRowsLine is the one line that stands for the rows left out of the table ("" when none were).
+func gradeQuietRowsLine(n int) string {
+	switch n {
+	case 0:
+		return ""
+	case 1:
+		return "1 more row graded A with nothing found"
+	}
+	return fmt.Sprintf("%d more rows graded A with nothing found", n)
+}
+
+// gradeWrapModulePath breaks a module path into lines of at most width characters, only at '/' boundaries (the slash stays
+// at the end of its line). A segment longer than width is cut with "..." rather than split mid-word.
+func gradeWrapModulePath(path string, width int) []string {
+	if width < 4 {
+		width = 4
+	}
+	var lines []string
+	cur := ""
+	parts := strings.SplitAfter(path, "/")
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if len(p) > width {
+			p = p[:width-3] + "..."
+		}
+		if cur != "" && len(cur)+len(p) > width {
+			lines = append(lines, cur)
+			cur = ""
+		}
+		cur += p
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
 // gradeLetterCounts renders "F 1, C 2, A 10" for the rows, worst first, skipping letters with no rows.
 func gradeLetterCounts(g *grade.Result) string {
 	counts := map[grade.Letter]int{}
@@ -79,7 +143,7 @@ func gradeLetterCounts(g *grade.Result) string {
 		if n := counts[l]; n > 0 {
 			name := string(l)
 			if name == "" {
-				name = "-"
+				name = "not graded"
 			}
 			parts = append(parts, fmt.Sprintf("%s %d", name, n))
 		}
@@ -142,7 +206,7 @@ func gradeFindingSeverity(f *grade.FindingResult) string {
 }
 
 // writeGradeText writes the grade block, the rows table, the whole-tree rows and the notes.
-func writeGradeText(w io.Writer, c func(string, string) string, g *grade.Result) {
+func writeGradeText(w io.Writer, c func(string, string) string, g *grade.Result, verbose bool) {
 	bar := "═══════════════════════════════════════════════════"
 	fmt.Fprintf(w, "%s\n", bar)
 	if g == nil {
@@ -172,7 +236,7 @@ func writeGradeText(w io.Writer, c func(string, string) string, g *grade.Result)
 	}
 	fmt.Fprintf(w, "%s\n\n", bar)
 
-	writeGradeRowsText(w, c, g)
+	writeGradeRowsText(w, c, g, verbose)
 
 	if len(g.TreeRows) > 0 {
 		fmt.Fprintf(w, "WHOLE-TREE RULES\n")
@@ -195,13 +259,14 @@ func writeGradeText(w io.Writer, c func(string, string) string, g *grade.Result)
 	}
 }
 
-func writeGradeRowsText(w io.Writer, c func(string, string) string, g *grade.Result) {
+func writeGradeRowsText(w io.Writer, c func(string, string) string, g *grade.Result, verbose bool) {
 	if len(g.Rows) == 0 {
 		return
 	}
+	rows, quiet := gradeRowsToShow(g, verbose)
 	modW, verW := len("MODULE"), len("VERSION")
-	names := make([]string, len(g.Rows))
-	for i, r := range g.Rows {
+	names := make([]string, len(rows))
+	for i, r := range rows {
 		names[i] = r.Module
 		if r.Self {
 			names[i] += " (" + gradeThisModuleLabel + ")"
@@ -216,8 +281,7 @@ func writeGradeRowsText(w io.Writer, c func(string, string) string, g *grade.Res
 
 	fmt.Fprintf(w, "GRADE TABLE (worst first)\n")
 	fmt.Fprintf(w, "  %-*s  %-*s  %-6s %5s  %-10s  %s\n", modW, "MODULE", verW, "VERSION", "GRADE", "SCORE", "UPKEEP", "REASON")
-	for i := range g.Rows {
-		r := &g.Rows[i]
+	for i, r := range rows {
 		l := gradeRowLabel(r)
 		fmt.Fprintf(w, "  %-*s  %-*s  %s %5d  %-10s  %s\n", modW, names[i], verW, r.Version,
 			c(gradeLetterColor(l), fmt.Sprintf("%-6s", l)), r.Score, r.UpkeepState, r.Reason)
@@ -247,6 +311,9 @@ func writeGradeRowsText(w io.Writer, c func(string, string) string, g *grade.Res
 				fmt.Fprintf(w, "        Note: %s\n", f.Note)
 			}
 		}
+	}
+	if line := gradeQuietRowsLine(quiet); line != "" {
+		fmt.Fprintf(w, "  %s\n", c(colorDim, line+" — use --verbose to list them"))
 	}
 	fmt.Fprintln(w)
 }

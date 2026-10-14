@@ -328,9 +328,10 @@ func TestUnknownSeverityIsEstimatedAndMarked(t *testing.T) {
 	if f := row(t, r, "example.com/x").Findings[0]; !f.Estimated || !strings.Contains(f.Note, "scored as medium") {
 		t.Errorf("%+v", f)
 	}
-	// a letter decided by a KNOWN severity is not marked, even if an unknown one sits elsewhere
+	// an unknown severity elsewhere marks even a letter that a known severity decides
 	r = run(Input{Self: self(), Deps: []Row{dep("example.com/x", called("H", "example.com/x", "HIGH")), dep("example.com/y", called("U", "example.com/y", ""))}})
-	if r.Estimated || r.Letter != LetterD {
+	// the unknown severity on y could be a critical: the D could be an F, so the letter carries the star
+	if !r.Estimated || r.Letter != LetterD {
 		t.Errorf("%s %v", r.Letter, r.Estimated)
 	}
 }

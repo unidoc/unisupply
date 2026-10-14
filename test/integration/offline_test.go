@@ -2,13 +2,17 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/resolver"
+	"github.com/unidoc/unisupply/pkg/runner"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
@@ -166,4 +170,85 @@ func TestOffline_IntegrityReportsOffline(t *testing.T) {
 	if len(report.Findings) != 0 {
 		t.Errorf("Findings = %d, want 0 — offline is not a verification failure", len(report.Findings))
 	}
+}
+
+// fakeArchiveLookup panics when asked: a repository lookup offline is a leak.
+type fakeArchiveLookup struct{}
+
+func (fakeArchiveLookup) RepositoryArchived(context.Context, string, string) (bool, error) {
+	panic("offline mode asked GitHub whether a repository is archived")
+}
+
+// TestOffline_GradingInputsMakeNoRequest covers the Grading v2 scanners: the
+// module's own advisories, fix-release dates, the archived check and response
+// history, each alone and then through the runner's gradeAll (via Run, with a
+// module version and --response-history set). The transport under the offline
+// refusal panics on any request that gets through.
+func TestOffline_GradingInputsMakeNoRequest(t *testing.T) {
+	enterOffline(t)
+	ctx := context.Background()
+	const timeout = 5 * time.Second
+
+	t.Run("module advisories", func(t *testing.T) {
+		got, err := scanner.ScanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{Timeout: timeout, CacheDir: t.TempDir()}, "example.com/m", "v1.0.0")
+		if !errors.Is(err, offline.ErrOffline) || got != nil {
+			t.Errorf("got %v, %v; want nil and an offline error", got, err)
+		}
+	})
+
+	t.Run("fix dates", func(t *testing.T) {
+		published := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		vulns := []scanner.Vulnerability{{ID: "GO-1", FixedVersion: "v1.0.1", FixPublishedAt: &published}}
+		scanner.ResolveFixDates(ctx, scanner.FixDateOptions{Timeout: timeout}, "example.com/m", vulns)
+		if vulns[0].FixDateSource != scanner.FixDateAdvisory {
+			t.Errorf("FixDateSource = %q, want the advisory date %q", vulns[0].FixDateSource, scanner.FixDateAdvisory)
+		}
+		std := []scanner.Vulnerability{{ID: "GO-2", FixedVersion: "go1.26.9", FixPublishedAt: &published}}
+		scanner.ResolveStdlibFixDates(ctx, scanner.FixDateOptions{Timeout: timeout}, std)
+	})
+
+	t.Run("archived", func(t *testing.T) {
+		maint := map[string]*scanner.MaintenanceInfo{"github.com/o/r": {RepositoryURL: "https://github.com/o/r"}}
+		if err := scanner.NewMaintenanceScanner(timeout).ScanArchived(ctx, maint, fakeArchiveLookup{}); err != nil {
+			t.Errorf("ScanArchived: %v", err)
+		}
+		if maint["github.com/o/r"].ArchivedCheck != "" {
+			t.Errorf("ArchivedCheck = %q, want it untouched: nothing was attempted", maint["github.com/o/r"].ArchivedCheck)
+		}
+	})
+
+	t.Run("response history", func(t *testing.T) {
+		got, err := scanner.ScanResponseHistory(ctx, scanner.ResponseHistoryOptions{Timeout: timeout}, "example.com/m", []string{"example.com/dep"})
+		if !errors.Is(err, offline.ErrOffline) || got != nil {
+			t.Errorf("got %v, %v; want nil and an offline error", got, err)
+		}
+	})
+
+	t.Run("runner gradeAll", func(t *testing.T) {
+		src, err := os.ReadFile(testdataPath("gomod", "simple.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), src, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := runner.Run(ctx, runner.Options{
+			Path:            dir,
+			DirectOnly:      true,
+			Timeout:         timeout,
+			SelfVersion:     "v1.0.0",
+			ResponseHistory: true,
+			Now:             time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if res.Grade == nil {
+			t.Fatal("no grade")
+		}
+		if res.Grade.Pending == nil || !strings.Contains(res.Grade.Pending.Reason, "offline") {
+			t.Errorf("Pending = %+v, want a reason that says offline", res.Grade.Pending)
+		}
+	})
 }

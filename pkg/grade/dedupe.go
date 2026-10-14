@@ -58,6 +58,25 @@ func mergeGroup(all []Finding, idx []int) Finding {
 	if len(idx) == 1 {
 		return all[idx[0]]
 	}
+	// Put the group in a total order of its own content first, so that "the first non-empty fixed version" and the
+	// other first-wins choices below never depend on the order the findings arrived in.
+	idx = append([]int(nil), idx...)
+	sort.Slice(idx, func(x, y int) bool {
+		a, b := &all[idx[x]], &all[idx[y]]
+		switch {
+		case a.ID != b.ID:
+			return a.ID < b.ID
+		case a.FixedVersion != b.FixedVersion:
+			return a.FixedVersion < b.FixedVersion
+		case a.Condition != b.Condition:
+			return a.Condition < b.Condition
+		case a.Summary != b.Summary:
+			return a.Summary < b.Summary
+		case a.Reachability != b.Reachability:
+			return a.Reachability < b.Reachability
+		}
+		return a.Severity < b.Severity
+	})
 	// the representative: a Go advisory first, then the smallest ID, so the result never depends on input order
 	rep := idx[0]
 	for _, i := range idx[1:] {
@@ -108,7 +127,7 @@ func mergeGroup(all []Finding, idx []int) Finding {
 }
 
 func severityRank(s string) int {
-	switch strings.ToUpper(s) {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
 	case "CRITICAL":
 		return 4
 	case "HIGH":
@@ -123,11 +142,15 @@ func severityRank(s string) int {
 
 // reachRank orders reachability by how much it counts; an undetermined one is scored as called, so it ranks with it.
 func reachRank(r string) int {
-	switch r {
-	case "called", "":
-		return 3
+	switch strings.ToLower(strings.TrimSpace(r)) {
+	case "called":
+		return 4
 	case "imported":
 		return 2
+	case "required":
+		return 1
 	}
-	return 1
+	// not determined, or not a value the scanners produce: scored as called (the worst case), but a finding that IS
+	// called outranks it, so the "reachability assumed" note never depends on which of the two came first
+	return 3
 }

@@ -1,5 +1,6 @@
 {
   "max_grade": "C",
+  "allow_pending": false,
   "max_ci_score": 50,
   "no_known_vulns": false,
   "no_critical_vulns": true,
@@ -9,6 +10,9 @@
   "no_typosquatting": true,
   "no_unmaintained_months": 18,
   "max_depth": 5,
+  "forbid_replace_redirect": true,
+  "require_gosum_verified": true,
+  "forbid_pseudo_versions": true,
   "allowed_modules": [
     "golang.org/x/",
     "github.com/unidoc/"

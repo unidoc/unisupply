@@ -29,7 +29,11 @@ func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 		return &Pending{Check: "vulnerability_scan", Reason: reason, Known: known}
 	case c.ScanTimedOut:
 		return &Pending{Check: "scan_incomplete", Reason: "the scan did not finish (it timed out or was interrupted), so some checks never ran", Known: known}
-	case c.SelfStatusFailed && upkeepSelf > score:
+	case c.ChecksumUnverified && bandOf(treeFScore) > bandOf(score):
+		return &Pending{Check: "checksum", Reason: "go mod verify could not complete, so a checksum mismatch cannot be ruled out", Known: known}
+	case c.KEVUnchecked > 0 && bandOf(treeFScore) > bandOf(score):
+		return &Pending{Check: "known_exploited", Reason: fmt.Sprintf("the known-exploited status (CISA's catalog) could not be checked for %d reached finding%s, and one on that list would grade F", c.KEVUnchecked, plural(c.KEVUnchecked, "", "s")), Known: known}
+	case (c.SelfStatusFailed || in.Self.Upkeep.Missing) && bandOf(upkeepSelf) > bandOf(score):
 		return &Pending{Check: "module_status", Reason: withDetail("the module's own status (archived, deprecated) could not be read", c.SelfStatusReason), Known: known}
 	case c.SelfAdvisoriesFailed:
 		return &Pending{Check: "module_advisories", Reason: withDetail("the lookup of the module's own advisories failed", c.SelfAdvisoriesReason), Known: known}
@@ -44,7 +48,7 @@ func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 		if isConfirmed(d.TestOnly) || isRefuted(d.InBuild) {
 			possible = upkeepMinor
 		}
-		if possible > score {
+		if bandOf(possible) > bandOf(score) {
 			missing = append(missing, d.Module)
 			if possible > maxPossible {
 				maxPossible = possible
@@ -85,7 +89,7 @@ func knownFacts(in *Input, rows []RowResult) []string {
 			}
 		}
 	}
-	if len(rows) > 0 && rows[0].Score > 0 && !rows[0].UpkeepMissed {
+	if len(rows) > 0 && rows[0].Score > 0 && (!rows[0].UpkeepMissed || rows[0].VulnScore >= rows[0].UpkeepScore && rows[0].VulnScore > 0) {
 		w := rows[0]
 		who := w.Module
 		if w.Self {

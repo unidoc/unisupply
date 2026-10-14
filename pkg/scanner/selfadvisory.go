@@ -66,8 +66,9 @@ type SelfAdvisoryOptions struct {
 	// (severity lookup failed, EPSS/KEV unavailable). They never fail the lookup.
 	OnWarning func(string)
 
-	// clockFn is the time source for DaysUnpatched. Defaults to time.Now.
-	clockFn func() time.Time
+	// Now is the time source for DaysUnpatched. Nil means time.Now; the
+	// runner passes the scan start so a pinned-time run is reproducible.
+	Now func() time.Time
 }
 
 // selfOSVRecord is a partial decode of one OSV advisory in a /v1/query
@@ -151,7 +152,7 @@ func ScanModuleAdvisories(ctx context.Context, opts SelfAdvisoryOptions, module,
 	if client == nil {
 		client = NewClient(ClientOptions{Timeout: 10 * time.Second})
 	}
-	now := opts.clockFn
+	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
@@ -188,23 +189,44 @@ func ScanModuleAdvisories(ctx context.Context, opts SelfAdvisoryOptions, module,
 	return vulns, nil
 }
 
+// incompatibleSuffix is the build suffix the go command appends to a v2+
+// version of a module that has no go.mod and so no /vN path.
+const incompatibleSuffix = "+incompatible"
+
+// CheckModuleVersion reports whether version is a full canonical module
+// version: vMAJOR.MINOR.PATCH with an optional -prerelease, and optionally the
+// +incompatible suffix. Shorthand that semver.IsValid accepts ("v1", "v1.4")
+// and other build metadata are rejected, so no query is sent for a version
+// that no release can have. The error names the offending value and the
+// accepted form.
+func CheckModuleVersion(version string) error {
+	bare := strings.TrimSuffix(version, incompatibleSuffix)
+	if !semver.IsValid(bare) || semver.Canonical(bare) != bare {
+		return fmt.Errorf("invalid module version %q: want a full version such as v1.4.0 or v1.4.0-rc.1 (optionally with +incompatible), not a shorthand like v1 or v1.4", version)
+	}
+	return nil
+}
+
+// osvVersion returns version as OSV's Go ecosystem spells it: without the
+// +incompatible suffix.
+func osvVersion(version string) string {
+	return strings.TrimSuffix(version, incompatibleSuffix)
+}
+
 // checkModuleVersion rejects a module path or version no query should be sent
 // for.
 func checkModuleVersion(path, version string) error {
 	if err := module.CheckPath(path); err != nil {
 		return fmt.Errorf("invalid module path %q: %w", path, err)
 	}
-	if !semver.IsValid(version) {
-		return fmt.Errorf("invalid module version %q", version)
-	}
-	return nil
+	return CheckModuleVersion(version)
 }
 
 // queryOSVPage posts one /v1/query request and decodes the answer. Any
 // transport failure, non-200 status or unparseable body is an error.
 func queryOSVPage(ctx context.Context, client *Client, queryURL, host, modulePath, version, pageToken string) (*selfQueryResponse, error) {
 	req := map[string]any{
-		"version": version,
+		"version": osvVersion(version),
 		"package": map[string]string{"name": modulePath, "ecosystem": "Go"},
 	}
 	if pageToken != "" {

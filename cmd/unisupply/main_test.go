@@ -100,6 +100,11 @@ func stubGitHub(t *testing.T, status int, transportErr error) *atomic.Int32 {
 	var requests atomic.Int32
 	original := http.DefaultTransport
 	http.DefaultTransport = stubRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "vuln.go.dev" {
+			// a module with no dependencies still runs the vulnerability scan once the token is accepted (the standard
+			// library is part of every build): refused here, and not a token probe
+			return nil, fmt.Errorf("no network in this test: %s", req.URL)
+		}
 		requests.Add(1)
 		if req.URL.Host != "api.github.com" || req.URL.Path != "/rate_limit" {
 			t.Errorf("unexpected request %s %s: only the token probe may run before validation settles", req.Method, req.URL)
@@ -427,4 +432,90 @@ func filterEnv(env []string, key string) []string {
 		out = append(out, e)
 	}
 	return out
+}
+
+// TestModuleVersion_ShorthandRejectedBeforeScanning verifies that --module-version
+// needs a full version: run() fails with a clear error (exit 1, not 2 or 3) before
+// any scanner is built, so no request is made.
+func TestModuleVersion_ShorthandRejectedBeforeScanning(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatalf("writing fixture go.mod: %v", err)
+	}
+	for _, v := range []string{"v1", "v1.4", "1.4.0", "latest"} {
+		err := run(&runConfig{path: dir, format: "json", timeout: 5 * time.Second, moduleVersion: v, progressMode: "none"})
+		if err == nil || !strings.Contains(err.Error(), "--module-version") || !strings.Contains(err.Error(), "full version") {
+			t.Errorf("version %q: err = %v, want a --module-version error naming the full-version rule", v, err)
+		}
+		if errors.Is(err, errPolicyViolation) || errors.Is(err, errTokenPrecondition) {
+			t.Errorf("version %q: err = %v must be a plain error (exit 1)", v, err)
+		}
+	}
+}
+
+func TestResponseHistoryNeedsAModuleVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := run(&runConfig{path: dir, format: "json", timeout: 5 * time.Second, responseHistory: true, progressMode: "none"})
+	if err == nil || !strings.Contains(err.Error(), "--response-history needs --module-version") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// A module with nothing to scan has no report, but a policy is still evaluated, and the vulnerability scan still runs (the
+// standard library is part of every build): offline it did not look, so the grade is Pending and the gate fails, unless
+// the policy allows Pending. A gate must not pass because there was nothing to look at.
+func TestPolicyIsEvaluatedForAModuleWithNoDependencies(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	strict := filepath.Join(dir, "strict.json")
+	if err := os.WriteFile(strict, []byte(`{"max_grade":"A"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := func(policy string) *runConfig {
+		return &runConfig{path: dir, format: "json", timeout: 5 * time.Second, policyFile: policy, progressMode: "none", offlineMode: true, output: filepath.Join(dir, "out.json")}
+	}
+	if err := run(cfg(strict)); !errors.Is(err, errPolicyViolation) {
+		t.Fatalf("a Pending grade must fail max_grade even with nothing to scan: %v", err)
+	}
+	lenient := filepath.Join(dir, "lenient.json")
+	if err := os.WriteFile(lenient, []byte(`{"max_grade":"A","allow_pending":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(cfg(lenient)); err != nil {
+		t.Fatalf("allow_pending passes with a warning: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "out.json")); err == nil {
+		t.Error("no report is written for a module with nothing to scan")
+	}
+	// a policy file that cannot be loaded must fail the run even with nothing to scan (it used to be skipped)
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"max_risk_score": 70}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(cfg(bad)); err == nil {
+		t.Error("an invalid policy was silently skipped")
+	}
+}
+
+// A typo in -f or --policy-preset is refused before any scan: no output file, no scan.
+func TestFormatAndPresetAreCheckedBeforeScanning(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.json")
+	if err := run(&runConfig{path: dir, format: "bogus", output: out, timeout: 5 * time.Second, progressMode: "none"}); err == nil || !strings.Contains(err.Error(), "unknown format") {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("an output file was created for an unknown format")
+	}
+	if err := run(&runConfig{path: dir, format: "json", policyPreset: "bogus", timeout: 5 * time.Second, progressMode: "none"}); err == nil || !strings.Contains(err.Error(), "unknown policy preset") {
+		t.Errorf("err = %v", err)
+	}
 }

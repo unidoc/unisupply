@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +153,108 @@ func TestGradeAll_ChecksumMismatchIsF(t *testing.T) {
 	})
 	if res.Letter != grade.LetterF {
 		t.Fatalf("%+v", res)
+	}
+}
+
+func TestGradedStdlib(t *testing.T) {
+	v := []scanner.Vulnerability{{ID: "GO-1", Severity: "CRITICAL", Reachability: "called"}}
+	if got := gradedStdlib(&Options{}, v); len(got) != 1 {
+		t.Errorf("the CLI grades the standard library: %v", got)
+	}
+	if got := gradedStdlib(&Options{ExcludeStdlibFromGrade: true}, v); got != nil {
+		t.Errorf("excluded: %v", got)
+	}
+}
+
+// Modules whose archived flag was never read, for a reason that is not a failed GitHub call, are named in one note on
+// the grade; a failed call and a read flag are not, and none of it makes the grade Pending.
+func TestGradeAll_ArchiveUncheckedNote(t *testing.T) {
+	maint := map[string]*scanner.MaintenanceInfo{
+		"gitlab.example/z/unsupported": {RepositoryURL: "https://gitlab.example/z/unsupported", ArchivedCheck: scanner.ArchivedUnsupported},
+		"vanity.example/nowhere":       {},
+		"github.com/gone/repo":         {RepositoryURL: "https://github.com/gone/repo", ArchivedCheck: scanner.ArchivedCheckFailed, RepositoryNotFound: true},
+		"github.com/ok/checked":        {RepositoryURL: "https://github.com/ok/checked", ArchivedCheck: scanner.ArchivedChecked},
+		"github.com/rate/limited":      {RepositoryURL: "https://github.com/rate/limited", ArchivedCheck: scanner.ArchivedCheckFailed},
+	}
+	for _, m := range maint {
+		m.LastRelease = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	got := archiveUnchecked(maint)
+	want := []string{"github.com/gone/repo", "gitlab.example/z/unsupported", "vanity.example/nowhere"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("archiveUnchecked = %v, want %v", got, want)
+	}
+
+	g := &resolver.Graph{Root: "example.com/app", Dependencies: map[string]*resolver.Dependency{}}
+	for p := range maint {
+		g.Dependencies[p] = &resolver.Dependency{Module: parser.Module{Path: p, Version: "v1.0.0"}, Direct: true}
+	}
+	res := gradeAll(context.Background(), &gradeRun{
+		Opts: Options{}, GoMod: &parser.GoMod{ModulePath: "example.com/app"}, Graph: g,
+		Maintenance: maint, VulnScanned: true, ScanStart: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+	var notes []string
+	for _, n := range res.Notes {
+		if strings.HasPrefix(n, "Archived status was not checked") {
+			notes = append(notes, n)
+		}
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "for 3 module(s)") || !strings.Contains(notes[0], "github.com/gone/repo, gitlab.example/z/unsupported, vanity.example/nowhere.") {
+		t.Errorf("notes = %q, want one note naming the three modules", notes)
+	}
+}
+
+// A go.mod that could not be read is unknown upkeep, not "not deprecated, not retracted", unless the module is
+// archived anyway.
+func TestUpkeepOf_ModCheckFailedIsMissing(t *testing.T) {
+	if !upkeepOf(&scanner.MaintenanceInfo{ModCheckFailed: true}).Missing {
+		t.Error("ModCheckFailed did not map to Missing")
+	}
+	if upkeepOf(&scanner.MaintenanceInfo{ModCheckFailed: true, Archived: true, ArchivedCheck: scanner.ArchivedChecked}).Missing {
+		t.Error("an archived module reads as Missing although its state is known")
+	}
+	if upkeepOf(&scanner.MaintenanceInfo{}).Missing {
+		t.Error("a clean module reads as Missing")
+	}
+}
+
+// Offline, the reason for a missing own status is that nothing was asked, not that the proxy did not answer.
+func TestSelfStatusFailureReason_Offline(t *testing.T) {
+	if got := selfStatusFailureReason("example.com/app"); !strings.Contains(got, "module proxy did not answer") {
+		t.Errorf("online reason = %q", got)
+	}
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	got := selfStatusFailureReason("example.com/app")
+	if got != "offline: no network requests were made" {
+		t.Errorf("offline reason = %q", got)
+	}
+}
+
+// End to end: an offline run with a module version says offline in the Pending reason, and makes no request.
+func TestGradeAll_OfflineSelfStatusReason(t *testing.T) {
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	res := gradeAll(context.Background(), &gradeRun{
+		Opts:        Options{SelfVersion: "v1.0.0"},
+		GoMod:       &parser.GoMod{ModulePath: "example.com/app"},
+		Graph:       &resolver.Graph{Root: "example.com/app", Dependencies: map[string]*resolver.Dependency{}},
+		VulnScanned: true, ScanStart: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if res.Pending == nil || !strings.Contains(res.Pending.Reason, "offline: no network requests were made") || strings.Contains(res.Pending.Reason, "proxy did not answer") {
+		t.Errorf("Pending = %+v, want the offline reason", res.Pending)
+	}
+}
+
+func TestKEVUnchecked(t *testing.T) {
+	vulns := map[string][]scanner.Vulnerability{"example.com/a": {
+		{ID: "GO-1", Aliases: []string{"CVE-2026-1"}, Reachability: "called"},                   // counts
+		{ID: "GO-2", Aliases: []string{"CVE-2026-2"}, Reachability: "called", KEVChecked: true}, // checked
+		{ID: "GO-3", Aliases: []string{"CVE-2026-3"}, Reachability: "required"},                 // graph-only: not reached
+		{ID: "GO-4", Aliases: []string{"GHSA-xxxx"}, Reachability: "called"},                    // no CVE: cannot be listed
+		{ID: "GO-5", Aliases: []string{"CVE-2026-5"}, Reachability: ""},                         // undetermined is scored as called
+	}}
+	if got := kevUnchecked(vulns, nil); got != 2 {
+		t.Errorf("got %d, want 2", got)
 	}
 }

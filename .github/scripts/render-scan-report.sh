@@ -3,9 +3,13 @@
 # Render a unisupply JSON report as markdown, for both the workflow job
 # summary and the weekly security issue body.
 #
-# One renderer for both consumers, on purpose: a headline number is not a
-# report, so both carry the same attribution, time bombs and per-dependency
-# risk factors, and neither can drift away from the other.
+# One renderer for both consumers, on purpose: a letter is not a report, so both
+# carry the same deciding row, time bombs and per-dependency grade rows, and
+# neither can drift away from the other.
+#
+# The grade is read from .grade (Grading v2): .grade.letter, .grade.pending,
+# .grade.deciding and .grade.rows[]. The 0-100 numbers in the rows are policy
+# values shown for traceability; they are not a risk score.
 #
 # Usage:
 #   render-scan-report.sh <unisupply.json> [stale-deps.txt] [stale-90.txt]
@@ -14,9 +18,8 @@
 #   GOVULNCHECK_RC  govulncheck exit code (3 = reachable vulnerability found)
 #   STALE           "true" when dependencies older than 90 days were found
 #   AUDIT_RESULT    result of the audit job, when the caller knows it
-#   MAX_DEPS        rows in the risky-dependency table (default 10)
+#   MAX_DEPS        rows in the grade-row table (default 10)
 #   MAX_VULNS       rows in the vulnerability table (default 15)
-#   MAX_TAKEOVERS   rows in the takeover-candidate list (default 20)
 #   MAX_WARNINGS    warnings listed before collapsing to a count (default 15)
 #
 # Writes markdown to stdout. Scan-derived strings (module paths, advisory
@@ -36,7 +39,6 @@ STALE_90="${3:-}"
 
 MAX_DEPS="${MAX_DEPS:-10}"
 MAX_VULNS="${MAX_VULNS:-15}"
-MAX_TAKEOVERS="${MAX_TAKEOVERS:-20}"
 MAX_WARNINGS="${MAX_WARNINGS:-15}"
 
 if [ -z "$JSON" ]; then
@@ -76,17 +78,36 @@ if ! jq -e . "$JSON" >/dev/null 2>&1; then
   exit 0
 fi
 
-# --- Risk --------------------------------------------------------------------
+# --- Grade -------------------------------------------------------------------
+#
+# GRADE_STATE: "graded" (a letter), "pending" (a check the grade needs did not
+# run: there is no letter, and it is not a pass) or "none" (no .grade at all:
+# grading was not run). A missing letter is never read as good.
 
-LEVEL=$(jq_field '.overall_risk_level // "UNKNOWN"')
-SCORE=$(jq_field '.overall_risk_score // "?"')
+GRADE_STATE=$(jq_field '
+  if .grade == null then "none"
+  elif .grade.pending != null or (.grade.letter // "") == "" then "pending"
+  else "graded" end
+')
+LETTER=$(jq_field '.grade.letter // ""')
+ESTIMATED=$(jq_field '.grade.estimated // false')
 
-case "$LEVEL" in
-  LOW)      LEVEL_BADGE="🟢 LOW" ;;
-  MEDIUM)   LEVEL_BADGE="🟡 MEDIUM" ;;
-  HIGH)     LEVEL_BADGE="🟠 HIGH" ;;
-  CRITICAL) LEVEL_BADGE="🔴 CRITICAL" ;;
-  *)        LEVEL_BADGE="⚪ $LEVEL" ;;
+case "$GRADE_STATE" in
+  graded)
+    LABEL="$LETTER"
+    if [ "$ESTIMATED" = "true" ]; then
+      LABEL="${LABEL}*"
+    fi
+    case "$LETTER" in
+      A|B) GRADE_BADGE="🟢 ${LABEL}" ;;
+      C)   GRADE_BADGE="🟡 ${LABEL}" ;;
+      D)   GRADE_BADGE="🟠 ${LABEL}" ;;
+      F)   GRADE_BADGE="🔴 ${LABEL}" ;;
+      *)   GRADE_BADGE="⚪ ${LABEL}" ;;
+    esac
+    ;;
+  pending) LABEL="PENDING"; GRADE_BADGE="⚪ PENDING (no letter)" ;;
+  *)       LABEL="NO GRADE"; GRADE_BADGE="⚪ no grade (grading was not run)" ;;
 esac
 
 case "${GOVULNCHECK_RC:-}" in
@@ -96,12 +117,11 @@ case "${GOVULNCHECK_RC:-}" in
   *)  GOVULN_BADGE="🟠 ${GOVULNCHECK_RC} — tool error" ;;
 esac
 
-echo "## Risk"
+echo "## Grade"
 echo
 echo "| Field | Value |"
 echo "|---|---|"
-echo "| Overall risk level | ${LEVEL_BADGE} |"
-echo "| Overall risk score | **${SCORE}** / 100 |"
+echo "| Supply-chain grade | **${GRADE_BADGE}** |"
 echo "| govulncheck exit code | ${GOVULN_BADGE} |"
 echo "| Stale dependencies (>90d) | ${STALE:-unknown} |"
 
@@ -119,35 +139,49 @@ if [ -n "$GOSUM" ]; then
   esac
   echo "| go.sum verification | ${GOSUM_BADGE} |"
 fi
-
-WORST_CVE=$(jq_field '.worst_cve_id // ""')
-if [ -n "$WORST_CVE" ]; then
-  WORST_SEV=$(jq_field '.worst_cve_severity // "UNKNOWN"')
-  # "scored": after reachability and test-only downgrades. The table below
-  # reports each advisory's source severity, which can be higher.
-  echo "| Worst CVE | \`${WORST_CVE}\` (scored ${WORST_SEV}) |"
-fi
 echo
 
-# "Why this risk level". A headline can be HIGH while every dependency scores
-# MEDIUM, because a floor rule fired; without the driver the number looks
-# arbitrary or wrong.
-UNSCORED=$(jq_field '.headline_unscored_reason // ""')
-DRIVER=$(jq_field '.headline.driver // ""')
-if [ -n "$UNSCORED" ]; then
-  echo "> **${LEVEL} (${SCORE})** — not scored: ${UNSCORED}"
-  echo
-elif [ -n "$DRIVER" ]; then
-  DRIVING_ITEM=$(jq_field '.headline.driving_item // ""')
-  DRIVER_REASON=$(jq_field '.headline.reason // ""')
-  LINE="> **${LEVEL} (${SCORE})** driven by \`${DRIVER}\`"
-  if [ -n "$DRIVING_ITEM" ]; then
-    LINE="${LINE}: \`${DRIVING_ITEM}\`"
+# What decided the letter, or why there is none. Without it the letter looks
+# arbitrary; with a Pending grade it says which check did not run.
+if [ "$GRADE_STATE" = "pending" ]; then
+  PENDING_CHECK=$(jq_field '.grade.pending.check // ""')
+  PENDING_REASON=$(jq_field '.grade.pending.reason // ""')
+  LINE="> **PENDING** — no letter"
+  if [ -n "$PENDING_CHECK" ]; then
+    LINE="${LINE}: check \`${PENDING_CHECK}\` did not run"
   fi
-  if [ -n "$DRIVER_REASON" ]; then
-    LINE="${LINE} — ${DRIVER_REASON}"
+  if [ -n "$PENDING_REASON" ]; then
+    LINE="${LINE} — ${PENDING_REASON}"
   fi
   echo "$LINE"
+  echo
+  if [ "$(jq_field '(.grade.pending.known // []) | length')" -gt 0 ]; then
+    echo "> What is known anyway:"
+    jq_field '(.grade.pending.known // [])[] | "> - \(.)"'
+    echo
+  fi
+elif [ "$GRADE_STATE" = "graded" ]; then
+  DECIDING=$(jq_field '
+    (.grade.deciding // null) as $d
+    | if $d == null then ""
+      elif ($d.tree_rule // "") != "" then "whole-tree rule \($d.tree_rule)"
+      elif $d.self == true then "this module"
+      else "\($d.module // "")" end
+  ')
+  DECIDING_REASON=$(jq_field '.grade.deciding.reason // ""')
+  if [ -n "$DECIDING" ]; then
+    LINE="> **${LABEL}** decided by \`${DECIDING}\`"
+    if [ -n "$DECIDING_REASON" ]; then
+      LINE="${LINE} — ${DECIDING_REASON}"
+    fi
+    echo "$LINE"
+    echo
+  fi
+fi
+
+CHECKSUM_DETAIL=$(jq_field 'if .grade.checksum_mismatch == true then (.grade.checksum_detail // "checksum mismatch") else "" end')
+if [ -n "$CHECKSUM_DETAIL" ]; then
+  echo "> 🔴 **Checksum mismatch** — ${CHECKSUM_DETAIL}"
   echo
 fi
 
@@ -193,9 +227,8 @@ if [ "$VULN_COUNT" -gt 0 ]; then
     echo "> 🔴 **${KEV_COUNT} CVE(s) are in the CISA KEV catalog — confirmed exploited in the wild.**"
     echo
   fi
-  echo "_Severity is the advisory's own; the score may downgrade it for"
-  echo "reachability or test-only use. Sorted by exploitation evidence: KEV"
-  echo "first, then EPSS._"
+  echo "_Severity is the advisory's own; the grade also weighs reachability and"
+  echo "test-only use. Sorted by exploitation evidence: KEV first, then EPSS._"
   echo
   echo "| ID | Severity | Module | Reachability | KEV | EPSS | Fix |"
   echo "|---|---|---|---|---|---|---|"
@@ -245,28 +278,34 @@ echo "## Summary"
 echo
 jq_field '
   (.summary // {}) as $s |
+  ((.grade.rows // []) | map(.letter // "" | if . == "" then "-" else . end) | reduce .[] as $l ({}; .[$l] += 1)) as $by |
   "| Metric | Count |\n|---|---|\n" +
-  "| Critical risk | \($s.critical_risk_count // "—") |\n" +
-  "| High risk | \($s.high_risk_count // "—") |\n" +
-  "| Medium risk | \($s.medium_risk_count // "—") |\n" +
-  "| Low risk | \($s.low_risk_count // "—") |\n" +
+  "| Rows graded F | \($by["F"] // 0) |\n" +
+  "| Rows graded D | \($by["D"] // 0) |\n" +
+  "| Rows graded C | \($by["C"] // 0) |\n" +
+  "| Rows graded B | \($by["B"] // 0) |\n" +
+  "| Rows graded A | \($by["A"] // 0) |\n" +
+  "| Rows with no letter (upkeep unread) | \($by["-"] // 0) |\n" +
   "| Total vulnerabilities | \($s.total_vulnerabilities // "—") |\n" +
   "| Unmaintained ≥1yr | \($s.unmaintained_1yr // "—") |\n" +
   "| Unmaintained ≥2yr | \($s.unmaintained_2yr // "—") |"
 '
 echo
 
-# --- Top risky dependencies --------------------------------------------------
+# --- Worst grade rows --------------------------------------------------------
+#
+# The score column is a policy value shown for traceability: it picks the
+# letter band and is not a measurement or a risk score.
 
-echo "## Top ${MAX_DEPS} risky dependencies"
+echo "## Worst ${MAX_DEPS} grade rows"
 echo
-echo "| Module | Version | Level | Score | Direct | Risk factors |"
+echo "| Module | Version | Grade | Score | Direct | Why |"
 echo "|---|---|---|---|---|---|"
 jq -r --argjson max "$MAX_DEPS" '
-  (.dependencies // [])
-  | sort_by(-.risk_score)
+  (.grade.rows // [])
+  | sort_by(-(.score // 0))
   | .[0:$max][]
-  | "| `\(.module)` | \(.version) | \(.risk_level) | \(.risk_score) | \(if .direct then "✅" else "—" end) | \((.risk_factors // []) | join(", ")) |"
+  | "| `\(.module)`\(if .self == true then " (this module)" else "" end) | \(.version // "—") | \(if (.letter // "") == "" then "-" else (.letter + (if .estimated == true then "*" else "" end)) end) | \(.score // 0) | \(if .direct == true then "✅" else "—" end) | \(.reason // "") |"
 ' "$JSON"
 echo
 
@@ -325,26 +364,6 @@ if [ "$CI_FINDINGS" -gt 0 ]; then
   echo
 fi
 
-# --- Takeover candidates -----------------------------------------------------
-
-TAKEOVER_COUNT=$(jq_field '(.takeover_candidates // []) | length')
-if [ "$TAKEOVER_COUNT" -gt 0 ]; then
-  echo "<details><summary><strong>Takeover candidates (${TAKEOVER_COUNT})</strong></summary>"
-  echo
-  jq -r --argjson max "$MAX_TAKEOVERS" '
-    (.takeover_candidates // [])
-    | .[0:$max][]
-    | "- `\(.owner)/\(.repo)` — \(.reason) (stars \(.stars), bus factor \(.bus_factor), \(.activity_pattern))"
-  ' "$JSON"
-  if [ "$TAKEOVER_COUNT" -gt "$MAX_TAKEOVERS" ]; then
-    echo
-    echo "_Showing ${MAX_TAKEOVERS} of ${TAKEOVER_COUNT}._"
-  fi
-  echo
-  echo "</details>"
-  echo
-fi
-
 # --- Warnings ----------------------------------------------------------------
 #
 # A degraded scan must not read like a clean one, so warnings are rendered
@@ -354,8 +373,8 @@ WARNING_COUNT=$(jq_field '(.warnings // []) | length')
 if [ "$WARNING_COUNT" -gt 0 ]; then
   echo "## ⚠️ Scan warnings (${WARNING_COUNT})"
   echo
-  echo "_Data the scan could not collect. Axes it could not measure are excluded"
-  echo "from scoring rather than counted as clean._"
+  echo "_Data the scan could not collect. What could not be measured is never"
+  echo "counted as clean: a check the grade needs that did not run makes it Pending._"
   echo
   jq -r --argjson max "$MAX_WARNINGS" '
     (.warnings // []) | .[0:$max][] | "- \(.)"

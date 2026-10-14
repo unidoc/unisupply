@@ -59,8 +59,9 @@ type FixDateOptions struct {
 	// Client overrides the HTTP client. Nil builds the default. Intended for tests.
 	Client *Client
 
-	// clockFn is the time source for DaysUnpatched. Defaults to time.Now.
-	clockFn func() time.Time
+	// Now is the time source for DaysUnpatched. Nil means time.Now; the
+	// runner passes the scan start so a pinned-time run is reproducible.
+	Now func() time.Time
 }
 
 // ResolveFixDates fills FixReleasedAt and FixDateSource on every vuln of
@@ -112,7 +113,7 @@ type fixLookup struct{ module, version string }
 // and version to look up; ok is false when the fixed version cannot be looked
 // up, which leaves the advisory date in place.
 func resolveFixDates(ctx context.Context, opts FixDateOptions, vulns []Vulnerability, target func(*Vulnerability) (mod, ver string, ok bool)) {
-	now := opts.clockFn
+	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}

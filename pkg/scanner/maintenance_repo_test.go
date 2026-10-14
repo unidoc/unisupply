@@ -269,3 +269,28 @@ func TestMaintainerScanner_RepositoryArchived_Errors(t *testing.T) {
 		t.Errorf("403: err = %v, want a failure that is not 'not found'", err)
 	}
 }
+
+func TestGopkgInRepository(t *testing.T) {
+	for in, want := range map[string]string{
+		"gopkg.in/yaml.v2":                 "https://github.com/go-yaml/yaml",
+		"gopkg.in/yaml.v3":                 "https://github.com/go-yaml/yaml",
+		"gopkg.in/check.v1":                "https://github.com/go-check/check",
+		"gopkg.in/natefinch/lumberjack.v2": "https://github.com/natefinch/lumberjack",
+		"gopkg.in/yaml":                    "", // no .vN
+		"gopkg.in/yaml.v":                  "",
+		"gopkg.in/yaml.vx":                 "",
+		"gopkg.in/a/b/c.v1":                "", // too deep
+		"github.com/go-yaml/yaml":          "",
+	} {
+		if got := gopkgInRepository(in); got != want {
+			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+	}
+	// without a proxy origin the repository comes from the convention and the archived flag is then checked
+	ms := NewMaintenanceScanner(time.Second)
+	info := &MaintenanceInfo{}
+	ms.resolveRepository("gopkg.in/yaml.v2", info, &proxyVersionInfo{})
+	if info.RepositoryURL != "https://github.com/go-yaml/yaml" || info.ArchivedCheck != "" {
+		t.Errorf("%+v", info)
+	}
+}

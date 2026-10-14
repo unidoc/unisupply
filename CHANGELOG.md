@@ -7,39 +7,6 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
-### Breaking Changes
-
-#### Grading v2: one letter, A to F, instead of a 0-100 score
-
-The published result is now a letter with the evidence behind it, decided by one rule you can trace (see
-[docs/grading.md](docs/grading.md)). **This changes the JSON, text, PDF and SBOM output and the policy file, and it
-breaks consumers that read the old fields.**
-
-- **New `grade` object in the JSON report, and in `pkg/runner.Result.Grade`.** The module itself and every dependency
-  get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst row, which
-  the result names with a one-sentence reason. Called vulnerabilities score 90/70/45/15 (critical/high/medium/low),
-  imported-only code at most 50, graph-only findings are shown and not graded, a called known-exploited finding is F,
-  test-only findings are halved, archived or deprecated modules count up to C only, and whole-tree rules raise the letter
-  (three called high or critical findings, any called critical, a checksum mismatch: F; five called or imported high or
-  critical findings: at least D). A finding with no published severity is scored as medium and the letter is marked `C*`.
-- **Pending.** When a check the grade needs did not run (vulnerability scan failed, scan did not finish, the module's
-  own status or advisories could not be read, a dependency's maintenance data is missing and could change the letter) the
-  grade has no letter and says which check and why. It is never an A.
-- **Response window.** A fix released within the last 14 days is labelled with the date its window ends; the label never
-  changes the letter. `fix_released_at` and `fix_date_source` come from the module proxy.
-- **Removed from every output:** `overall_risk_score`, `overall_risk_level`, `headline`, `headline_driver`,
-  `mean_dep_risk_score`, `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`,
-  `headline_unscored_reason`, the per-dependency `risk_score`, `risk_level`, `score_breakdown` and `risk_factors`,
-  `severity_scored`, the `*_risk_count` summary fields, `takeover_candidates` (and `pkg/runner.Result.Takeovers`), the
-  AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` / `unisupply:risk_level` (now
-  `unisupply:grade` and `unisupply:grade_reason`).
-- **CLI:** `--min-risk` and `--debug-scoring` are removed. New `--module-version` grades the scanned module itself at a
-  published version, and `--response-history` adds how fast the project adopted past fixes.
-- **Policy:** `max_risk_score` and `max_overall_score` are removed (a policy file that contains them is rejected). New
-  `max_grade` ("A" to "F") and `allow_pending`. A Pending grade fails `max_grade` unless `allow_pending` is set. The
-  presets are `strict` = B and `moderate` = C. `pkg/policy.EvalInput` gains `Grade`.
-- **Standard library findings** are graded as a row named `stdlib`.
-
 ### New Features
 
 #### Inputs of the grade
@@ -62,6 +29,26 @@ breaks consumers that read the old fields.**
   requests, and GitHub repository, owner and latest-commit answers are cached per scan.
 
 
+
+- **Audit fixes after review (same release):**
+  - `--module-version` must be a full version (`v1.4.0`, `v1.4.0-rc.1`, `v2.0.0+incompatible`), checked before any scan;
+    `--response-history` needs `--module-version`. A policy is now evaluated even for a module with no dependencies (it
+    used to be skipped with the report), and `--help` says the exit code ignores the grade unless a policy is given.
+  - The grade notes what it could not check instead of reading it as clean: a reached finding whose known-exploited status
+    could not be checked (CISA catalog), and modules whose archived flag was never read for a reason other than a failed
+    call. A row whose upkeep could not be read has no letter. A checksum mismatch is always reported
+    (`checksum_mismatch`), also when another row already scores F.
+  - A module confirmed not to be compiled in is graph-only whatever its reachability says; `C*` marks only a C that
+    rests on an estimate; a row's vulnerability score is capped at 100; the +5 further-advisory step is for reached findings
+    only; Pending is decided on the letter a missing check could change, not on the score.
+  - Request bounds: the fix-date stage shares one 60-second deadline, response history is bounded (fixes per dependency,
+    a request budget and a deadline), and the resilience budget is allocated in module order so a scan is repeatable.
+  - A Pending grade publishes no score and no deciding row (what is known is in `pending.known`); the same vulnerability under
+    two identifiers merges the same way whatever the order; the archived flag of `gopkg.in/*` modules is read through the
+    host's repository convention (the module proxy records no origin for most of them); `-f` and `--policy-preset` are
+    checked before the scan; the token is validated when `--module-version` is set even for a module with no dependencies;
+    `policy.Evaluate` no longer panics when only a grade is passed.
+  - The retired score wording is gone from the published warnings; `.github` workflows and scripts read the grade.
 
 #### NVD API key for severity lookups
 
@@ -137,6 +124,68 @@ breaks consumers that read the old fields.**
   `GithubTokenRejected` is set.
 
 ### Improvements
+
+#### Breaking: Grading v2, one letter A to F instead of a 0-100 score
+
+The published result is now a letter with the evidence behind it, decided by one rule you can trace (see
+[docs/grading.md](docs/grading.md)). **This changes the JSON, text, PDF and SBOM output and the policy file, and it
+breaks consumers that read the old fields.**
+
+- **New `grade` object in the JSON report, and in `pkg/runner.Result.Grade`.** The module itself and every dependency
+  get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst row, which
+  the result names with a one-sentence reason. Called vulnerabilities score 90/70/45/15 (critical/high/medium/low),
+  imported-only code at most 50, graph-only findings are shown and not graded, a called known-exploited finding is F,
+  test-only findings are halved, archived or deprecated modules count up to C only, and whole-tree rules raise the letter
+  (three called high or critical findings, any called critical, a checksum mismatch: F; five called or imported high or
+  critical findings: at least D). A finding with no published severity is scored as medium and the letter is marked `C*`.
+- **Pending.** When a check the grade needs did not run (vulnerability scan failed, scan did not finish, the module's
+  own status or advisories could not be read, a dependency's maintenance data is missing and could change the letter) the
+  grade has no letter and says which check and why. It is never an A.
+- **Response window.** A fix released within the last 14 days is labelled with the date its window ends; the label never
+  changes the letter. `fix_released_at` and `fix_date_source` come from the module proxy.
+- **Removed from every output:** `overall_risk_score`, `overall_risk_level`, `headline`, `headline_driver`,
+  `mean_dep_risk_score`, `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`,
+  `headline_unscored_reason`, the per-dependency `risk_score`, `risk_level`, `score_breakdown` and `risk_factors`,
+  `severity_scored`, the `*_risk_count` summary fields, `takeover_candidates` (and `pkg/runner.Result.Takeovers`), the
+  AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` / `unisupply:risk_level` (now
+  `unisupply:grade` and `unisupply:grade_reason`).
+- **CLI:** `--min-risk` and `--debug-scoring` are removed. New `--module-version` grades the scanned module itself at a
+  published version, and `--response-history` adds how fast the project adopted past fixes.
+- **Policy:** `max_risk_score` and `max_overall_score` are removed (a policy file that contains them is rejected). New
+  `max_grade` ("A" to "F") and `allow_pending`. A Pending grade fails `max_grade` unless `allow_pending` is set. The
+  presets are `strict` = B and `moderate` = C. `pkg/policy.EvalInput` gains `Grade`.
+- **Standard library findings** are graded as a row named `stdlib`.
+- **Go API breaks** (library callers of `pkg/report`, `pkg/policy`, `pkg/runner`, `pkg/grade`):
+  - `report.TextOptions`, `report.JSONOptions` and `report.PDFOptions` no longer have a `Takeovers` field.
+    `report.TextOptions.MinRisk` is removed too (no flag set it), and the text writer no longer prints the
+    `debug_scoring` block.
+  - `report.JSONReport` loses `OverallRisk`, `OverallLevel`, `MeanDepRiskScore`, `SeverityAdjustedVulnScore`,
+    `HeadlineDriver`, the headline and diagnostics objects, `takeover_candidates` and the per-dependency risk fields.
+    The types `report.Headline`, `JSONHeadline`, `JSONCandidate`, `JSONDiagnostics`, `JSONScoreBreakdown` and
+    `JSONTakeover` are removed. `JSONDependency` loses `RiskScore`, `RiskLevel`, `RiskFactors` and `ScoreBreakdown`,
+    `JSONSummary` loses the `*RiskCount` fields, and `JSONVuln` loses `SeverityScored`.
+  - `report.SBOMOptions` gains `Grade`. CycloneDX and SPDX carry `unisupply:grade` per component with the same label as
+    the text report (`C*` when estimated) and no property or annotation for a row with no letter, plus the overall grade
+    (a letter, or `PENDING (<check>)`) on the root component (CycloneDX `metadata.component`) and as an SPDX document
+    annotation.
+  - `policy.Policy.MaxRiskScore` and `MaxOverallScore` are removed. `MaxGrade` and `AllowPending` are new. An enabled
+    `max_grade` **fails** when `policy.EvalInput.Grade` is nil (grading did not run), and on a Pending grade unless
+    `AllowPending` is set. `Result.FormatText` now prints warnings on a PASS (`PASS (1 warning): ...`) and counts only
+    errors in the `FAIL: N policy violation(s)` line, listing warnings separately.
+  - The AI-generation scanner no longer runs and its result is not published (`pkg/scanner/aigen.go` is kept but not
+    called).
+  - `runner.Options.ExcludeStdlibFromGrade` is new: it leaves the standard library out of the grade while its
+    advisories are still listed.
+  - `grade.Result` gains `ChecksumMismatch` and `ChecksumDetail` (`checksum_mismatch`, `checksum_detail` in JSON), and
+    a `grade.RowResult` may have an empty `Letter`: its upkeep could not be read (the text and PDF reports show `-`).
+- **Published scan warnings** no longer carry the retired score language: lines about excluded axis weights, scores
+  that are "NOT comparable" and the high-EPSS "verify reachability manually" notice are dropped or shortened (for
+  example "vulnerability scan did not run"). Warnings about data that could not be fetched are kept.
+- **The 0-100 numbers kept in the grade rows** (`score`, `vulnerability_score`, `upkeep_score`, `grade.score`) are
+  policy values shown for traceability, not a measurement and not a risk score. The CI/CD audit keeps its own 0-100
+  score.
+- **The repository's own CI** now reads `.grade.letter`, `.grade.pending`, `.grade.deciding` and `.grade.rows[]`; the
+  weekly issue is filed on C, D, F or Pending. `.github/security-policy.json` sets `allow_pending`.
 
 #### Scores can change in this release
 

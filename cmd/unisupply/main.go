@@ -19,6 +19,7 @@ import (
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
 	"github.com/unidoc/unisupply/pkg/runner"
+	"github.com/unidoc/unisupply/pkg/scanner"
 
 	flag "github.com/spf13/pflag"
 )
@@ -181,12 +182,35 @@ type runConfig struct {
 }
 
 func run(cfg *runConfig) error {
+	// A malformed --module-version fails before anything is scanned: OSV would
+	// otherwise be asked about a version no release has.
+	if cfg.responseHistory && cfg.moduleVersion == "" {
+		return fmt.Errorf("--response-history needs --module-version: the history is of the published module's releases")
+	}
+	if cfg.moduleVersion != "" {
+		if err := scanner.CheckModuleVersion(cfg.moduleVersion); err != nil {
+			return fmt.Errorf("--module-version: %w", err)
+		}
+	}
+
 	// --require-github-token: fail fast (exit 3) when no token is present.
 	// This is the cheap, offline half of the precondition; whether a present
 	// token is accepted by GitHub is checked by runner.Run, after the
 	// dependency graph is resolved and before any scanner runs.
 	if cfg.requireGithubToken && cfg.githubToken == "" {
 		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
+	}
+
+	// Both are checked before the scan: a typo must not cost a whole scan, nor end in an empty output file.
+	switch cfg.format {
+	case "text", "json", "pdf", "sbom-cyclonedx", "sbom-spdx":
+	default:
+		return fmt.Errorf("unknown format: %s (supported: text, json, pdf, sbom-cyclonedx, sbom-spdx)", cfg.format)
+	}
+	switch cfg.policyPreset {
+	case "", "strict", "moderate":
+	default:
+		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
 	}
 
 	if cfg.policyFile != "" && cfg.policyPreset != "" {
@@ -270,19 +294,33 @@ func run(cfg *runConfig) error {
 		return err
 	}
 
-	if len(scanResult.Graph.Dependencies) == 0 && cfg.moduleVersion == "" {
-		fmt.Fprintln(os.Stderr, "No dependencies found.")
-		return nil
+	// A module with nothing to scan and no published version to grade has no report. A policy is still evaluated: a gate
+	// must not pass because there was nothing to look at.
+	noReport := len(scanResult.Graph.Dependencies) == 0 && cfg.moduleVersion == ""
+	if noReport {
+		fmt.Fprintln(os.Stderr, "No dependencies found. Pass --module-version to grade the module itself.")
 	}
 
+	if !noReport {
+		if err := writeReport(ctx, cfg, rep, scanResult); err != nil {
+			return err
+		}
+	}
+
+	if cfg.policyFile != "" || cfg.policyPreset != "" {
+		return evaluatePolicy(cfg, rep, scanResult)
+	}
+	return nil
+}
+
+// writeReport renders the scan result in the format asked for.
+func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, scanResult *runner.Result) (err error) {
 	gomod := scanResult.GoMod
 	graph := scanResult.Graph
 	projectScore := scanResult.ProjectScore
 	ciReport := scanResult.CIReport
 	gradeResult := scanResult.Grade
 	stdlibVulns := scanResult.StdlibVulns
-	maintainers := scanResult.Maintainers
-	typosquats := scanResult.Typosquats
 	integrityReport := scanResult.IntegrityReport
 
 	// Generate output.
@@ -361,7 +399,19 @@ func run(cfg *runConfig) error {
 		}
 	}
 
-	if cfg.policyFile != "" || cfg.policyPreset != "" {
+	return nil
+}
+
+// evaluatePolicy checks the grade and the scan result against the policy; a violation is errPolicyViolation.
+func evaluatePolicy(cfg *runConfig, rep progress.Reporter, scanResult *runner.Result) error {
+	projectScore := scanResult.ProjectScore
+	gradeResult := scanResult.Grade
+	maintainers := scanResult.Maintainers
+	typosquats := scanResult.Typosquats
+	ciReport := scanResult.CIReport
+	integrityReport := scanResult.IntegrityReport
+	var err error
+	{
 		rep.Stage("Evaluating policy")
 		var pol *policy.Policy
 
@@ -416,7 +466,7 @@ func printUsage() {
 	fmt.Println("  unisupply                                    # Analyze current directory")
 	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
 	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
-	fmt.Println("  unisupply -f pdf                             # Generate PDF risk report")
+	fmt.Println("  unisupply -f pdf                             # Generate PDF report")
 	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
 	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
 	fmt.Println("  unisupply --module-version v1.4.0            # Also grade the module itself at a published version")
@@ -432,9 +482,9 @@ func printUsage() {
 	fmt.Println("  unisupply --offline --network-log 2>net.log  # Prove the scan made no requests")
 	fmt.Println()
 	fmt.Println("Exit codes:")
-	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")
+	fmt.Println("  0  Success. Without --policy or --policy-preset the exit code ignores the grade: a grade of F or Pending still exits 0")
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
-	fmt.Println("  2  Policy violation — one or more policy rules failed")
+	fmt.Println("  2  Policy violation — one or more policy rules failed (max_grade: a grade worse than the limit, or Pending unless allow_pending)")
 	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
 	fmt.Println()
 	fmt.Println("Flags:")

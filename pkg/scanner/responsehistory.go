@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/modfile"
@@ -35,7 +37,19 @@ const (
 
 	responseHistoryOSVMaxBytes = 4 * 1024 * 1024
 	responseHistoryListBytes   = 1024 * 1024
+
+	// defaultResponseHistoryDeadline bounds one whole call when the options leave Deadline zero, and
+	// defaultResponseHistoryRequests is the most requests one call makes when MaxRequests is zero.
+	defaultResponseHistoryDeadline = 2 * time.Minute
+	defaultResponseHistoryRequests = 2000
+
+	// responseHistoryMaxFixes is how many of a dependency's fixes, the newest ones, are examined. A
+	// dependency with hundreds of advisories would otherwise cost hundreds of release-time requests.
+	responseHistoryMaxFixes = 20
 )
+
+// errResponseHistoryBudget is the failure of a lookup the request budget did not allow.
+var errResponseHistoryBudget = errors.New("response history: request budget spent")
 
 // ResponseHistoryOptions controls ScanResponseHistory. Zero values take the defaults noted per field.
 type ResponseHistoryOptions struct {
@@ -48,6 +62,14 @@ type ResponseHistoryOptions struct {
 
 	// Timeout bounds each request. Zero falls back to the client default of 10s.
 	Timeout time.Duration
+
+	// Deadline bounds the whole call, all requests together; work still pending at the deadline is
+	// skipped, so the result covers what was read in time. Default 2 minutes.
+	Deadline time.Duration
+
+	// MaxRequests is the most requests the call makes (proxy and OSV together). Once it is spent every
+	// further lookup counts as failed and is skipped. Default 2000.
+	MaxRequests int
 
 	// MaxVersions is how many of the module's most recent release versions are read. Default 40.
 	MaxVersions int
@@ -72,6 +94,14 @@ type responseHistoryFetcher struct {
 	sem      chan struct{}
 	mu       sync.Mutex
 	cache    map[string]*responseHistoryEntry
+
+	// budget is the number of requests the call may still make.
+	budget atomic.Int64
+}
+
+// spend takes one request from the budget and reports whether there was one.
+func (f *responseHistoryFetcher) spend() bool {
+	return f.budget.Add(-1) >= 0
 }
 
 // responseHistoryEntry is a cache slot filled exactly once, so concurrent callers of the same key share one request.
@@ -101,6 +131,9 @@ func (f *responseHistoryFetcher) do(key string, fn func() (any, error)) (any, er
 
 // get fetches one proxy URL and returns the body of a 200 answer.
 func (f *responseHistoryFetcher) get(ctx context.Context, u, base, purpose string, maxBytes int64) ([]byte, error) {
+	if !f.spend() {
+		return nil, errResponseHistoryBudget
+	}
 	body, resp, err := f.client.Get(ctx, u, GetOptions{
 		Host:     proxyHost(base),
 		MaxBytes: maxBytes,
@@ -219,6 +252,9 @@ func (f *responseHistoryFetcher) fixedVersions(ctx context.Context, dep string) 
 		fixed := map[string]bool{}
 		token := ""
 		for page := 0; page < responseHistoryOSVPages; page++ {
+			if !f.spend() {
+				return nil, errResponseHistoryBudget
+			}
 			reqBody, err := json.Marshal(osvQuery{Package: osvQueryPackage{Name: dep, Ecosystem: "Go"}, PageToken: token})
 			if err != nil {
 				return nil, err
@@ -313,8 +349,9 @@ func firstFixedVersion(v osvQueryVuln, dep string) string {
 //
 // The call fails only when offline mode is on (no request is made) or the module's own version list cannot be read.
 // Any other failed lookup (one go.mod, one release time, one dependency's advisories) skips that item. Nothing is
-// cached on disk; one cache lives for the call. Requests are bounded by MaxVersions and MaxDependencies and stop with
-// ctx.
+// cached on disk; one cache lives for the call. Requests are bounded by MaxVersions, MaxDependencies, the newest
+// responseHistoryMaxFixes fixes of each dependency, a request budget (MaxRequests) and one overall Deadline, and stop
+// with ctx. A call with no dependencies makes no request.
 func ScanResponseHistory(ctx context.Context, opts ResponseHistoryOptions, module string, dependencies []string) (map[string]*ResponseHistory, error) {
 	if offline.Enabled() {
 		return nil, offline.ErrOffline
@@ -331,28 +368,14 @@ func ScanResponseHistory(ctx context.Context, opts ResponseHistoryOptions, modul
 	if opts.MaxDependencies <= 0 {
 		opts.MaxDependencies = defaultResponseHistoryDeps
 	}
+	if opts.Deadline <= 0 {
+		opts.Deadline = defaultResponseHistoryDeadline
+	}
+	if opts.MaxRequests <= 0 {
+		opts.MaxRequests = defaultResponseHistoryRequests
+	}
 	if _, err := url.Parse(opts.ProxyURL); err != nil {
 		return nil, fmt.Errorf("response history: proxy URL: %w", err)
-	}
-
-	f := &responseHistoryFetcher{
-		client:   NewClient(ClientOptions{Timeout: opts.Timeout}),
-		proxyURL: strings.TrimRight(opts.ProxyURL, "/"),
-		osvURL:   strings.TrimRight(opts.OSVURL, "/"),
-		sem:      make(chan struct{}, responseHistoryConcurrency),
-		cache:    make(map[string]*responseHistoryEntry),
-	}
-
-	versions, err := f.versionList(ctx, module)
-	if err != nil {
-		return nil, fmt.Errorf("response history: version list of %s: %w", module, err)
-	}
-	if len(versions) > opts.MaxVersions {
-		versions = versions[len(versions)-opts.MaxVersions:]
-	}
-	releases := f.loadReleases(ctx, module, versions)
-	if len(releases) == 0 {
-		return map[string]*ResponseHistory{}, nil
 	}
 
 	// Dependencies in the order given, without repeats, the module itself or blanks, capped.
@@ -366,6 +389,34 @@ func ScanResponseHistory(ctx context.Context, opts ResponseHistoryOptions, modul
 		if len(deps) < opts.MaxDependencies {
 			deps = append(deps, d)
 		}
+	}
+	if len(deps) == 0 {
+		// Nothing to measure: not even the module's own version list is worth a request.
+		return map[string]*ResponseHistory{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, opts.Deadline)
+	defer cancel()
+
+	f := &responseHistoryFetcher{
+		client:   NewClient(ClientOptions{Timeout: opts.Timeout}),
+		proxyURL: strings.TrimRight(opts.ProxyURL, "/"),
+		osvURL:   strings.TrimRight(opts.OSVURL, "/"),
+		sem:      make(chan struct{}, responseHistoryConcurrency),
+		cache:    make(map[string]*responseHistoryEntry),
+	}
+	f.budget.Store(int64(opts.MaxRequests))
+
+	versions, err := f.versionList(ctx, module)
+	if err != nil {
+		return nil, fmt.Errorf("response history: version list of %s: %w", module, err)
+	}
+	if len(versions) > opts.MaxVersions {
+		versions = versions[len(versions)-opts.MaxVersions:]
+	}
+	releases := f.loadReleases(ctx, module, versions)
+	if len(releases) == 0 {
+		return map[string]*ResponseHistory{}, nil
 	}
 
 	results := make([]*ResponseHistory, len(deps))
@@ -437,27 +488,34 @@ func (f *responseHistoryFetcher) history(ctx context.Context, dep string, releas
 		return nil
 	}
 
+	// Only the newest fixes are examined (fixes ascend).
+	if len(fixes) > responseHistoryMaxFixes {
+		fixes = fixes[len(fixes)-responseHistoryMaxFixes:]
+	}
+
 	oldest := releases[0].time
 	var days []int
 	var from, to time.Time
 	for _, fv := range fixes {
+		// The release that adopted the fix, found without a request: a fix no sampled release adopted is
+		// not a sample, so its release time is not fetched.
+		var adopter *responseHistoryRelease
+		for i := range releases {
+			if rv, ok := releases[i].requires[dep]; ok && semver.Compare(rv, fv) >= 0 {
+				adopter = &releases[i]
+				break
+			}
+		}
+		if adopter == nil {
+			continue
+		}
 		tf, err := f.releaseTime(ctx, dep, fv)
 		if err != nil || !tf.After(oldest) {
 			continue
 		}
-		adopted := false
 		var d int
-		for _, r := range releases {
-			if rv, ok := r.requires[dep]; ok && semver.Compare(rv, fv) >= 0 {
-				if r.time.After(tf) {
-					d = int(r.time.Sub(tf) / (24 * time.Hour))
-				}
-				adopted = true
-				break
-			}
-		}
-		if !adopted {
-			continue
+		if adopter.time.After(tf) {
+			d = int(adopter.time.Sub(tf) / (24 * time.Hour))
 		}
 		days = append(days, d)
 		if from.IsZero() || tf.Before(from) {

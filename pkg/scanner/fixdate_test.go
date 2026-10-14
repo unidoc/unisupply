@@ -74,7 +74,7 @@ func newProxyFixture(t *testing.T, times map[string]string) *proxyFixture {
 }
 
 func (f *proxyFixture) opts() FixDateOptions {
-	return FixDateOptions{ProxyURL: f.srv.URL, clockFn: fixedClock}
+	return FixDateOptions{ProxyURL: f.srv.URL, Now: fixedClock}
 }
 
 // Module path with an upper-case letter: the proxy wants it escaped.

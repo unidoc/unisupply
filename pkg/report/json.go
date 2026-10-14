@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
@@ -396,7 +397,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			TotalDeps:  directCount + transitiveCount,
 		},
 		Grade:     opts.Grade,
-		Warnings:  ps.Warnings,
+		Warnings:  publishedWarnings(ps.Warnings),
 		Notes:     ps.Notes,
 		TimeBombs: collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
@@ -635,6 +636,53 @@ func collectJSONTimeBombs(ps *scorer.ProjectScore) []JSONTimeBomb {
 			Detail:       tb.Detail,
 			Reachability: tb.Reachability,
 		}
+	}
+	return out
+}
+
+// retiredWarningMarkers are phrases the scorer's warnings use for the retired 0-100 risk model (axis weights, score
+// comparability). The grade has no such axes, so a warning that carries one of these is not published as written.
+var retiredWarningMarkers = []string{"weight excluded", "weight is excluded", "NOT comparable"}
+
+// publishedWarnings returns the scorer's warnings as the report publishes them (text SCAN LIMITATIONS and JSON
+// "warnings"). The scorer still writes its own warnings in its retired-model language, and its own tests rely on that,
+// so the filter lives here. The rule, decided by text:
+//
+//   - A warning about data that could not be fetched is kept. If it goes on to explain what the retired model did about
+//     it ("; ... weight excluded from those scores", "... NOT comparable to a scan that checked for CVEs"), that
+//     trailing clause is cut and the data statement stays, e.g. "vulnerability scan did not run".
+//   - "maintainer data unavailable" is dropped: only the retired maintainer weight read maintainer (GitHub) data, the
+//     grade does not, so a missing GitHub token or a rate limit no longer limits the letter.
+//   - The high-EPSS "verify reachability manually" warning is dropped: EPSS is not an input of the grade. (The KEV one
+//     stays: a KEV finding counts in the grade at once.)
+//
+// The result is de-duplicated and nil when nothing is left.
+func publishedWarnings(warnings []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range warnings {
+		if strings.Contains(w, "maintainer data unavailable") || strings.HasPrefix(w, "high-EPSS CVE") {
+			continue
+		}
+		cut := -1
+		for _, m := range retiredWarningMarkers {
+			if i := strings.Index(w, m); i >= 0 && (cut < 0 || i < cut) {
+				cut = i
+			}
+		}
+		if cut >= 0 {
+			head := w[:cut]
+			i := strings.LastIndex(head, "; ")
+			if i < 0 {
+				continue // nothing but retired-model language
+			}
+			w = strings.TrimSpace(head[:i])
+		}
+		if w == "" || seen[w] {
+			continue
+		}
+		seen[w] = true
+		out = append(out, w)
 	}
 	return out
 }

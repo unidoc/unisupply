@@ -1,0 +1,89 @@
+{
+  "tool": "unisupply",
+  "version": "0.7.0-dev",
+  "generated_at": "2026-10-14T20:21:37Z",
+  "project": {
+    "module": "example.com/sample",
+    "go_version": "1.22",
+    "direct_dependencies": 1,
+    "transitive_dependencies": 0,
+    "total_dependencies": 1
+  },
+  "grade": {
+    "rule_version": 2,
+    "score": 0,
+    "rows": [
+      {
+        "module": "example.com/sample",
+        "version": "v1.0.0",
+        "self": true,
+        "score": 0,
+        "vulnerability_score": 0,
+        "upkeep_score": 0,
+        "letter": "",
+        "reason": "upkeep could not be read",
+        "upkeep_state": "unknown",
+        "upkeep_missing": true
+      },
+      {
+        "module": "gopkg.in/ini.v1",
+        "version": "v1.67.0",
+        "direct": true,
+        "score": 0,
+        "vulnerability_score": 0,
+        "upkeep_score": 0,
+        "letter": "",
+        "reason": "upkeep could not be read",
+        "upkeep_state": "unknown",
+        "upkeep_missing": true
+      }
+    ],
+    "pending": {
+      "check": "vulnerability_scan",
+      "reason": "the vulnerability scan did not run: offline — vulnerability scan skipped (no local vuln DB mirror configured)"
+    }
+  },
+  "warnings": [
+    "offline — maintenance data unavailable for 1 module(s)",
+    "offline — resilience data unavailable for 1 module(s); release-cadence and governance signals not measured",
+    "vulnerability scan did not run",
+    "Could not run 'go mod graph': go mod graph: exit status 1. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).",
+    "Could not parse go.sum: reading go.sum: open go.sum: no such file or directory",
+    "offline — go list could not resolve from the local module cache; test-only classification unavailable (IsTestOnly and InBuild will be nil for all deps)",
+    "offline — vulnerability scan skipped (no local vuln DB mirror configured)"
+  ],
+  "summary": {
+    "total_vulnerabilities": 0,
+    "unmaintained_2yr": 0,
+    "unmaintained_1yr": 0
+  },
+  "dependencies": [
+    {
+      "module": "gopkg.in/ini.v1",
+      "version": "v1.67.0",
+      "direct": true,
+      "dependency_path": [
+        "example.com/sample"
+      ]
+    }
+  ],
+  "ci_findings": null,
+  "build_file_findings": null,
+  "module_directives": {
+    "replace_count": 0,
+    "exclude_count": 0,
+    "redirect_count": 0,
+    "pseudo_version_count": 0,
+    "gosum_verified": "offline",
+    "findings": [
+      {
+        "category": "gosum_missing",
+        "severity": "HIGH",
+        "module": "example.com/sample",
+        "detail": "go.mod declares requirements but no go.sum is present — dependency checksums are not pinned",
+        "remediation": "Run `go mod tidy` and commit go.sum so every dependency download is verified against a pinned checksum."
+      }
+    ]
+  },
+  "time_bombs": []
+}

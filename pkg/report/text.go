@@ -32,14 +32,10 @@ const (
 type TextOptions struct {
 	NoColor         bool
 	Verbose         bool
-	MinRisk         int
 	Writer          io.Writer
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
-	// Takeovers is ignored: the takeover-candidate list is no longer published.
-	//
-	// Deprecated: kept only so existing callers compile.
-	StdlibVulns []scanner.Vulnerability
+	StdlibVulns     []scanner.Vulnerability
 
 	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
 	Grade *grade.Result
@@ -68,7 +64,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	writeGradeText(w, c, opts.Grade)
+	writeGradeText(w, c, opts.Grade, opts.Verbose)
 
 	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
 	// undeniable visibility, even when the headline already reflects them.
@@ -83,11 +79,6 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "\n")
 	}
 
-	// Debug scoring block (--debug-scoring). NON-NORMATIVE.
-	if ps.DebugScoring != nil {
-		writeDebugScoring(w, c, ps.DebugScoring)
-	}
-
 	// Dependency listing, worst row first. The letter is the grade row's; the old 0-100 score is not shown.
 	rows := gradeRowIndex(opts.Grade)
 	sorted := make([]*scorer.DependencyScore, len(ps.Dependencies))
@@ -99,13 +90,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		}
 		return sorted[i].RiskScore > sorted[j].RiskScore
 	})
-	var listed []*scorer.DependencyScore
-	for _, ds := range sorted {
-		if ds.RiskScore < opts.MinRisk {
-			continue
-		}
-		listed = append(listed, ds)
-	}
+	listed := sorted
 	if len(listed) > 0 {
 		fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("DEPENDENCIES (%d)", len(listed))))
 		fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
@@ -178,10 +163,10 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	// limited, vuln DB unreachable — renders identically to a complete one,
 	// and "Vulnerabilities found: 0" reads as a clean bill of health rather
 	// than as a scan that never looked. Warnings reached JSON only until now.
-	if len(ps.Warnings) > 0 {
+	if warnings := publishedWarnings(ps.Warnings); len(warnings) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "SCAN LIMITATIONS — the results above are incomplete\n")
-		for _, warning := range ps.Warnings {
+		for _, warning := range warnings {
 			fmt.Fprintf(w, "  ! %s\n", warning)
 		}
 	}
@@ -552,49 +537,6 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 		}
 	}
 	return count
-}
-
-// writeDebugScoring emits the --debug-scoring diagnostic block in text form. It lists the advisories as the scanners
-// saw them; the old 0-100 scores are not printed. NON-NORMATIVE: layout may change between releases; do not parse it.
-func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.DebugScoring) {
-	fmt.Fprintf(w, "%s\n", c(colorDim, "── debug_scoring (non-normative) ─────────────────"))
-	fmt.Fprintf(w, "  step_function_inputs: CRITICAL=%d HIGH=%d MEDIUM=%d LOW=%d\n",
-		d.StepFunctionInputs.Critical, d.StepFunctionInputs.High,
-		d.StepFunctionInputs.Medium, d.StepFunctionInputs.Low)
-
-	if len(d.EnrichedCVEs) > 0 {
-		fmt.Fprintf(w, "  enriched_cves (%d):\n", len(d.EnrichedCVEs))
-		for _, cve := range d.EnrichedCVEs {
-			testOnly := "?"
-			if cve.TestOnly != nil {
-				if *cve.TestOnly {
-					testOnly = "test_only"
-				} else {
-					testOnly = "production"
-				}
-			}
-			downgrade := ""
-			if cve.DowngradedTier != "" {
-				downgrade = fmt.Sprintf(" → %s", cve.DowngradedTier)
-			}
-			enrich := ""
-			if cve.EnrichmentFailed {
-				enrich = " [enrichment_failed]"
-			} else if cve.SeverityUnscored {
-				enrich = " [severity_unpublished]"
-			}
-			reachInfo := ""
-			if cve.Reachability != "" {
-				reachInfo = fmt.Sprintf(" reach=%s", cve.Reachability)
-			}
-			if cve.ReachabilityDowngrade != "" {
-				reachInfo += fmt.Sprintf(" (%s)", cve.ReachabilityDowngrade)
-			}
-			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s%s\n",
-				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich, reachInfo)
-		}
-	}
-	fmt.Fprintf(w, "%s\n\n", c(colorDim, "──────────────────────────────────────────────────"))
 }
 
 // reachabilityTag returns the bracket tag to append after a CVE ID for

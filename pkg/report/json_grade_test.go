@@ -372,12 +372,12 @@ func TestSBOM_GradeProperties(t *testing.T) {
 		if props["unisupply:grade"] != "B" || props["unisupply:grade_reason"] != "quiet for 14 months" {
 			t.Errorf("properties = %v", props)
 		}
-		if bom.Metadata.Component != nil {
-			for _, p := range bom.Metadata.Component.Properties {
-				if strings.HasPrefix(p.Name, "unisupply:grade") {
-					t.Errorf("root component carries %s", p.Name)
-				}
-			}
+		rootProps := map[string]string{}
+		for _, p := range bom.Metadata.Component.Properties {
+			rootProps[p.Name] = p.Value
+		}
+		if rootProps["unisupply:grade"] != "B" || rootProps["unisupply:grade_reason"] != "" {
+			t.Errorf("root properties = %v, want only the overall letter B", rootProps)
 		}
 		if bytes.Contains(buf.Bytes(), []byte("risk_score")) || bytes.Contains(buf.Bytes(), []byte("risk_level")) || bytes.Contains(buf.Bytes(), []byte("SELF-REASON")) {
 			t.Errorf("unexpected content:\n%s", buf.String())
@@ -406,6 +406,9 @@ func TestSBOM_GradeProperties(t *testing.T) {
 		if len(doc.Packages[0].Annotations) != 0 {
 			t.Errorf("root package has annotations: %+v", doc.Packages[0].Annotations)
 		}
+		if len(doc.Annotations) != 1 || doc.Annotations[0].Comment != "grade=B" {
+			t.Errorf("document annotations = %+v, want grade=B", doc.Annotations)
+		}
 		anns := doc.Packages[1].Annotations
 		if len(anns) != 1 || anns[0].Comment != "grade=B reason=quiet for 14 months" {
 			t.Errorf("annotations = %+v", anns)
@@ -433,4 +436,78 @@ func TestSBOM_GradeProperties(t *testing.T) {
 			t.Errorf("unexpected content:\n%s", buf.String())
 		}
 	})
+}
+
+// TestSBOM_PendingAndEstimatedGrades checks a row with no letter gets no grade property or annotation, an estimated
+// letter keeps its "*", and the overall grade (a letter or PENDING with the check) is on the root.
+func TestSBOM_PendingAndEstimatedGrades(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/x/y", Version: "v1.0.0", Direct: true},
+		testutil.DepSpec{Path: "github.com/x/z", Version: "v1.0.0", Direct: true},
+	)
+	ps := gradeTestScore(plainDep())
+	g := &grade.Result{
+		RuleVersion: grade.RuleVersion,
+		Pending:     &grade.Pending{Check: "dependency_maintenance", Reason: "upkeep could not be read"},
+		Rows: []grade.RowResult{
+			{Module: "github.com/x/y", Letter: "", Reason: "upkeep unknown"},
+			{Module: "github.com/x/z", Letter: grade.LetterC, Estimated: true, Reason: "estimated"},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteCycloneDX(graph, ps, SBOMOptions{Grade: g}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var bom cdxBOM
+	if err := json.Unmarshal(buf.Bytes(), &bom); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range bom.Components {
+		props := map[string]string{}
+		for _, p := range c.Properties {
+			props[p.Name] = p.Value
+		}
+		switch c.Name {
+		case "github.com/x/y":
+			if len(props) != 0 {
+				t.Errorf("unread row has properties %v", props)
+			}
+		case "github.com/x/z":
+			if props["unisupply:grade"] != "C*" {
+				t.Errorf("estimated row grade = %q, want C*", props["unisupply:grade"])
+			}
+		}
+	}
+	rootProps := map[string]string{}
+	for _, p := range bom.Metadata.Component.Properties {
+		rootProps[p.Name] = p.Value
+	}
+	if rootProps["unisupply:grade"] != "PENDING (dependency_maintenance)" {
+		t.Errorf("root grade = %q", rootProps["unisupply:grade"])
+	}
+
+	buf.Reset()
+	if err := WriteSPDX(graph, ps, SBOMOptions{Grade: g}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var doc spdxDocument
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range doc.Packages {
+		switch p.Name {
+		case "github.com/x/y":
+			if len(p.Annotations) != 0 {
+				t.Errorf("unread row has annotations %+v", p.Annotations)
+			}
+		case "github.com/x/z":
+			if len(p.Annotations) != 1 || !strings.HasPrefix(p.Annotations[0].Comment, "grade=C* ") {
+				t.Errorf("estimated row annotations = %+v", p.Annotations)
+			}
+		}
+	}
+	if len(doc.Annotations) != 1 || doc.Annotations[0].Comment != "grade=PENDING (dependency_maintenance)" {
+		t.Errorf("document annotations = %+v", doc.Annotations)
+	}
 }

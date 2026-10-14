@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +33,9 @@ type gradeInputs struct {
 	Checks  grade.Checks
 	History map[string]*scanner.ResponseHistory
 	Now     time.Time
+
+	// StdlibVersion is the Go release the standard library row was graded at.
+	StdlibVersion string
 }
 
 // buildGradeInput maps the scanner outputs onto the rows of the grade.
@@ -61,8 +66,11 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 	if len(in.Stdlib) > 0 {
 		out.Deps = append(out.Deps, grade.Row{
 			Module:   stdlibModule,
+			Version:  in.StdlibVersion,
 			Direct:   true,
 			Findings: findingsOf(stdlibModule, in.Stdlib),
+			// the standard library has no upkeep of its own to read
+			Upkeep: grade.Upkeep{NotAssessed: true},
 		})
 	}
 	return out
@@ -113,8 +121,30 @@ func upkeepOf(m *scanner.MaintenanceInfo) grade.Upkeep {
 		LastActivity: m.LastActivity,
 		// An archived flag we could not check is not "not archived": the state is unknown.
 		// A repository that does not exist cannot be asked again, so it is not held against the grade as Pending.
-		Missing: m.ArchivedCheck == scanner.ArchivedCheckFailed && !m.Archived && !m.RepositoryNotFound,
+		Missing: !m.Archived && (m.ModCheckFailed || (m.ArchivedCheck == scanner.ArchivedCheckFailed && !m.RepositoryNotFound)),
 	}
+}
+
+// archiveUnchecked lists, sorted, the modules whose archived flag was never read for a reason other than a failed
+// GitHub call: no repository is known for them, it is on a host GitHub's API cannot answer for ("unsupported"), or
+// GitHub says it does not exist. A failed call is not listed: it is Missing in upkeepOf and makes the grade Pending
+// instead. A module whose lookup was not attempted although a GitHub repository is known (offline, no lookup) is not
+// listed either: that is a degraded scan, which the scan's own warnings already say.
+func archiveUnchecked(maintenance map[string]*scanner.MaintenanceInfo) []string {
+	var out []string
+	for path, m := range maintenance {
+		if m == nil || m.Archived {
+			continue
+		}
+		switch {
+		case m.RepositoryNotFound,
+			m.ArchivedCheck == scanner.ArchivedUnsupported,
+			m.ArchivedCheck == "" && m.RepositoryURL == "":
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // moduleDependencies lists the dependency module paths worth a response-history lookup: the direct ones, sorted.
@@ -141,6 +171,9 @@ type gradeRun struct {
 	Token     string
 	Timeout   time.Duration
 	ScanStart time.Time
+	// ProjectDir is the scanned module's directory: the Go toolchain version the standard library was graded at is
+	// asked of the go command there.
+	ProjectDir string
 
 	Vulns       map[string][]scanner.Vulnerability
 	Stdlib      []scanner.Vulnerability
@@ -173,6 +206,8 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 			VulnScanFailed: !r.VulnScanned,
 			VulnScanReason: r.VulnScanReason,
 			ScanTimedOut:   r.Interrupted,
+
+			ArchiveUnchecked: archiveUnchecked(r.Maintenance),
 		},
 	}
 	if r.Integrity != nil {
@@ -180,6 +215,15 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 		if in.GoSumBad {
 			in.GoSumInfo = "go mod verify reported a checksum mismatch"
 		}
+	}
+	in.Checks.KEVUnchecked = kevUnchecked(r.Vulns, r.Stdlib)
+	// `go mod verify` that could not complete leaves a checksum mismatch (an F) unruled-out; a module with no
+	// dependencies has no go.sum to verify.
+	in.Checks.ChecksumUnverified = r.Integrity != nil && r.Integrity.GoSumVerified == scanner.GoSumVerifiedSkipped &&
+		r.Graph != nil && len(r.Graph.Dependencies) > 0
+	if len(r.Stdlib) > 0 {
+		in.StdlibVersion = scanToolchainVersion(ctx, r.ProjectDir)
+		in.Checks.StdlibVersion = in.StdlibVersion
 	}
 	in.Self = assessSelf(ctx, r, &in.Checks)
 
@@ -198,6 +242,7 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	row := grade.Row{Module: r.GoMod.ModulePath, Version: r.Opts.SelfVersion, Self: true}
 	if r.Opts.SelfVersion == "" {
 		checks.SelfAdvisoriesSkipped = true
+		row.Upkeep.NotAssessed = true // nobody looked at the module's own status: say so, not "finished"
 		return row
 	}
 
@@ -211,7 +256,7 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	info := maint[r.GoMod.ModulePath]
 	if err != nil || info == nil {
 		checks.SelfStatusFailed = true
-		checks.SelfStatusReason = "the module proxy did not answer for " + r.GoMod.ModulePath
+		checks.SelfStatusReason = selfStatusFailureReason(r.GoMod.ModulePath)
 		row.Upkeep.Missing = true
 	} else {
 		mr := scanner.NewMaintainerScanner(r.Timeout, r.Token)
@@ -232,8 +277,12 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	// The module's own advisories: govulncheck does not check the module it starts from, so OSV is asked for exactly
 	// this version, and the grade assumes they are called.
 	var warn []string
+	var now func() time.Time // nil: wall clock, for a caller that sets no scan start
+	if !r.ScanStart.IsZero() {
+		now = func() time.Time { return r.ScanStart }
+	}
 	own, err := scanner.ScanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{
-		GitHubToken: r.Token, NVDAPIKey: r.Opts.NVDAPIKey, Timeout: r.Timeout,
+		GitHubToken: r.Token, NVDAPIKey: r.Opts.NVDAPIKey, Timeout: r.Timeout, Now: now,
 		OnWarning: func(w string) { warn = append(warn, w) },
 	}, r.GoMod.ModulePath, r.Opts.SelfVersion)
 	if err != nil {
@@ -241,7 +290,61 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 		checks.SelfAdvisoriesReason = errString(err)
 		return row
 	}
-	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, own)
+	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{Timeout: r.Timeout, Now: now}, r.GoMod.ModulePath, own)
 	row.Findings = findingsOf(r.GoMod.ModulePath, own)
 	return row
+}
+
+// gradedStdlib is the standard library advisories that take part in the grade.
+func gradedStdlib(opts *Options, vulns []scanner.Vulnerability) []scanner.Vulnerability {
+	if opts.ExcludeStdlibFromGrade {
+		return nil
+	}
+	return vulns
+}
+
+// selfStatusFailureReason says why the module's own status has no data: offline
+// mode makes no request at all, which is not the proxy failing to answer.
+func selfStatusFailureReason(modulePath string) string {
+	if offline.Enabled() {
+		return "offline: no network requests were made"
+	}
+	return "the module proxy did not answer for " + modulePath
+}
+
+// kevUnchecked counts the findings that could be a known-exploited F (reached, with a CVE) whose catalog check did not run.
+func kevUnchecked(vulns map[string][]scanner.Vulnerability, stdlib []scanner.Vulnerability) int {
+	n := 0
+	count := func(list []scanner.Vulnerability) {
+		for i := range list {
+			v := &list[i]
+			if v.KEVChecked || (v.Reachability != "called" && v.Reachability != "") {
+				continue
+			}
+			for _, a := range append([]string{v.ID}, v.Aliases...) {
+				if strings.HasPrefix(a, "CVE-") {
+					n++
+					break
+				}
+			}
+		}
+	}
+	for _, list := range vulns {
+		count(list)
+	}
+	count(stdlib)
+	return n
+}
+
+// scanToolchainVersion is the Go release the scan ran with ("go1.26.9"), as the go command in dir reports it, or "" when
+// it cannot be read. The standard library's advisories are matched against it.
+func scanToolchainVersion(ctx context.Context, dir string) string {
+	cmd := exec.CommandContext(ctx, "go", "env", "GOVERSION")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

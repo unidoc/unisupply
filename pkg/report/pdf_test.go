@@ -46,7 +46,7 @@ func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
 	}
 
 	// Must not panic.
-	writeDependencyBlock(c, ds, "C", regular, bold, true)
+	writeDependencyBlock(c, ds, nil, "C", regular, bold, true)
 }
 
 // TestWriteDependencyFindings_VulnDetailSmoke verifies that a low-risk dependency
@@ -169,7 +169,7 @@ func TestWriteDependencyBlock_CallTraceSmoke(t *testing.T) {
 	}
 
 	// Must not panic.
-	writeDependencyBlock(c, ds, "C", regular, bold, true)
+	writeDependencyBlock(c, ds, nil, "C", regular, bold, true)
 }
 
 // requirePDFLicense skips a test that writes a PDF when no UniPDF license key
@@ -209,7 +209,7 @@ func TestWriteDependencyBlock_ReachedViaExtraction(t *testing.T) {
 		RiskScore: 80, RiskLevel: scorer.RiskCritical,
 		Vulns: []scanner.Vulnerability{v},
 	}
-	writeDependencyBlock(c, ds, "C", regular, bold, true)
+	writeDependencyBlock(c, ds, nil, "C", regular, bold, true)
 
 	var buf bytes.Buffer
 	if err := c.Write(&buf); err != nil {
