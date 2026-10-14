@@ -16,9 +16,9 @@ lookup, maintenance health, maintainer analysis, typosquatting detection,
 resilience scoring, AI-generated code heuristics, CI/CD pipeline audit, build
 file inspection, `go.mod`/`go.sum` integrity audit (replace/exclude
 directives, go.sum completeness, go.sum verification), and Trust Index
-lookup — combines the in-tree scanner signals into a weighted risk score per
-dependency, attaches the optional Trust Index data to each report alongside
-that score, and renders the result as a colored terminal
+lookup — grades the module and each dependency from the in-tree scanner signals
+into one letter, A to F, with the row that decided it, attaches the optional
+Trust Index data to each report, and renders the result as a colored terminal
 summary, machine-readable JSON, an enterprise PDF report, or a CycloneDX /
 SPDX SBOM. A built-in policy engine fails CI on configurable thresholds
 (critical vulns, max age, blocked modules, unpinned actions, ...).
@@ -99,7 +99,7 @@ path that pulled the module in.
 | Scanner          | What it checks                                          | Data source                |
 | ---------------- | ------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs in dependencies                              | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, default-branch activity, archive status, deprecation (incl. go.mod `// Deprecated:`) | Go Module Proxy (GitHub commits API as a fallback) |
+| Maintenance      | Last release, default-branch activity, archive status, deprecation (incl. go.mod `// Deprecated:`), retraction | Go Module Proxy (GitHub commits API as a fallback) |
 | Maintainer       | Contributors, bus factor, activity, org verification    | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules        | Built-in list              |
 | Resilience       | Release cadence, governance files, version scheme       | GitHub API                 |
@@ -109,45 +109,13 @@ path that pulled the module in.
 | Integrity        | `go.mod` `replace`/`exclude` directive audit            | `go.mod` (offline)         |
 | Trust Index      | Curated trust scores                                    | unitrust API (optional)    |
 
-The risk score is a weighted composite per dependency:
-
-```
-Per-Dep Risk Score (0–100) =
-    Vulnerabilities × 0.40
-  + Maintenance     × 0.25
-  + Depth           × 0.15
-  + Maintainer Risk × 0.10
-  + Maturity        × 0.10
-  + Typosquat Penalty      (0–20)
-  + AI-Gen Penalty         (0–15)
-  + Low-Resilience Penalty (0–6)  // adds when resilience score < 30
-  + Replace Penalty        (0–20) // 20 for a redirect replace, 8 for a local-path replace, 0 for a version-pin
-```
-
-**Project headline score** is the maximum of five candidates — it never dilutes a single bad actor into a healthy-looking average:
-
-```
-Headline = max(severity_adjusted, p95_dep_risk, archived_floor, cve_floor, integrity_floor)
-```
-
-| Candidate | Description |
-| ------------------- | ----------------------------------------------------------------- |
-| `severity_adjusted` | Step-function over reachability-downgraded CVE counts |
-| `p95_dep_risk` | 95th-percentile (nearest-rank) of per-dep risk scores over the modules that are built: confirmed test-only and confirmed outside-the-build modules are excluded, and ties are broken by module path so the named module is stable (`tied_with` reports how many others share the score) |
-| `archived_floor` | HIGH floor (51) when any built transitive dep is archived; 60 for a direct archived dep. Modules confirmed test-only or outside the build do not count |
-| `cve_floor` | Floor based on post-reachability CVE tier: called CRITICAL→60, called HIGH→55, imported CRITICAL/HIGH→40, required CRITICAL→40 |
-| `integrity_floor` | HIGH floor (51) when any transitive dep has a `replace` directive redirecting to a different module; 60 for a direct dep |
-
-**Example.** A project with 1 archived direct dep, 40 healthy deps, and one imported HIGH CVE:
-
-| Candidate | Value |
-| ------------------- | ----- |
-| `severity_adjusted` | 10 |
-| `p95_dep_risk` | 12 |
-| `archived_floor` | 60 ← direct archived dep |
-| `cve_floor` | 40 |
-
-Result: **60 / HIGH — Driver: archived\_floor (direct archived dep)**
+**The grade.** `unisupply` publishes one letter, A to F, with the evidence behind it. The module itself and every
+dependency get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst
+row, and the report names that row and says why. D and F mean a confirmed problem: a known vulnerability in code that is
+reached, or a checksum that does not match. Archived or deprecated projects count, but only up to C. Vulnerable code that
+is never compiled is shown, not graded. When a check the grade needs did not run, the grade is **Pending** and has no
+letter. A means nothing crossed a scoring threshold in this assessment; it does not certify that the project is secure.
+The full rules are in [docs/grading.md](docs/grading.md).
 
 **Build membership.** A module can be in your dependency graph without being
 compiled into your binary (it is required by a dependency's `go.mod` but none
@@ -158,13 +126,10 @@ linux, darwin and windows on amd64 and arm64, and reports `in_build` (`false`: g
 the JSON output; the text and PDF reports label such modules `outside build` or
 `test-only`. An unknown classification is omitted and never discounts. When the
 vulnerability scan found nothing reachable and the grade is decided by
-dependency health alone, the headline reason says so. See
+dependency health alone, the grade says so. See
 [docs/scanners.md](docs/scanners.md#build-membership) for the rules, limits and
 which signals honour build membership.
 
-`MeanDepRiskScore` is still available as the top-level JSON field `mean_dep_risk_score` for trend lines, but is not the headline.
-
-Levels: **LOW** 0–25 · **MEDIUM** 26–50 · **HIGH** 51–75 · **CRITICAL** 76–100.
 
 ## Output formats
 
@@ -186,15 +151,13 @@ for the exact definitions and scoring effect.
 Each CVE also carries threat-intel enrichment: `epss_score` /
 `epss_percentile` (FIRST.org's exploitation-probability prediction) and
 `in_kev` (presence in CISA's Known Exploited Vulnerabilities catalog). Both
-feed the risk score — see
-[docs/scanners.md § Threat-intel enrichment](docs/scanners.md#threat-intel-enrichment-epss--cisa-kev).
+are shown as data, and a called finding on the KEV list grades F — see
+[docs/grading.md](docs/grading.md).
 
 ```json
 {
   "module": "golang.org/x/net",
   "version": "v0.35.0",
-  "risk_score": 76,
-  "risk_level": "CRITICAL",
   "vulnerabilities": [
     {
       "id": "GO-2025-0001",
@@ -256,8 +219,7 @@ attached to a dependency. They appear in a top-level `stdlib_vulnerabilities`
 array after `dependencies`, sorted by advisory ID and omitted when there are
 none. Each entry has the same fields as a dependency vulnerability above
 (including `reachability`, `call_path`, `call_trace` and `called_symbols`)
-except `severity_scored`, which is never set because the scorer does not score
-standard-library vulnerabilities. They are not counted in `summary`.
+They are graded as a row named `stdlib` and are not counted in `summary`.
 
 `call_path` is present only when `reachability` is `"called"`: one example of how the project reaches the vulnerable function, outermost frame first, condensed to the entry frame, the frame where each package hands over to the next, and the vulnerable function (at most 8 entries; `"..."` marks a cut). Consecutive entries are not necessarily direct callers. It is evidence that the code is on an execution path, not proof that the vulnerability is exploitable.
 
@@ -288,8 +250,7 @@ A minimal custom policy (every field is optional — see
 
 ```json
 {
-  "max_overall_score": 50,
-  "max_risk_score": 75,
+  "max_grade": "C",
   "no_critical_vulns": true,
   "no_archived": true,
   "no_deprecated": true,
@@ -463,7 +424,8 @@ The most frequently used flags:
 | `--policy`              | Path to a custom policy JSON file                                                                                    |
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only                                                                    |
 | `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts                                                        |
-| `--min-risk`            | Hide dependencies below the given score (e.g. `--min-risk 26` for medium+)                                           |
+| `--module-version`      | Published version of the scanned module (e.g. `v1.4.0`): also grades the module itself, from its own OSV advisories and archive status |
+| `--response-history`    | Look up how fast the project adopted its dependencies' fixes in the past (extra proxy and OSV requests; needs `--module-version`) |
 | `--direct-only`         | Skip transitive dependencies                                                                                         |
 | `-v, --verbose`         | Per-dependency breakdown                                                                                             |
 
@@ -486,8 +448,10 @@ the same data already public in your `go.mod`.
 | Host | What is sent | When | Disable |
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version, or a branch name (the GitHub default branch, else `main`, then `master`) | Maintenance and resilience scanners: release history, the latest version's `go.mod` (deprecation notice), and the default branch's head commit | always runs |
+| `proxy.golang.org` | Module path + fixed version (or, for the standard library, `golang.org/toolchain@v0.0.1-go<version>.linux-amd64`) | Fix-release dates: the `.info` time of the first fixed version of an advisory, at most 8 lookups at a time, one per distinct fixed version | always runs when an advisory names a fixed version (no-op otherwise) |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
 | `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*), and its GHSA/CVE alias IDs (at most 4 aliases per advisory) | Severity enrichment when a vuln has unknown severity: the advisory's own record, then its alias records (GHSA first, then CVE; CVSS v3 vectors are scored locally) | always runs (no-op when no vulns) |
+| `api.osv.dev` | The scanned module's path and version (one `POST /v1/query`, paged up to 10 pages) | The scanned module's own advisories: those that affect exactly that version, graded like a dependency's | always runs when the module's version is known (no-op otherwise) |
 | `services.nvd.nist.gov` | CVE ID | Severity enrichment when a CVE alias exists and OSV and its alias records have no severity | always runs (no-op if no CVE alias); the NVD API key, when set, is sent as the `apiKey` header to this host only |
 | `api.github.com` | Repo owner/name | Maintainer scanner (repo metadata, owner profile, contributor list); with a token, also the default branch's latest commit when the module proxy cannot answer the branch query | always runs; a token raises rate limits |
 | `api.github.com` | The GitHub token only; no module data | Token validation: one request to `/rate_limit` (retried up to twice on a network error or 5xx), after the dependency graph is resolved and before any scanner runs | only when a GitHub token is supplied, the project has dependencies (or `--require-github-token` is set), and `--offline` is not set; omit the token to skip |
@@ -582,6 +546,7 @@ What `--offline` costs you, and how each loss is reported:
 | Maintenance | Not measured — warning names the module count; the 25% weight is excluded rather than scored with an unknown constant |
 | Maintainer, Resilience | UNKNOWN; the maintainer axis is excluded from scores rather than counted as zero |
 | **Headline verdict** | **`UNKNOWN — not scored`.** Three of the five headline candidates are CVE-derived, so with no vulnerability data the headline would rest on dependency-graph position and version scheme alone. The numeric score is still reported, labelled indicative |
+| Module's own advisories, fix-release dates | Not queried — the lookup returns an error that is reported as pending, and fix dates stay on the advisory's date |
 | Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
 | go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
 | GitHub token validation | Skipped — a supplied token is not checked; with `--require-github-token` a warning says so and the run continues |
@@ -602,7 +567,8 @@ available — track it before relying on `--offline` for vulnerability findings.
 
 ## Documentation
 
-- [docs/scanners.md](docs/scanners.md) — scanner reference and the canonical risk-scoring formula
+- [docs/grading.md](docs/grading.md) — how the letter is decided (Grading v2)
+- [docs/scanners.md](docs/scanners.md) — scanner reference
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards and enforcement

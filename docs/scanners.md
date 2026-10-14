@@ -1,5 +1,10 @@
 # Scanners and Risk Scoring
 
+> **Grading v2.** The published grade is the letter described in [grading.md](grading.md). The 0-100 risk score, the
+> headline candidates and the per-dependency risk bands described under "Risk score" to "Headline candidates" below are
+> the scorer's internal measure: they are no longer published in the text, JSON, PDF or SBOM output, and policy gates
+> read the letter. The scanners, their data and their limits are unchanged.
+
 This document describes the scanners `unisupply` runs and the exact formula used
 to combine their results into a 0–100 risk score per dependency. It is the
 canonical reference for the algorithm; if the code in `pkg/scorer/risk.go` and
@@ -10,7 +15,7 @@ this document disagree, the code wins — please open a PR fixing this file.
 | Scanner          | What it checks                                             | Data source                |
 | ---------------- | ---------------------------------------------------------- | -------------------------- |
 | Vulnerability    | Known CVEs (call-graph-aware via `govulncheck`)            | Go vuln DB (vuln.go.dev)   |
-| Maintenance      | Last release, default-branch activity, archive status, deprecation | Go Module Proxy (GitHub commits API as a fallback) |
+| Maintenance      | Last release, default-branch activity, archive status, deprecation, retraction | Go Module Proxy (GitHub repository and commits APIs for archive status and as a fallback) |
 | Maintainer       | Contributors, bus factor, activity, org verification       | GitHub API                 |
 | Typosquatting    | Levenshtein-similarity to ~75 well-known modules           | Built-in list              |
 | Resilience       | Release cadence, governance files, version-scheme          | GitHub API                 |
@@ -157,10 +162,21 @@ vulnerable function, at most 8 entries; `"..."` marks where a longer path was
 cut, so consecutive entries are not necessarily direct callers. A path need not
 start at `main`: govulncheck also treats the exported functions of library
 packages as entry points. When a vulnerability has several vulnerable symbols
-the shortest path is kept (ties broken alphabetically), so the choice does not
-depend on govulncheck's output order. The path is evidence that the code is on
+the strongest path is kept, so the choice does not depend on govulncheck's
+output order. A path whose only purpose is formatting an error or a string (its
+sink or an intermediate frame is a method named `Error` or `String`, or it
+passes through package `fmt` or `log`) loses to any path that does not; among
+paths of the same kind the shortest wins, ties broken alphabetically. When every
+path only formats a message, the shortest is kept as before. The path is evidence that the code is on
 an execution path, not proof that the vulnerability is exploitable (see the
 caveat below).
+
+`condition` is one short sentence derived from the chosen path's frame names
+only, for example `reached through github.com/gin-gonic/gin.Context.Render`: the
+first frame outside the project's own code (a `project` frame is required, so it
+is absent when govulncheck emitted no `SBOM` message or the path starts inside a
+dependency). It names a call, never a configuration, and is evidence rather than
+a promise of exploitability.
 
 `call_trace` carries the same path with a source position per entry. It is
 index-aligned with `call_path` and has the same length; each object holds
@@ -372,6 +388,69 @@ same way, with one warning. Prefer `NVD_API_KEY` over the flag: a flag value is
 visible to other users in `ps` and can end up in CI logs. The lookup order is
 unchanged.
 
+### The module's own advisories
+
+A dependency's advisories come from govulncheck, which does not check the module
+it starts from. The module's own advisories are therefore read straight from
+OSV: one `POST https://api.osv.dev/v1/query` with the module path (ecosystem
+`Go`) and its **version**, following `next_page_token` for at most 10 pages.
+OSV answers with the advisories that affect exactly that version.
+
+- The version is required. A query without one returns the advisories of every
+  version of the module, so an empty or malformed version, or an invalid module
+  path, is an error and no request is made.
+- Withdrawn advisories are skipped.
+- Each advisory becomes a vulnerability record like a dependency's: `id`,
+  `aliases`, `summary`, `published_at`, `fixed_version` (the lowest fixed
+  version above the queried one, among the ranges that name this module),
+  `fix_published_at` and `days_unpatched` as for dependencies, and
+  `affected_packages` (the import paths the advisory names, sorted, without
+  duplicates). `reachability` is left empty: the grade assumes the module's own
+  advisories are called.
+- Severity comes from the record (`database_specific.severity`, then a CVSS v3
+  vector), then the [resolution order](#severity-resolution-order) above, with
+  the same `UNKNOWN`, `unscored` and `enrichment_failed` meanings. EPSS and KEV
+  are applied as for dependencies.
+- A failed lookup (transport error, non-200 status, unparseable or oversize
+  response, more than 10 pages) is an error, never an empty list: an empty list
+  means OSV answered and nothing affects that version. The caller reports the
+  module's own advisories as pending. Severity, EPSS and KEV failures are
+  best-effort warnings and never fail the lookup.
+- `--offline`: no request is made and the lookup returns an error.
+
+The response read is capped at 8 MB per page and the whole lookup at 30 s.
+`--network-log` labels these requests `selfadvisory:osv`.
+
+### Fix-release dates
+
+`fix_published_at` is the advisory's publication date, which can be days before
+the fixed version exists. `fix_released_at` is the better date: the **later** of
+`fix_published_at` and the time the Go module proxy gives the first fixed
+version (`GET <proxy>/<module>/@v/<version>.info`, the `Time` field; the module
+path and version are escaped as the proxy requires).
+
+| `fix_date_source` | Meaning |
+| ----------------- | ------- |
+| `module_proxy`    | The proxy's time was later than or equal to the advisory's date |
+| `advisory`        | The advisory's date was later, or the proxy had no time for that version (404, 410, error, timeout) |
+| absent            | Neither is known; `fix_released_at` is absent too |
+
+A vulnerability with no `fixed_version` gets neither field. No date is ever
+invented: a failed lookup leaves the advisory's date (source `advisory`), or
+nothing. Lookups are de-duplicated per fixed version, run at most 8 at a time
+and share one 30 s budget. When `fix_released_at` is set, `days_unpatched` is
+counted from it.
+
+For the standard library the fixed version (`go1.26.9`, `v1.26.9` or `1.26.9`;
+`go1.21` means `go1.21.0`) is released when the proxy says
+`golang.org/toolchain@v0.0.1-go1.26.9.linux-amd64` was; the rule is otherwise
+the same. A fixed version that is not a Go release is not looked up.
+
+Both features use only `api.osv.dev` and `proxy.golang.org`, already in the
+network contract in the README's "Privacy and network access" table, which
+lists these requests as their own rows. `--offline` makes no lookup and leaves
+the advisory's date.
+
 ### Threat-intel enrichment (EPSS + CISA KEV)
 
 Every CVE is enriched with two real-world exploitation signals:
@@ -530,11 +609,88 @@ maintainers have said to move off the module, and a recent commit (for example
 on `github.com/golang/protobuf`) does not change that. Deprecation does not set
 the `archived_floor` headline candidate.
 
+**Retraction.** The same go.mod read (one request, no extra) is searched for
+`retract` directives. When the module's **pinned** version, the one in the
+dependency graph, falls inside a retracted single version or `[low,high]` range
+(semantic-version comparison), the JSON `maintenance` object reports
+`retracted: true` and the maintainers' `retraction_message` (the rationale
+comment, "" when they gave none). A retracted version reads as deprecated to
+consumers, but the scanner does **not** set `deprecated` for it: the two stay
+separate evidence, and the grade treats `retracted || deprecated` as one
+state. A pinned version that is not valid semver is never reported retracted.
+
+**Repository and archive status.** The repository behind a module path is
+resolved first, from the `Origin` the module proxy records for the latest (else
+the pinned) version: the `@latest` and `.info` answers the scan already reads,
+so it costs no request. An `https` GitHub origin (`gopkg.in/yaml.v3` ->
+`https://github.com/go-yaml/yaml`, `k8s.io/api` -> `github.com/kubernetes/api`)
+is reported as `maintenance.repository_url`, and for a `github.com` module path
+without an origin it is the repository the path names. The archived flag is then
+read from `GET api.github.com/repos/{owner}/{repo}`, the same call the
+Maintainer scanner makes, so a vanity path is covered like a `github.com` one.
+`maintenance.archived_check` says whether `archived` is an answer:
+
+| `archived_check` | Meaning |
+| ---------------- | ------- |
+| `checked`        | GitHub answered; `archived` is the flag read |
+| `failed`         | The lookup was attempted and did not answer (rate limit, 401/403, 5xx, network error, or 404). `archived: false` here means "not checked", never "not archived". |
+| `unsupported`    | The repository is on a host other than GitHub (`go.googlesource.com`, GitLab, ...), which cannot be asked |
+| (absent)         | Nothing was attempted: offline, no lookup configured, or no repository known |
+
+A 404 (repository deleted, private, or renamed away without a redirect) is a
+definitive answer: `repository_not_found: true`, `archived_check: failed`, and,
+in the maintainer data, `unavailable_reason: repo_not_found`. It is asked once,
+shared by every module of that repository, and is neither a rate limit nor
+counted in the "archived status could not be read" scan warning, which counts
+only lookups that failed for another reason. A rename redirect is followed one
+hop, on `api.github.com` only, as before.
+
+**GitHub call budget.** Every per-repository GitHub answer (repository record,
+contributors, owner profile, latest commit) is cached for the life of the scan
+and shared by all modules of the repository, failures included, and the
+successful ones are kept on disk for 24 hours as before. Modules from one
+repository (`golang.org/x/*` mirrors, `k8s.io/*`, a monorepo's submodules) cost
+one request per endpoint, not one per module. A repository costs at most
+3 requests (repository, contributors, latest commit; the last only with a
+token and only when the proxy cannot answer the activity query), plus one
+profile request per distinct owner. The archived check adds nothing for a
+repository the maintainer scan already fetched, and one request (the repository
+record) for a vanity-path repository. A 404 repository costs one request in
+all. The Resilience scanner's governance-file probes (3 `HEAD` requests per
+`github.com` module) are separate and not yet cached. Conditional requests
+(ETags) are not used.
+
 The maintainer and maturity components fall back to **0** for trusted
 namespaces (`golang.org/x/`, `google.golang.org/`, `k8s.io/`,
 `go.opentelemetry.io/`, `github.com/golang/`, `github.com/google/`,
 `github.com/googleapis/`, etc.) — these projects use v0.x and centralized
 maintainership by design, not neglect.
+
+### Resilience request bounds
+
+The resilience check asks the module proxy (`proxy.golang.org`) for the version
+list of each module (`@v/list`, purpose `resilience:version-list`) and for the
+release date of versions (`@v/<version>.info`, purpose
+`resilience:version-info`). No new outbound call is made; the number of date
+requests is bounded:
+
+- at most 24 dates per module: the newest 23 versions and the oldest one (the
+  proxy's list is ordered by semver before the cut). The oldest anchors the
+  project age; the full list still gives the release count, the stable and
+  major-version flags and the version scheme;
+- at most 3,000 date requests per scan, shared by all modules, and at most 16 in
+  flight at once;
+- a module cut by the cap, by the budget or by failed requests reports
+  `limited: true` and `sampled_versions` (the number of dates obtained) in its
+  resilience result. When the sample includes the oldest release,
+  `avg_days_between_releases` is the span divided by the full release count.
+  When the budget leaves no date at all, the module reports
+  `data_available: false`, so its axis is excluded rather than scored from
+  nothing.
+
+On a fake proxy serving 5,000 versions for one module the old code made 5,001
+requests (one list, 5,000 dates); the bounded code makes 25 (one list, 24
+dates). docker/docker (26,422 versions) is the real case this prevents.
 
 ## Integrity
 
@@ -741,8 +897,13 @@ show an `outside build` label next to `test-only` under the same rule.
   no list, so a module imported only there looks graph-only. Guard: a module
   that `go.mod` requires **directly** (no `// indirect`) but that no list
   contains gets `in_build` absent, not `false`, and so does every module
-  reachable from it in the module graph (`go mod graph`), since the tagged
-  build compiles that requirement's own dependencies. The rule is "reachable
+  reachable from it in the module graph (`go mod graph`) **and listed in the
+  main `go.mod`**, since the tagged build compiles that requirement's own
+  dependencies. A module reachable from it but not listed in `go.mod` cannot be
+  imported by the main module's tagged code (for go 1.17 and newer `go.mod`
+  lists every module the build needs) and is classified from what is known:
+  `in_build: false` when no list contains it. For a `go.mod` below go 1.17, which
+  does not list every module, every reachable module stays unknown. The rule is "reachable
   from", not "reachable only through": for go 1.17 and newer, `go mod tidy`
   lists every module the tagged code needs as a `// indirect` requirement of
   the main module, so those modules also have an edge from the main module. A
@@ -762,7 +923,7 @@ show an `outside build` label next to `test-only` under the same rule.
   `//go:build tools` that blank-imports the tool's package. That import makes
   the tool a direct requirement in `go.mod`, but the `tools` tag is never set,
   so no list contains it. The build-tag guard above therefore applies: the tool
-  and every module reachable from it in the module graph are left unknown and
+  and every module reachable from it in the module graph that `go.mod` lists are left unknown and
   counted as built. For a large tool such as a linter, that is its whole
   dependency tree, and those modules can then raise the headline. This errs
   toward counting too much, never too little. Declaring the same tool with a go
@@ -857,3 +1018,54 @@ unchanged. When no dependency has an `in_build` verdict the reason says "of all
 modules in the dependency graph (build classification unavailable)" instead.
 The separate case where the vulnerability scan did not run is the
 [unscored headline](#unscored-headline).
+
+## Response history
+
+Response history says how fast a graded module adopted a dependency's fixes in
+the past. It is shown as context next to a finding ("historically adopted
+comparable fixes in about 30 days", with the sample size and period) and is
+**never** part of the letter or the score. When there is not enough history the
+report says so instead of showing a number.
+
+For a module M and a dependency D, each earlier advisory of D that was fixed in
+version F (released at `T_F`) gives one sample:
+
+```
+days = first sampled release of M whose go.mod requires D >= F   (its time)
+       - T_F                                                     (never below 0)
+```
+
+- **Sampled releases** are M's newest `MaxVersions` (default 40) release
+  versions without a pre-release, ordered by semver. A release that already
+  required F before `T_F` counts 0 days.
+- **F** is the lowest fixed version in the advisory's OSV `affected` ranges for
+  D (ecosystem Go). Withdrawn advisories and advisories without a fix are
+  skipped. Fixes sharing one version F are one sample, so an advisory listed
+  under several identifiers is not counted twice.
+- A fix released before M's oldest sampled release is skipped: M could not have
+  reacted to it within the sample.
+- The shown value is the integer median of the samples, rounded half up when
+  the count is even, with the sample count and the span of the fixes' release
+  times (`from`, `to`). It needs at least 3 samples (`MinResponseSamples`);
+  otherwise the dependency is left out.
+- **Bias:** a fix M never adopted in the sampled range is not a sample, because
+  its adoption time is unknown. It is not counted as a long adoption, so the
+  median leans towards faster adoption than the full record would show. Read it
+  with the sample count.
+
+The scan fails only when offline mode is on or M's own version list cannot be
+read. Any other failed lookup (one go.mod, one release time, one dependency's
+advisories) skips that item. Work is bounded by `MaxVersions` and
+`MaxDependencies` (default 60), at most 8 requests run at once, and a go.mod or
+release time is requested once per scan. Nothing is cached on disk.
+
+### Endpoints
+
+| Request | Purpose label (`--network-log`) | Host |
+| ------- | ------------------------------- | ---- |
+| `GET <proxy>/<M>/@v/list` | `responsehistory:version-list` | `proxy.golang.org` |
+| `GET <proxy>/<M>/@v/<version>.info` (M's releases, and D at each fixed version) | `responsehistory:version-info` | `proxy.golang.org` |
+| `GET <proxy>/<M>/@v/<version>.mod` | `responsehistory:go-mod` | `proxy.golang.org` |
+| `POST /v1/query` with `{"package":{"name":D,"ecosystem":"Go"}}`, up to 5 pages | `responsehistory:osv` | `api.osv.dev` |
+
+Only module paths and versions are sent. It is not available offline.

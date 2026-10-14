@@ -1,6 +1,5 @@
 {
-  "max_risk_score": 75,
-  "max_overall_score": 60,
+  "max_grade": "C",
   "max_ci_score": 50,
   "no_known_vulns": false,
   "no_critical_vulns": true,

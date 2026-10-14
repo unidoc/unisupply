@@ -62,7 +62,7 @@ axis as 0 would report a clean bill of health nobody earned; scoring it with an
 confirmed outside the build (`in_build: false`, in the module graph only) or
 confirmed test-only never sets `p95_dep_risk` or `archived_floor`; a nil
 classification (unavailable, a direct requirement no `go list` found, or a
-module reachable from one in the module graph) is assumed built and still
+module listed in go.mod and reachable from one in the module graph) is assumed built and still
 counts. Ties at the p95 index resolve by module path
 and are reported as `tied_with`.
 
@@ -157,7 +157,7 @@ unisupply ./ --policy-preset strict
 unisupply ./ --policy ./my-policy.json
 
 # Filter output
-unisupply ./ --min-risk 26 --show-only vulnerabilities,maintenance
+unisupply ./ --module-version v1.4.0
 
 # Progress output (default: auto — TTY spinner if stderr is a terminal,
 # timestamped lines otherwise). Always writes to stderr; never contaminates
@@ -183,8 +183,7 @@ Built-in presets: `strict`, `moderate`. Or custom JSON:
 
 ```json
 {
-  "max_risk_score": 75,
-  "max_overall_score": 60,
+  "max_grade": "C",
   "no_critical_vulns": true,
   "no_single_maintainer": true,
   "no_unmaintained_months": 18,

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/progress"
@@ -68,6 +69,15 @@ type Options struct {
 
 	DebugScoring bool
 
+	// SelfVersion is the version of the module being scanned, as published (a tag such as v1.4.0). It lets the grade
+	// look up the module's own advisories (OSV) and its own archived/deprecated status. Empty means the module is not
+	// assessed as a published module: the grade then covers its dependencies only, and says so.
+	SelfVersion string
+
+	// ResponseHistory turns on the fix-response-history lookup (extra module proxy and OSV requests): how fast the
+	// project has adopted its dependencies' fixes in the past. Needs SelfVersion. Off by default.
+	ResponseHistory bool
+
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
 	// time.Now().UTC().Truncate(24*time.Hour) if zero — the same
@@ -80,17 +90,18 @@ type Options struct {
 // caller to feed directly into any of pkg/report's Write* functions
 // (WriteText, WriteJSON, WritePDF, WriteCycloneDX, WriteSPDX all take
 // exactly a *resolver.Graph and *scorer.ProjectScore, plus format-specific
-// options that reference CIReport/Takeovers).
+// options that reference CIReport).
 type Result struct {
 	GoMod        *parser.GoMod
 	Graph        *resolver.Graph
 	ProjectScore *scorer.ProjectScore
 
+	// Grade is the Grading v2 result: the letter, the row that decides it and the evidence behind every row. It is the
+	// published grade; ProjectScore is the scorer's internal measure and is no longer what a report headlines.
+	Grade *grade.Result
+
 	// CIReport is nil unless Options.ScanWorkflows or Options.ScanCI was set.
 	CIReport *scanner.CIReport
-	// Takeovers lists maintainers flagged as takeover candidates: one entry per
-	// repository, sorted by owner/repo.
-	Takeovers []*scanner.MaintainerInfo
 	// StdlibVulns holds vulnerabilities found in the Go standard library
 	// itself, separated out of ProjectScore's per-dependency vulns (the
 	// stdlib isn't a "dependency" in the graph sense).
@@ -215,7 +226,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			Now:       scanStart,
 			DebugMode: opts.DebugScoring,
 		})
-		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, IntegrityReport: integrityReport}, nil
+		g := gradeAll(ctx, gradeRun{
+			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
+			Timeout: timeout, ScanStart: scanStart, VulnScanned: true,
+		})
+		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport}, nil
 	}
 
 	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
@@ -241,6 +256,17 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rep.Warn("%s", w)
 	}
 	rep.Done("%d affected modules", len(vulns))
+
+	// The date each fix was released (from the module proxy), so a finding can say whether it is inside the response
+	// window. Best effort: a failed lookup leaves the advisory's own date, or none.
+	fixOpts := scanner.FixDateOptions{Timeout: timeout}
+	for path, list := range vulns {
+		if path == stdlibModule {
+			scanner.ResolveStdlibFixDates(ctx, fixOpts, list)
+		} else {
+			scanner.ResolveFixDates(ctx, fixOpts, path, list)
+		}
+	}
 
 	rep.Stage("Checking maintenance health")
 	maintScanner := scanner.NewMaintenanceScanner(timeout)
@@ -281,6 +307,13 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	maintainers := maintainerScanner.ScanAll(ctx, graph)
 	rep.Done("")
 
+	// Archived status comes from the repository each module is published from, so it needs the maintainer scan's
+	// repository cache and runs before the activity scan (which skips archived modules).
+	if err := maintScanner.ScanArchived(ctx, maintenance, maintainerScanner); err != nil {
+		maintWarnings = append(maintWarnings, err.Error())
+		rep.Warn("%v", err)
+	}
+
 	// Activity reads the default branch the maintainer scan found, so it runs
 	// after it.
 	rep.Stage("Checking default-branch activity")
@@ -301,15 +334,6 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	resilienceScanner.ScanStart = scanStart
 	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
 	rep.Done("")
-
-	rep.Stage("Assessing AI-generation risk")
-	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenScanner.ScanStart = scanStart
-	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
-	for _, w := range aiGenWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d flagged", len(aiGenRisks))
 
 	var trustIndex map[string]*scanner.TrustIndexEntry
 	trustClient, err := scanner.NewTrustIndexClient(opts.TrustIndexURL, timeout, opts.TrustIndexAllowPrivate)
@@ -335,7 +359,6 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Maintainers:   maintainers,
 		Typosquats:    typosquats,
 		Resilience:    resilience,
-		AIGenRisks:    aiGenRisks,
 		TrustIndex:    trustIndex,
 		Integrity:     integrityClasses,
 		PseudoVersion: pseudoVersionClasses,
@@ -355,7 +378,6 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
 	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
 	// Resolver notes are informational and kept apart from the warnings, so a
 	// report does not present them as a limitation of the results.
 	projectScore.Notes = append(projectScore.Notes, graph.Notes...)
@@ -387,10 +409,6 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rep.Done("")
 	}
 
-	// One entry per repository, sorted by owner/repo: deterministic output
-	// (the text, JSON and PDF reports and Result.Takeovers all depend on it).
-	takeovers := scanner.TakeoverCandidates(maintainers)
-
 	stdlibVulns := takeStdlibVulns(vulns)
 
 	interrupted := ctx.Err() != nil
@@ -398,12 +416,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
 	}
 
+	gradeResult := gradeAll(ctx, gradeRun{
+		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
+		Timeout: timeout, ScanStart: scanStart,
+		Vulns: vulns, Stdlib: stdlibVulns, Maintenance: maintenance,
+		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
+	})
+
 	return &Result{
 		GoMod:           gomod,
 		Graph:           graph,
 		ProjectScore:    projectScore,
+		Grade:           gradeResult,
 		CIReport:        ciReport,
-		Takeovers:       takeovers,
 		StdlibVulns:     stdlibVulns,
 		IntegrityReport: integrityReport,
 		VulnScanErr:     vulnScanErr,

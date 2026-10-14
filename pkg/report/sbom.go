@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -19,6 +20,9 @@ type SBOMOptions struct {
 	// GoVersion is the scanned module's go directive. CycloneDX records it as
 	// the root component's unisupply:go_version property; SPDX omits it.
 	GoVersion string
+
+	// Grade supplies each component's letter (Grading v2); nil leaves the grade properties out.
+	Grade *grade.Result
 }
 
 // ---- CycloneDX 1.5 ----
@@ -106,7 +110,7 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 
 	// Build dependency lookup for the dependency graph section.
 	depChildren := make(map[string][]string) // module -> modules it depends on
-	scores := scoresByModule(ps)
+	rows := gradeRowsByModule(opts.Grade)
 
 	// Sorted order fixes the order of the components, of the root's dependsOn
 	// list, and of each depChildren slice, which is filled in this loop.
@@ -127,17 +131,11 @@ func WriteCycloneDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOpt
 			Scope:   scope,
 		}
 
-		// Add risk score as a property.
-		if ds, ok := scores[dep.Module.Path]; ok {
+		// The row's grade (Grading v2): its letter and the one sentence that explains it.
+		if row, ok := rows[dep.Module.Path]; ok {
 			comp.Properties = append(comp.Properties,
-				cdxProperty{
-					Name:  "unisupply:risk_score",
-					Value: fmt.Sprintf("%d", ds.RiskScore),
-				},
-				cdxProperty{
-					Name:  "unisupply:risk_level",
-					Value: string(ds.RiskLevel),
-				},
+				cdxProperty{Name: "unisupply:grade", Value: string(row.Letter)},
+				cdxProperty{Name: "unisupply:grade_reason", Value: row.Reason},
 			)
 		}
 
@@ -263,7 +261,7 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 		RelatedSPDXElement: "SPDXRef-RootPackage",
 	})
 
-	scores := scoresByModule(ps)
+	rows := gradeRowsByModule(opts.Grade)
 	pkgIdx := 0
 	// Sorted order makes the SPDXRef-Package-N IDs map to the same modules on
 	// every run.
@@ -287,13 +285,13 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 			},
 		}
 
-		// Add risk score as annotation.
-		if ds, ok := scores[dep.Module.Path]; ok {
+		// The row's grade (Grading v2) as an annotation.
+		if row, ok := rows[dep.Module.Path]; ok {
 			pkg.Annotations = append(pkg.Annotations, spdxAnnotation{
 				AnnotationDate: now.Format(time.RFC3339),
 				AnnotationType: "REVIEW",
 				Annotator:      fmt.Sprintf("Tool: unisupply-%s", version.Version),
-				Comment:        fmt.Sprintf("risk_score=%d risk_level=%s", ds.RiskScore, ds.RiskLevel),
+				Comment:        fmt.Sprintf("grade=%s reason=%s", row.Letter, row.Reason),
 			})
 		}
 
@@ -313,20 +311,18 @@ func WriteSPDX(graph *resolver.Graph, ps *scorer.ProjectScore, opts SBOMOptions,
 	return enc.Encode(doc)
 }
 
-// scoresByModule indexes ps.Dependencies by module path so each SBOM entry
-// finds its risk score without scanning the whole slice. The first score for a
-// module wins, as the linear search it replaces did. Nil ps yields an empty map.
-func scoresByModule(ps *scorer.ProjectScore) map[string]*scorer.DependencyScore {
-	scores := make(map[string]*scorer.DependencyScore)
-	if ps == nil {
-		return scores
+// gradeRowsByModule indexes the grade's rows by module path. A nil grade yields an empty map.
+func gradeRowsByModule(g *grade.Result) map[string]grade.RowResult {
+	rows := make(map[string]grade.RowResult)
+	if g == nil {
+		return rows
 	}
-	for _, ds := range ps.Dependencies {
-		if _, seen := scores[ds.Module]; !seen {
-			scores[ds.Module] = ds
+	for _, r := range g.Rows {
+		if !r.Self {
+			rows[r.Module] = r
 		}
 	}
-	return scores
+	return rows
 }
 
 // goPurl constructs a Package URL for a Go module.

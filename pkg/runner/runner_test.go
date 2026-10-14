@@ -49,13 +49,13 @@ func TestRun_NoDependencies(t *testing.T) {
 		t.Errorf("len(ProjectScore.Dependencies) = %d, want 0", len(result.ProjectScore.Dependencies))
 	}
 	// The zero-dependency path must skip every network-calling scanner
-	// entirely — Maintainers/Typosquats/CIReport/Takeovers/StdlibVulns
+	// entirely — Maintainers/Typosquats/CIReport/StdlibVulns
 	// should all be at their zero value, not partially populated.
 	if result.CIReport != nil {
 		t.Errorf("result.CIReport = %+v, want nil (ScanWorkflows/ScanCI were not requested)", result.CIReport)
 	}
-	if len(result.Takeovers) != 0 {
-		t.Errorf("result.Takeovers = %v, want empty", result.Takeovers)
+	if result.Grade == nil || result.Grade.Letter != "A" || result.Grade.Pending != nil {
+		t.Errorf("result.Grade = %+v, want a graded A for a module with nothing to scan", result.Grade)
 	}
 }
 

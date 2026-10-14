@@ -7,7 +7,61 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### Breaking Changes
+
+#### Grading v2: one letter, A to F, instead of a 0-100 score
+
+The published result is now a letter with the evidence behind it, decided by one rule you can trace (see
+[docs/grading.md](docs/grading.md)). **This changes the JSON, text, PDF and SBOM output and the policy file, and it
+breaks consumers that read the old fields.**
+
+- **New `grade` object in the JSON report, and in `pkg/runner.Result.Grade`.** The module itself and every dependency
+  get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst row, which
+  the result names with a one-sentence reason. Called vulnerabilities score 90/70/45/15 (critical/high/medium/low),
+  imported-only code at most 50, graph-only findings are shown and not graded, a called known-exploited finding is F,
+  test-only findings are halved, archived or deprecated modules count up to C only, and whole-tree rules raise the letter
+  (three called high or critical findings, any called critical, a checksum mismatch: F; five called or imported high or
+  critical findings: at least D). A finding with no published severity is scored as medium and the letter is marked `C*`.
+- **Pending.** When a check the grade needs did not run (vulnerability scan failed, scan did not finish, the module's
+  own status or advisories could not be read, a dependency's maintenance data is missing and could change the letter) the
+  grade has no letter and says which check and why. It is never an A.
+- **Response window.** A fix released within the last 14 days is labelled with the date its window ends; the label never
+  changes the letter. `fix_released_at` and `fix_date_source` come from the module proxy.
+- **Removed from every output:** `overall_risk_score`, `overall_risk_level`, `headline`, `headline_driver`,
+  `mean_dep_risk_score`, `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`,
+  `headline_unscored_reason`, the per-dependency `risk_score`, `risk_level`, `score_breakdown` and `risk_factors`,
+  `severity_scored`, the `*_risk_count` summary fields, `takeover_candidates` (and `pkg/runner.Result.Takeovers`), the
+  AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` / `unisupply:risk_level` (now
+  `unisupply:grade` and `unisupply:grade_reason`).
+- **CLI:** `--min-risk` and `--debug-scoring` are removed. New `--module-version` grades the scanned module itself at a
+  published version, and `--response-history` adds how fast the project adopted past fixes.
+- **Policy:** `max_risk_score` and `max_overall_score` are removed (a policy file that contains them is rejected). New
+  `max_grade` ("A" to "F") and `allow_pending`. A Pending grade fails `max_grade` unless `allow_pending` is set. The
+  presets are `strict` = B and `moderate` = C. `pkg/policy.EvalInput` gains `Grade`.
+- **Standard library findings** are graded as a row named `stdlib`.
+
 ### New Features
+
+#### Inputs of the grade
+
+- **The module's own advisories** (`scanner.ScanModuleAdvisories`): OSV advisories for the exact published version of
+  the scanned module, assumed called (govulncheck does not check the module it starts from).
+- **Fix-release dates** (`scanner.ResolveFixDates`, `ResolveStdlibFixDates`): the later of the advisory's fix date and the
+  module proxy's time for the first fixed version.
+- **Retraction** is read from the `retract` directives in the latest go.mod and graded like deprecation.
+- **Archived status** now follows the repository a module is published from (vanity paths such as `gopkg.in/yaml.v3`),
+  and an archived flag that could not be read is reported as unchecked, never as not archived. A repository that does
+  not exist (404) is reported as `repo_not_found` and is not blamed on the GitHub API.
+- **Build status:** a module that is not listed in `go.mod` and is reachable only from a build-tag-only requirement is
+  now classified as not built instead of unknown (Go 1.17 and newer `go.mod` files).
+- **Strongest call path:** a path that does not just format a message (`fmt`, `log`, an `Error` or `String` method) is
+  preferred, and `condition` says what the project must do to reach the vulnerable code.
+- **Response history** (`scanner.ScanResponseHistory`, `--response-history`): the median number of days the project took
+  to adopt comparable fixes, with at least three samples.
+- **Request bounds:** the resilience scan samples at most 24 versions per module and a shared budget of 3,000 date
+  requests, and GitHub repository, owner and latest-commit answers are cached per scan.
+
+
 
 #### NVD API key for severity lookups
 

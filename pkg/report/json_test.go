@@ -70,12 +70,9 @@ func TestWriteJSON_ValidOutput(t *testing.T) {
 		t.Errorf("Project.GoVersion = %q, want %q", report.Project.GoVersion, "1.21")
 	}
 
-	if report.OverallRisk != 30 {
-		t.Errorf("OverallRisk = %d, want %d", report.OverallRisk, 30)
-	}
-
-	if report.OverallLevel != "LOW" {
-		t.Errorf("OverallLevel = %q, want %q", report.OverallLevel, "LOW")
+	// Grading v2: the overall score/level are gone; with no grade supplied the grade block is null.
+	if report.Grade != nil {
+		t.Errorf("Grade = %+v, want nil when JSONOptions.Grade is nil", report.Grade)
 	}
 
 	// Verify GeneratedAt is present and valid
@@ -161,9 +158,6 @@ func TestWriteJSON_Dependencies(t *testing.T) {
 	if !dep1.Direct {
 		t.Errorf("Deps[0].Direct = false, want true")
 	}
-	if dep1.RiskScore != 20 {
-		t.Errorf("Deps[0].RiskScore = %d, want %d", dep1.RiskScore, 20)
-	}
 
 	// Check second dependency
 	dep2 := report.Deps[1]
@@ -175,9 +169,6 @@ func TestWriteJSON_Dependencies(t *testing.T) {
 	}
 	if dep2.Direct {
 		t.Errorf("Deps[1].Direct = true, want false")
-	}
-	if dep2.RiskScore != 50 {
-		t.Errorf("Deps[1].RiskScore = %d, want %d", dep2.RiskScore, 50)
 	}
 }
 
@@ -217,7 +208,6 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 	opts := JSONOptions{
 		GoVersion: "1.21",
 		CIReport:  nil,
-		Takeovers: nil,
 	}
 
 	var buf bytes.Buffer
@@ -252,7 +242,6 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 		t.Error("CI field should be nil, got non-nil value")
 	}
 
-	// Takeovers can be nil (omitempty in JSON output)
 }
 
 // TestWriteJSON_TestOnly_ConfirmedTrue verifies that a dep with IsTestOnly=&true
@@ -541,46 +530,7 @@ func TestWriteJSON_VulnerabilitiesPopulated(t *testing.T) {
 	}
 }
 
-// TestWriteJSON_CriticalRiskCount asserts that the JSON summary distinguishes
-// CRITICAL (>=76) from HIGH (51-75) — the plan 39 split.
-func TestWriteJSON_CriticalRiskCount(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{Path: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-		testutil.DepSpec{Path: "github.com/high/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 80,
-		OverallLevel: scorer.RiskCritical,
-		Dependencies: []*scorer.DependencyScore{
-			{Module: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, RiskScore: 90, RiskLevel: scorer.RiskCritical},
-			{Module: "github.com/high/pkg", Version: "v1.0.0", Direct: true, RiskScore: 60, RiskLevel: scorer.RiskHigh},
-		},
-		CriticalRiskCount: 1,
-		HighRiskCount:     1,
-	}
-
-	var buf bytes.Buffer
-	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
-		t.Fatalf("WriteJSON() failed: %v", err)
-	}
-
-	// Snapshot: the raw JSON must contain the new field key.
-	if !bytes.Contains(buf.Bytes(), []byte(`"critical_risk_count"`)) {
-		t.Errorf("JSON output missing critical_risk_count key, got:\n%s", buf.String())
-	}
-
-	var report JSONReport
-	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if report.Summary.CriticalRiskCount != 1 {
-		t.Errorf("Summary.CriticalRiskCount = %d, want 1", report.Summary.CriticalRiskCount)
-	}
-	if report.Summary.HighRiskCount != 1 {
-		t.Errorf("Summary.HighRiskCount = %d, want 1 (must not be conflated with critical)", report.Summary.HighRiskCount)
-	}
-}
+// TestWriteJSON_CriticalRiskCount removed: the per-level risk counts left the summary in Grading v2 (see json_grade_test.go).
 
 // TestWriteJSON_Reachability verifies that each reachability tier (called,
 // imported, required) is preserved in JSONVuln, and that empty Reachability
@@ -850,50 +800,7 @@ func TestWriteJSON_InBuildAndPlatforms(t *testing.T) {
 	}
 }
 
-// TestWriteJSON_HeadlineTiedWith verifies that tied_with reaches the JSON
-// headline candidate when set and is omitted otherwise, and that headline.reason
-// and the candidate reason agree.
-func TestWriteJSON_HeadlineTiedWith(t *testing.T) {
-	render := func(tiedWith int, reason string) map[string]interface{} {
-		ps := &scorer.ProjectScore{
-			OverallScore:      32,
-			OverallLevel:      scorer.RiskMedium,
-			HeadlineDriver:    "p95_dep_risk",
-			HeadlineCandidate: &scorer.HeadlineCandidate{Name: "p95_dep_risk", Score: 32, DrivingDep: "github.com/x/y", Reason: reason, TiedWith: tiedWith},
-			Dependencies: []*scorer.DependencyScore{
-				{Module: "github.com/x/y", Version: "v1.0.0", RiskScore: 32, RiskLevel: scorer.RiskMedium},
-			},
-		}
-		graph := testutil.MakeGraph(testutil.DepSpec{Path: "github.com/x/y", Version: "v1.0.0"})
-		var buf bytes.Buffer
-		if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
-			t.Fatalf("WriteJSON() failed: %v", err)
-		}
-		var raw struct {
-			Headline map[string]interface{} `json:"headline"`
-		}
-		if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
-			t.Fatalf("failed to unmarshal JSON: %v", err)
-		}
-		return raw.Headline
-	}
-
-	const tied = "p95 of dep risk scores (one of 4 modules at 32)"
-	h := render(3, tied)
-	cand := h["candidates"].([]interface{})[0].(map[string]interface{})
-	if cand["tied_with"] != float64(3) {
-		t.Errorf("candidate tied_with = %v, want 3", cand["tied_with"])
-	}
-	if h["reason"] != tied || cand["reason"] != tied {
-		t.Errorf("headline.reason = %v, candidate reason = %v, want both %q", h["reason"], cand["reason"], tied)
-	}
-
-	h = render(0, "p95 of dep risk scores")
-	cand = h["candidates"].([]interface{})[0].(map[string]interface{})
-	if _, ok := cand["tied_with"]; ok {
-		t.Errorf("candidate tied_with present for zero, want omitted")
-	}
-}
+// TestWriteJSON_HeadlineTiedWith removed: the headline object no longer exists in Grading v2 (see json_grade_test.go).
 
 // TestWriteJSON_Notes verifies that notes are emitted next to warnings and the
 // key is omitted when there are none.

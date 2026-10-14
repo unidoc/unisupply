@@ -39,7 +39,8 @@ func main() {
 		output                 string
 		verbose                bool
 		noColor                bool
-		minRisk                int
+		moduleVersion          string
+		responseHistory        bool
 		directOnly             bool
 		timeout                time.Duration
 		showHelp               bool
@@ -55,7 +56,6 @@ func main() {
 		trustIndexURL          string
 		trustIndexAllowPrivate bool
 		progressMode           string
-		debugScoring           bool
 		networkLog             bool
 		offlineMode            bool
 	)
@@ -64,7 +64,6 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
-	flag.IntVar(&minRisk, "min-risk", 0, "Only show dependencies with risk score >= this value (0-100)")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
 	flag.DurationVar(&timeout, "timeout", 30*time.Second, "HTTP request timeout")
 	flag.BoolVarP(&showHelp, "help", "h", false, "Show help")
@@ -82,7 +81,8 @@ func main() {
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
 	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
 	flag.BoolVar(&offlineMode, "offline", false, "Make no network requests; scanners that need the network degrade to UNKNOWN with a warning")
-	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
+	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
+	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
 
@@ -121,7 +121,8 @@ func main() {
 		output:                 output,
 		verbose:                verbose,
 		noColor:                noColor,
-		minRisk:                minRisk,
+		moduleVersion:          moduleVersion,
+		responseHistory:        responseHistory,
 		directOnly:             directOnly,
 		timeout:                timeout,
 		scanWorkflows:          scanWorkflows,
@@ -135,7 +136,6 @@ func main() {
 		trustIndexURL:          trustIndexURL,
 		trustIndexAllowPrivate: trustIndexAllowPrivate,
 		progressMode:           progressMode,
-		debugScoring:           debugScoring,
 		networkLog:             networkLog,
 		offlineMode:            offlineMode,
 	}
@@ -161,7 +161,8 @@ type runConfig struct {
 	output                 string
 	verbose                bool
 	noColor                bool
-	minRisk                int
+	moduleVersion          string
+	responseHistory        bool
 	directOnly             bool
 	timeout                time.Duration
 	scanWorkflows          bool
@@ -175,7 +176,6 @@ type runConfig struct {
 	trustIndexURL          string
 	trustIndexAllowPrivate bool
 	progressMode           string
-	debugScoring           bool
 	networkLog             bool
 	offlineMode            bool
 }
@@ -263,13 +263,14 @@ func run(cfg *runConfig) error {
 		ScanWorkflows:          cfg.scanWorkflows,
 		ScanCI:                 cfg.scanCI,
 		WorkflowPath:           cfg.workflowPath,
-		DebugScoring:           cfg.debugScoring,
+		SelfVersion:            cfg.moduleVersion,
+		ResponseHistory:        cfg.responseHistory,
 	})
 	if err != nil {
 		return err
 	}
 
-	if len(scanResult.Graph.Dependencies) == 0 {
+	if len(scanResult.Graph.Dependencies) == 0 && cfg.moduleVersion == "" {
 		fmt.Fprintln(os.Stderr, "No dependencies found.")
 		return nil
 	}
@@ -278,7 +279,7 @@ func run(cfg *runConfig) error {
 	graph := scanResult.Graph
 	projectScore := scanResult.ProjectScore
 	ciReport := scanResult.CIReport
-	takeovers := scanResult.Takeovers
+	gradeResult := scanResult.Grade
 	stdlibVulns := scanResult.StdlibVulns
 	maintainers := scanResult.Maintainers
 	typosquats := scanResult.Typosquats
@@ -297,7 +298,7 @@ func run(cfg *runConfig) error {
 		cfg.output = "unisupply-report.pdf"
 	}
 
-	sbomOpts := report.SBOMOptions{GoVersion: gomod.GoVersion}
+	sbomOpts := report.SBOMOptions{GoVersion: gomod.GoVersion, Grade: gradeResult}
 
 	// Only open a progress stage when the report writer targets a file (or
 	// is the PDF writer, which writes to its own file). Streaming text/json/
@@ -318,11 +319,10 @@ func run(cfg *runConfig) error {
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
 			NoColor:         cfg.noColor,
 			Verbose:         cfg.verbose,
-			MinRisk:         cfg.minRisk,
 			Writer:          writer,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
 		})
 	case "json":
@@ -330,7 +330,7 @@ func run(cfg *runConfig) error {
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
 		}, writer)
 	case "pdf":
@@ -339,7 +339,7 @@ func run(cfg *runConfig) error {
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
 		})
 	case "sbom-cyclonedx":
@@ -383,6 +383,7 @@ func run(cfg *runConfig) error {
 
 		result := pol.Evaluate(policy.EvalInput{
 			ProjectScore:    projectScore,
+			Grade:           gradeResult,
 			Maintainers:     maintainers,
 			Typosquats:      typosquats,
 			CIReport:        ciReport,
@@ -418,7 +419,7 @@ func printUsage() {
 	fmt.Println("  unisupply -f pdf                             # Generate PDF risk report")
 	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
 	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
-	fmt.Println("  unisupply --min-risk 50                      # Only show medium+ risk deps")
+	fmt.Println("  unisupply --module-version v1.4.0            # Also grade the module itself at a published version")
 	fmt.Println("  unisupply --scan-workflows                   # Include GitHub Actions audit")
 	fmt.Println("  unisupply --scan-ci                          # Full CI/CD pipeline scan")
 	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
@@ -426,7 +427,6 @@ func printUsage() {
 	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if token missing or invalid")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
-	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
 	fmt.Println("  unisupply --network-log 2>net.log            # Log every outbound request to stderr")
 	fmt.Println("  unisupply --offline                          # Air-gapped scan; no network requests")
 	fmt.Println("  unisupply --offline --network-log 2>net.log  # Prove the scan made no requests")

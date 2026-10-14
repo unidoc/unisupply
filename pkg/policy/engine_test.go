@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -21,6 +22,7 @@ func makeEvalInput(deps []*scorer.DependencyScore, overallScore int) policy.Eval
 	}
 	return policy.EvalInput{
 		ProjectScore: ps,
+		Grade:        &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA},
 		Maintainers:  make(map[string]*scanner.MaintainerInfo),
 		Typosquats:   make(map[string]*scanner.TyposquatResult),
 		CIReport:     nil,
@@ -33,8 +35,8 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	policyPath := filepath.Join(tempDir, "policy.json")
 
 	policyData := map[string]interface{}{
-		"max_risk_score":          75,
-		"max_overall_score":       60,
+		"max_grade":               "C",
+		"allow_pending":           true,
 		"no_known_vulns":          true,
 		"no_critical_vulns":       true,
 		"no_single_maintainer":    true,
@@ -67,11 +69,8 @@ func TestLoadPolicy_ValidJSON(t *testing.T) {
 	if p == nil {
 		t.Fatal("policy is nil")
 	}
-	if p.MaxRiskScore == nil || *p.MaxRiskScore != 75 {
-		t.Errorf("MaxRiskScore: expected 75, got %v", p.MaxRiskScore)
-	}
-	if p.MaxOverallScore == nil || *p.MaxOverallScore != 60 {
-		t.Errorf("MaxOverallScore: expected 60, got %v", p.MaxOverallScore)
+	if p.MaxGrade != "C" || !p.AllowPending {
+		t.Errorf("MaxGrade/AllowPending: expected C/true, got %q/%v", p.MaxGrade, p.AllowPending)
 	}
 	if !p.NoKnownVulns {
 		t.Errorf("NoKnownVulns: expected true, got %v", p.NoKnownVulns)
@@ -171,11 +170,8 @@ func TestLoadPolicy_FileNotFound(t *testing.T) {
 func TestDefaultStrictPolicy(t *testing.T) {
 	p := policy.DefaultStrictPolicy()
 
-	if p.MaxRiskScore == nil || *p.MaxRiskScore != 70 {
-		t.Errorf("MaxRiskScore: expected 70, got %v", p.MaxRiskScore)
-	}
-	if p.MaxOverallScore == nil || *p.MaxOverallScore != 50 {
-		t.Errorf("MaxOverallScore: expected 50, got %v", p.MaxOverallScore)
+	if p.MaxGrade != "B" {
+		t.Errorf("MaxGrade: expected B, got %q", p.MaxGrade)
 	}
 	if !p.NoCriticalVulns {
 		t.Errorf("NoCriticalVulns: expected true")
@@ -209,11 +205,8 @@ func TestDefaultStrictPolicy(t *testing.T) {
 func TestDefaultModeratePolicy(t *testing.T) {
 	p := policy.DefaultModeratePolicy()
 
-	if p.MaxRiskScore == nil || *p.MaxRiskScore != 85 {
-		t.Errorf("MaxRiskScore: expected 85, got %v", p.MaxRiskScore)
-	}
-	if p.MaxOverallScore == nil || *p.MaxOverallScore != 70 {
-		t.Errorf("MaxOverallScore: expected 70, got %v", p.MaxOverallScore)
+	if p.MaxGrade != "C" {
+		t.Errorf("MaxGrade: expected C, got %q", p.MaxGrade)
 	}
 	if !p.NoCriticalVulns {
 		t.Errorf("NoCriticalVulns: expected true")
@@ -255,71 +248,75 @@ func TestEvaluate_AllPass(t *testing.T) {
 	}
 }
 
-// Tests for Evaluate - MaxRiskScore
-func TestEvaluate_MaxRiskScore(t *testing.T) {
-	maxScore := 70
-	p := &policy.Policy{MaxRiskScore: &maxScore}
+// Tests for Evaluate - MaxGrade
+func gradeOf(l grade.Letter, module, reason string) *grade.Result {
+	r := &grade.Result{RuleVersion: grade.RuleVersion, Letter: l}
+	if module != "" {
+		r.Deciding = &grade.Deciding{Module: module, Reason: reason}
+	}
+	return r
+}
 
-	deps := []*scorer.DependencyScore{
-		{
-			Module:      "github.com/high-risk/pkg",
-			Version:     "v1.0.0",
-			Direct:      true,
-			RiskScore:   80,
-			Vulns:       []scanner.Vulnerability{},
-			Maintenance: &scanner.MaintenanceInfo{},
-		},
-	}
-
-	input := makeEvalInput(deps, 80)
-	result := p.Evaluate(input)
-
-	if result.Pass {
-		t.Errorf("expected Pass=false, got true")
-	}
-	if len(result.Violations) != 1 {
-		t.Errorf("expected 1 violation, got %d", len(result.Violations))
-	}
-	if result.Violations[0].Rule != "max_risk_score" {
-		t.Errorf("expected rule 'max_risk_score', got %s", result.Violations[0].Rule)
-	}
-	if result.Violations[0].Module != "github.com/high-risk/pkg" {
-		t.Errorf("expected module 'github.com/high-risk/pkg', got %s", result.Violations[0].Module)
-	}
-	if !strings.Contains(result.Violations[0].Detail, "80") || !strings.Contains(result.Violations[0].Detail, "70") {
-		t.Errorf("expected detail to contain scores 80 and 70, got: %s", result.Violations[0].Detail)
+func TestEvaluate_MaxGrade(t *testing.T) {
+	p := &policy.Policy{MaxGrade: "C"}
+	for _, c := range []struct {
+		l    grade.Letter
+		pass bool
+	}{{grade.LetterA, true}, {grade.LetterB, true}, {grade.LetterC, true}, {grade.LetterD, false}, {grade.LetterF, false}} {
+		input := makeEvalInput(nil, 0)
+		input.Grade = gradeOf(c.l, "github.com/x/y", "called high GO-2026-1 (70)")
+		result := p.Evaluate(input)
+		if result.Pass != c.pass {
+			t.Errorf("grade %s against max C: Pass=%v, want %v", c.l, result.Pass, c.pass)
+		}
+		if !c.pass {
+			v := result.Violations[0]
+			if v.Rule != "max_grade" || v.Module != "github.com/x/y" || !strings.Contains(v.Detail, "worse than the maximum C") || !strings.Contains(v.Detail, "called high GO-2026-1 (70)") {
+				t.Errorf("violation %+v: it must name the rule, the deciding row and why", v)
+			}
+		}
 	}
 }
 
-// Tests for Evaluate - MaxOverallScore
-func TestEvaluate_MaxOverallScore(t *testing.T) {
-	maxScore := 50
-	p := &policy.Policy{MaxOverallScore: &maxScore}
+func TestEvaluate_MaxGrade_PendingFailsUnlessAllowed(t *testing.T) {
+	pending := &grade.Result{RuleVersion: grade.RuleVersion, Pending: &grade.Pending{Check: "vulnerability_scan", Reason: "govulncheck did not run"}}
+	input := makeEvalInput(nil, 0)
+	input.Grade = pending
 
-	deps := []*scorer.DependencyScore{
-		{
-			Module:      "github.com/example/pkg",
-			Version:     "v1.0.0",
-			Direct:      true,
-			RiskScore:   30,
-			Maintenance: &scanner.MaintenanceInfo{},
-		},
+	result := (&policy.Policy{MaxGrade: "F"}).Evaluate(input)
+	if result.Pass || len(result.Violations) != 1 || result.Violations[0].Severity != "error" || !strings.Contains(result.Violations[0].Detail, "Pending") {
+		t.Errorf("a Pending grade must fail even the most lenient maximum: %+v", result)
 	}
+	result = (&policy.Policy{MaxGrade: "A", AllowPending: true}).Evaluate(input)
+	if !result.Pass || len(result.Violations) != 1 || result.Violations[0].Severity != "warning" {
+		t.Errorf("allow_pending turns it into a warning: %+v", result)
+	}
+	// no grade at all is the same as Pending
+	input.Grade = nil
+	if result := (&policy.Policy{MaxGrade: "F"}).Evaluate(input); result.Pass {
+		t.Error("a missing grade passed the gate")
+	}
+}
 
-	input := makeEvalInput(deps, 60)
-	result := p.Evaluate(input)
-
-	if result.Pass {
-		t.Errorf("expected Pass=false, got true")
+func TestEvaluate_MaxGrade_InvalidLetter(t *testing.T) {
+	input := makeEvalInput(nil, 0)
+	input.Grade = gradeOf(grade.LetterA, "", "")
+	if result := (&policy.Policy{MaxGrade: "Z"}).Evaluate(input); result.Pass {
+		t.Error("an unknown letter must fail, not pass silently")
 	}
-	if len(result.Violations) != 1 {
-		t.Errorf("expected 1 violation, got %d", len(result.Violations))
+	path := filepath.Join(t.TempDir(), "p.json")
+	if err := os.WriteFile(path, []byte(`{"max_grade":"E"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if result.Violations[0].Rule != "max_overall_score" {
-		t.Errorf("expected rule 'max_overall_score', got %s", result.Violations[0].Rule)
+	if _, err := policy.LoadPolicy(path); err == nil || !strings.Contains(err.Error(), "max_grade") {
+		t.Errorf("LoadPolicy accepted max_grade E: %v", err)
 	}
-	if !strings.Contains(result.Violations[0].Detail, "60") || !strings.Contains(result.Violations[0].Detail, "50") {
-		t.Errorf("expected detail to contain scores 60 and 50, got: %s", result.Violations[0].Detail)
+	// the old score rules are gone: an old policy file fails loudly instead of being ignored
+	if err := os.WriteFile(path, []byte(`{"max_overall_score":60}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policy.LoadPolicy(path); err == nil {
+		t.Error("a policy with max_overall_score was accepted")
 	}
 }
 
@@ -1171,11 +1168,8 @@ func TestEvaluate_MaxCIScore_NilReport(t *testing.T) {
 
 // Tests for Evaluate - Multiple Violations
 func TestEvaluate_MultipleViolations(t *testing.T) {
-	maxRisk := 70
-	maxOverall := 50
 	p := &policy.Policy{
-		MaxRiskScore:       &maxRisk,
-		MaxOverallScore:    &maxOverall,
+		MaxGrade:           "C",
 		NoKnownVulns:       true,
 		NoCriticalVulns:    true,
 		NoSingleMaintainer: true,
@@ -1196,6 +1190,7 @@ func TestEvaluate_MultipleViolations(t *testing.T) {
 	}
 
 	input := makeEvalInput(deps, 60)
+	input.Grade = gradeOf(grade.LetterF, "github.com/bad/pkg", "called critical (90)")
 	input.Maintainers["github.com/bad/pkg"] = &scanner.MaintainerInfo{
 		BusFactor:        1,
 		ContributorCount: 1,
@@ -1206,10 +1201,9 @@ func TestEvaluate_MultipleViolations(t *testing.T) {
 	if result.Pass {
 		t.Errorf("expected Pass=false, got true")
 	}
-	// Should have violations for: MaxOverallScore, MaxRiskScore, NoKnownVulns, NoCriticalVulns (CRITICAL), NoSingleMaintainer
-	// At least 5 violations
-	if len(result.Violations) < 5 {
-		t.Errorf("expected at least 5 violations, got %d", len(result.Violations))
+	// Should have violations for: MaxGrade, NoKnownVulns, NoCriticalVulns (CRITICAL), NoSingleMaintainer
+	if len(result.Violations) < 4 {
+		t.Errorf("expected at least 4 violations, got %d", len(result.Violations))
 	}
 
 	rules := make(map[string]int)
@@ -1217,11 +1211,8 @@ func TestEvaluate_MultipleViolations(t *testing.T) {
 		rules[v.Rule]++
 	}
 
-	if rules["max_overall_score"] == 0 {
-		t.Error("expected max_overall_score violation")
-	}
-	if rules["max_risk_score"] == 0 {
-		t.Error("expected max_risk_score violation")
+	if rules["max_grade"] == 0 {
+		t.Error("expected max_grade violation")
 	}
 	if rules["no_known_vulns"] == 0 {
 		t.Error("expected no_known_vulns violation")

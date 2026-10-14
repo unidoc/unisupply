@@ -434,6 +434,31 @@ type osvResponse struct {
 	} `json:"database_specific"`
 }
 
+// severityTier resolves the severity tier of an OSV record: the Go vuln DB's
+// database_specific.severity first, then the first scorable CVSS v3 vector.
+// Empty when the record publishes neither.
+func (o *osvResponse) severityTier() string {
+	// Prefer database_specific.severity (Go vuln DB convention).
+	if o.DatabaseSpecific != nil && o.DatabaseSpecific.Severity != "" {
+		if tier := cvssStringToTier(o.DatabaseSpecific.Severity); tier != "" {
+			return tier
+		}
+	}
+
+	// Fall through to severity[].score if database_specific didn't have it.
+	for _, s := range o.Severity {
+		// Only CVSS v3 is scored. v4 and v2 entries are skipped so they
+		// never reach the parser, and a 0.0 score ("None") is not a tier.
+		if s.Type != "CVSS_V3" || strings.HasPrefix(s.Score, "CVSS:4") || strings.HasPrefix(s.Score, "AV:") {
+			continue
+		}
+		if score, parsed := parseCVSSScore(s.Score); parsed && score > 0 {
+			return cvssScoreToTier(score)
+		}
+	}
+	return ""
+}
+
 // fetchOSV queries https://api.osv.dev/v1/vulns/{id} and returns an
 // enrichResult. ok is true when OSV answered authoritatively: HTTP 200 with a
 // parseable body, or HTTP 404 (no such record, result nil). ok is false on a
@@ -463,27 +488,7 @@ func (e *VulnEnricher) fetchOSV(ctx context.Context, id string) (result *enrichR
 		return nil, false, warnings
 	}
 
-	result = &enrichResult{}
-
-	// Prefer database_specific.severity (Go vuln DB convention).
-	if osv.DatabaseSpecific != nil && osv.DatabaseSpecific.Severity != "" {
-		result.Severity = cvssStringToTier(osv.DatabaseSpecific.Severity)
-	}
-
-	// Fall through to severity[].score if database_specific didn't have it.
-	if result.Severity == "" {
-		for _, s := range osv.Severity {
-			// Only CVSS v3 is scored. v4 and v2 entries are skipped so they
-			// never reach the parser, and a 0.0 score ("None") is not a tier.
-			if s.Type != "CVSS_V3" || strings.HasPrefix(s.Score, "CVSS:4") || strings.HasPrefix(s.Score, "AV:") {
-				continue
-			}
-			if score, parsed := parseCVSSScore(s.Score); parsed && score > 0 {
-				result.Severity = cvssScoreToTier(score)
-				break
-			}
-		}
-	}
+	result = &enrichResult{Severity: osv.severityTier()}
 
 	if osv.Published != "" {
 		if t, err := time.Parse(time.RFC3339, osv.Published); err == nil {

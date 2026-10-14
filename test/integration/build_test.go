@@ -275,17 +275,17 @@ func TestBuildClassification_CobraGo115(t *testing.T) {
 		t.Fatalf("WriteJSON failed: %v", err)
 	}
 	var out struct {
-		Headline struct {
-			Driver      string `json:"driver"`
-			DrivingItem string `json:"driving_item"`
-		} `json:"headline"`
 		Deps []map[string]any `json:"dependencies"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
 		t.Fatalf("unmarshal JSON: %v", err)
 	}
-	if out.Headline.Driver != "p95_dep_risk" || out.Headline.DrivingItem != mousetrap {
-		t.Errorf("headline = %+v, want p95_dep_risk / %s", out.Headline, mousetrap)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal JSON: %v", err)
+	}
+	if _, ok := raw["headline"]; ok {
+		t.Error("the legacy headline object is no longer published")
 	}
 
 	byModule := make(map[string]map[string]any, len(out.Deps))

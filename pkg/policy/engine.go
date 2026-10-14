@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -20,11 +21,13 @@ import (
 // keep them in sync when fields change here. DefaultStrictPolicy and
 // DefaultModeratePolicy below define the values mirrored by the first two.
 type Policy struct {
-	// MaxRiskScore fails if any dependency exceeds this score (0-100).
-	MaxRiskScore *int `json:"max_risk_score,omitempty"`
+	// MaxGrade is the worst letter the project may have, "A" to "F": "C" fails a D or an F. A grade that is Pending
+	// (a check the grade needs did not run) FAILS this rule unless AllowPending is set, since a gate must not pass on
+	// "no result".
+	MaxGrade string `json:"max_grade,omitempty"`
 
-	// MaxOverallScore fails if the overall project score exceeds this.
-	MaxOverallScore *int `json:"max_overall_score,omitempty"`
+	// AllowPending lets a Pending grade pass MaxGrade. The violation is then a warning, not an error.
+	AllowPending bool `json:"allow_pending,omitempty"`
 
 	// NoKnownVulns fails if any dependency has known vulnerabilities.
 	NoKnownVulns bool `json:"no_known_vulns,omitempty"`
@@ -128,12 +131,28 @@ func LoadPolicy(path string) (*Policy, error) {
 		return nil, fmt.Errorf("parsing policy file: %w", err)
 	}
 
+	if err := p.validate(); err != nil {
+		return nil, fmt.Errorf("policy file: %w", err)
+	}
 	return &p, nil
+}
+
+// validate rejects a max_grade that is not a letter from A to F.
+func (p *Policy) validate() error {
+	if p.MaxGrade == "" {
+		return nil
+	}
+	switch grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade))) {
+	case grade.LetterA, grade.LetterB, grade.LetterC, grade.LetterD, grade.LetterF:
+		return nil
+	}
+	return fmt.Errorf("max_grade %q is not one of A, B, C, D, F", p.MaxGrade)
 }
 
 // EvalInput bundles all data needed for policy evaluation.
 type EvalInput struct {
 	ProjectScore    *scorer.ProjectScore
+	Grade           *grade.Result
 	Maintainers     map[string]*scanner.MaintainerInfo
 	Typosquats      map[string]*scanner.TyposquatResult
 	CIReport        *scanner.CIReport
@@ -145,20 +164,10 @@ func (p *Policy) Evaluate(input EvalInput) *Result {
 	result := &Result{Pass: true}
 	ps := input.ProjectScore
 
-	// Overall project score.
-	if p.MaxOverallScore != nil && ps.OverallScore > *p.MaxOverallScore {
-		result.addError("max_overall_score", "",
-			fmt.Sprintf("overall risk score %d exceeds maximum %d", ps.OverallScore, *p.MaxOverallScore))
-	}
+	p.evalGrade(input.Grade, result)
 
 	// Per-dependency checks.
 	for _, ds := range ps.Dependencies {
-		// Max risk score.
-		if p.MaxRiskScore != nil && ds.RiskScore > *p.MaxRiskScore {
-			result.addError("max_risk_score", ds.Module,
-				fmt.Sprintf("risk score %d exceeds maximum %d", ds.RiskScore, *p.MaxRiskScore))
-		}
-
 		// No known vulns.
 		if p.NoKnownVulns && len(ds.Vulns) > 0 {
 			ids := make([]string, 0, len(ds.Vulns))
@@ -314,6 +323,10 @@ func isConfirmedOutsideBuild(ds *scorer.DependencyScore) bool {
 	return ds.InBuild != nil && !*ds.InBuild
 }
 
+func (r *Result) addWarning(rule, module, detail string) {
+	r.Violations = append(r.Violations, Violation{Rule: rule, Module: module, Detail: detail, Severity: "warning"})
+}
+
 func (r *Result) addError(rule, module, detail string) {
 	r.Pass = false
 	r.Violations = append(r.Violations, Violation{
@@ -363,14 +376,11 @@ func (r *Result) FormatJSON() (string, error) {
 
 // DefaultStrictPolicy returns a strict policy suitable for production use.
 func DefaultStrictPolicy() *Policy {
-	maxRisk := 70
-	maxOverall := 50
 	maxUnmaintained := 24
 	maxCI := 50
 
 	return &Policy{
-		MaxRiskScore:          &maxRisk,
-		MaxOverallScore:       &maxOverall,
+		MaxGrade:              "B",
 		NoCriticalVulns:       true,
 		NoSingleMaintainer:    true,
 		NoUnmaintainedMonths:  &maxUnmaintained,
@@ -385,13 +395,44 @@ func DefaultStrictPolicy() *Policy {
 
 // DefaultModeratePolicy returns a moderate policy for general use.
 func DefaultModeratePolicy() *Policy {
-	maxRisk := 85
-	maxOverall := 70
-
 	return &Policy{
-		MaxRiskScore:    &maxRisk,
-		MaxOverallScore: &maxOverall,
+		MaxGrade:        "C",
 		NoCriticalVulns: true,
 		NoArchived:      true,
+	}
+}
+
+// evalGrade checks MaxGrade against the grade: the letter, or Pending. A letter further from A than the allowed one
+// fails; the violation names the row that decided it.
+func (p *Policy) evalGrade(g *grade.Result, result *Result) {
+	if p.MaxGrade == "" {
+		return
+	}
+	if err := p.validate(); err != nil {
+		result.addError("max_grade", "", err.Error())
+		return
+	}
+	max := grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade)))
+	if g == nil || g.Letter == "" {
+		reason := "grading did not run"
+		if g != nil && g.Pending != nil {
+			reason = g.Pending.Reason
+		}
+		detail := fmt.Sprintf("the grade is Pending (%s), so it cannot be checked against maximum %s", reason, max)
+		if p.AllowPending {
+			result.addWarning("max_grade", "", detail)
+		} else {
+			result.addError("max_grade", "", detail)
+		}
+		return
+	}
+	if g.Letter > max {
+		detail := fmt.Sprintf("grade %s is worse than the maximum %s", g.Letter, max)
+		module := ""
+		if g.Deciding != nil {
+			detail += ": " + g.Deciding.Reason
+			module = g.Deciding.Module
+		}
+		result.addError("max_grade", module, detail)
 	}
 }

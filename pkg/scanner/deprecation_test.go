@@ -149,7 +149,7 @@ func TestMaintenanceScanner_GoModDiskCache(t *testing.T) {
 		ms.proxyURL = srv.URL
 		ms.diskCache = newMaintainerCache(dir, time.Hour)
 		info := &MaintenanceInfo{}
-		ms.checkGoModDeprecation(context.Background(), "github.com/golang/protobuf", "v1.5.4", info)
+		ms.checkGoModDeprecation(context.Background(), "github.com/golang/protobuf", "v1.5.4", "v1.5.4", info)
 		return info
 	}
 

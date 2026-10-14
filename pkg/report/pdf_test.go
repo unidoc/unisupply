@@ -15,79 +15,6 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-// TestFilterRiskBucket_FourLevelSplit confirms each scoring bucket gets exactly
-// the deps it should. Guards against the pre-plan-39 bug where the HIGH band
-// (51-75) was swallowed into the Medium section.
-func TestFilterRiskBucket_FourLevelSplit(t *testing.T) {
-	deps := []*scorer.DependencyScore{
-		{Module: "low/zero", RiskScore: 0},
-		{Module: "low/edge", RiskScore: 25},
-		{Module: "med/edge", RiskScore: 26},
-		{Module: "med/top", RiskScore: 50},
-		{Module: "high/edge", RiskScore: 51},
-		{Module: "high/top", RiskScore: 75},
-		{Module: "crit/edge", RiskScore: 76},
-		{Module: "crit/max", RiskScore: 100},
-	}
-
-	tests := []struct {
-		name        string
-		min, max    int
-		wantModules []string
-	}{
-		{"critical", 76, 0, []string{"crit/edge", "crit/max"}},
-		{"high", 51, 76, []string{"high/edge", "high/top"}},
-		{"medium", 26, 51, []string{"med/edge", "med/top"}},
-		{"low", 0, 26, []string{"low/zero", "low/edge"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := filterRiskBucket(deps, tc.min, tc.max)
-			if len(got) != len(tc.wantModules) {
-				t.Fatalf("filterRiskBucket(%d,%d) returned %d deps, want %d",
-					tc.min, tc.max, len(got), len(tc.wantModules))
-			}
-			for i, ds := range got {
-				if ds.Module != tc.wantModules[i] {
-					t.Errorf("got[%d].Module = %q, want %q", i, ds.Module, tc.wantModules[i])
-				}
-			}
-		})
-	}
-}
-
-// TestFilterRiskBucket_NoOverlap ensures the four buckets partition the score
-// space exactly: every dep lands in one and only one bucket, and the union
-// matches the input set.
-func TestFilterRiskBucket_NoOverlap(t *testing.T) {
-	var deps []*scorer.DependencyScore
-	for score := 0; score <= 100; score++ {
-		deps = append(deps, &scorer.DependencyScore{RiskScore: score})
-	}
-
-	crit := filterRiskBucket(deps, 76, 0)
-	high := filterRiskBucket(deps, 51, 76)
-	med := filterRiskBucket(deps, 26, 51)
-	low := filterRiskBucket(deps, 0, 26)
-
-	if total := len(crit) + len(high) + len(med) + len(low); total != len(deps) {
-		t.Errorf("bucket sizes sum to %d, want %d (no overlap, full coverage)", total, len(deps))
-	}
-	if len(crit) != 25 { // 76..100
-		t.Errorf("critical bucket = %d, want 25", len(crit))
-	}
-	if len(high) != 25 { // 51..75
-		t.Errorf("high bucket = %d, want 25", len(high))
-	}
-	if len(med) != 25 { // 26..50
-		t.Errorf("medium bucket = %d, want 25", len(med))
-	}
-	if len(low) != 26 { // 0..25
-		t.Errorf("low bucket = %d, want 26", len(low))
-	}
-}
-
 // TestWriteDependencyBlock_ReachabilitySmoke verifies that writeDependencyBlock
 // does not panic when vulnerabilities carry all three reachability tiers.
 // This exercises the inline tag code path added in task-07.
@@ -119,13 +46,13 @@ func TestWriteDependencyBlock_ReachabilitySmoke(t *testing.T) {
 	}
 
 	// Must not panic.
-	writeDependencyBlock(c, ds, regular, bold, true)
+	writeDependencyBlock(c, ds, "C", regular, bold, true)
 }
 
-// TestWriteLowRiskSection_VulnDetailSmoke verifies that a low-risk dependency
+// TestWriteDependencyFindings_VulnDetailSmoke verifies that a low-risk dependency
 // carrying a vulnerability gets its CVE detail rendered, and that the
 // section as a whole does not panic when mixed with a clean dependency.
-func TestWriteLowRiskSection_VulnDetailSmoke(t *testing.T) {
+func TestWriteDependencyFindings_VulnDetailSmoke(t *testing.T) {
 	_ = initLicense()
 
 	c := creator.New()
@@ -157,81 +84,7 @@ func TestWriteLowRiskSection_VulnDetailSmoke(t *testing.T) {
 	}
 
 	// Must not panic.
-	writeLowRiskSection(c, ps, regular, bold)
-}
-
-// TestWriteVulnDetailBlocks_SkipsCleanDeps documents the contract that the
-// shared helper is a no-op (draws nothing) when the bucket has no
-// vulnerability-bearing deps.
-func TestWriteVulnDetailBlocks_SkipsCleanDeps(t *testing.T) {
-	_ = initLicense()
-
-	c := creator.New()
-	c.SetPageSize(creator.PageSizeLetter)
-	c.SetPageMargins(50, 50, 50, 50)
-	c.NewPage()
-
-	regular, _ := model.NewStandard14Font(model.HelveticaName)
-	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
-
-	bucket := []*scorer.DependencyScore{
-		{Module: "github.com/example/clean-a", Version: "v1.0.0", RiskScore: 5, RiskLevel: scorer.RiskLow},
-		{Module: "github.com/example/clean-b", Version: "v2.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow},
-	}
-
-	// Must not panic and must draw nothing extra.
-	writeVulnDetailBlocks(c, bucket, regular, bold)
-}
-
-// TestEPSSBadge verifies the badge renders the EPSS score (exploitation
-// probability, the signal the scorer acts on) — not the percentile — and that
-// tiny non-zero scores are shown as "<1%" instead of a misleading "0%".
-func TestEPSSBadge(t *testing.T) {
-	score := 0.42
-	percentile := 0.97
-	tiny := 0.004
-	zero := 0.0
-	cases := []struct {
-		name string
-		vuln scanner.Vulnerability
-		want string
-	}{
-		{"no score", scanner.Vulnerability{}, ""},
-		{"uses score not percentile", scanner.Vulnerability{EPSSScore: &score, EPSSPercentile: &percentile}, " [EPSS 42%]"},
-		{"tiny score", scanner.Vulnerability{EPSSScore: &tiny}, " [EPSS <1%]"},
-		{"zero score", scanner.Vulnerability{EPSSScore: &zero}, " [EPSS 0%]"},
-	}
-	for _, tc := range cases {
-		if got := epssBadge(&tc.vuln); got != tc.want {
-			t.Errorf("%s: epssBadge = %q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
-// TestPDFHeadlineText_Unscored covers the PDF rendering of an UNKNOWN headline.
-// This path is only reachable when an ONLINE scan's govulncheck fails, since
-// --offline rejects --format pdf — so it gets no coverage from an offline run,
-// and a PDF is the artifact most likely to be forwarded to someone who never
-// saw the scan output.
-func TestPDFHeadlineText_Unscored(t *testing.T) {
-	unscored := &scorer.ProjectScore{OverallScore: 26, OverallLevel: scorer.RiskUnknown}
-	got := pdfHeadlineText(unscored)
-	if !strings.Contains(got, "UNKNOWN") || !strings.Contains(got, "indicative: 26/100") {
-		t.Errorf("pdfHeadlineText() = %q, want UNKNOWN with an indicative score", got)
-	}
-	if strings.Contains(got, "26/100 (UNKNOWN)") {
-		t.Errorf("pdfHeadlineText() = %q; the band must lead, not the number", got)
-	}
-
-	scored := &scorer.ProjectScore{OverallScore: 45, OverallLevel: scorer.RiskMedium}
-	if want := "45/100 (MEDIUM)"; pdfHeadlineText(scored) != want {
-		t.Errorf("pdfHeadlineText() = %q, want %q", pdfHeadlineText(scored), want)
-	}
-
-	// Grey, not the default green: an unscored headline must not read as a pass.
-	if pdfRiskColor(scorer.RiskUnknown) == pdfRiskColor(scorer.RiskLow) {
-		t.Error("UNKNOWN renders in the same colour as LOW")
-	}
+	writeDependencyFindings(c, ps, nil, regular, bold)
 }
 
 // TestPDFTimeBombRows verifies the PDF lists each time bomb with its module,
@@ -316,7 +169,7 @@ func TestWriteDependencyBlock_CallTraceSmoke(t *testing.T) {
 	}
 
 	// Must not panic.
-	writeDependencyBlock(c, ds, regular, bold, true)
+	writeDependencyBlock(c, ds, "C", regular, bold, true)
 }
 
 // requirePDFLicense skips a test that writes a PDF when no UniPDF license key
@@ -356,7 +209,7 @@ func TestWriteDependencyBlock_ReachedViaExtraction(t *testing.T) {
 		RiskScore: 80, RiskLevel: scorer.RiskCritical,
 		Vulns: []scanner.Vulnerability{v},
 	}
-	writeDependencyBlock(c, ds, regular, bold, true)
+	writeDependencyBlock(c, ds, "C", regular, bold, true)
 
 	var buf bytes.Buffer
 	if err := c.Write(&buf); err != nil {

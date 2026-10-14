@@ -169,6 +169,27 @@ type Vulnerability struct {
 	// DaysUnpatched is the number of days since a fix was available.
 	// Zero when no fix exists or the fix date is unknown.
 	DaysUnpatched int `json:"days_unpatched,omitempty"`
+
+	// FixReleasedAt is when the first fixed version was RELEASED: the later of the advisory's publication
+	// (FixPublishedAt) and the time the Go module proxy gives that version. FixPublishedAt alone is the
+	// advisory's date, which can be days before the fixed version exists. Nil when there is no fix or no
+	// date could be found; FixDateSource then says why it is unknown ("" with no fix).
+	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
+
+	// FixDateSource records where FixReleasedAt came from: "module_proxy" (the proxy's time for the first
+	// fixed version, which was later than or equal to the advisory's date), "advisory" (the advisory's
+	// publication date was the later one, or the proxy had no time for that version), or "" (unknown).
+	FixDateSource string `json:"fix_date_source,omitempty"`
+
+	// AffectedPackages lists the import paths within the module that the advisory names (OSV
+	// affected[].ecosystem_specific.imports[].path), so a report can say "only if you import X". Empty when
+	// the advisory names none (it affects the whole module).
+	AffectedPackages []string `json:"affected_packages,omitempty"`
+
+	// Condition says in one short sentence what the project must do to reach a called vulnerability, when
+	// that can be read from the call path ("reached through gin.Context.Render"). Empty when there is no
+	// path or no condition can be named. It is evidence, not a promise of exploitability.
+	Condition string `json:"condition,omitempty"`
 }
 
 // CallFrame is one entry of Vulnerability.CallTrace, index-aligned with
@@ -364,6 +385,70 @@ func compareFramePositions(a, b []CallFrame) int {
 		}
 	}
 	return cmp.Compare(len(a), len(b))
+}
+
+// formatsMessage reports whether a called finding's trace only exists to format
+// an error or a string: the sink or an intermediate frame is a method named
+// Error or String, or the path passes through package fmt or log. Such a path
+// reaches the vulnerable function because a value is being printed, which is
+// weaker evidence than a path that calls the vulnerable function on purpose.
+// The check reads the whole trace, not the condensed path, which drops frames.
+func formatsMessage(trace []traceEntry) bool {
+	for _, t := range trace {
+		if t.Package == "fmt" || t.Package == "log" {
+			return true
+		}
+		name, _, _ := strings.Cut(t.Function, "$")
+		if t.Receiver != "" && (name == "Error" || name == "String") {
+			return true
+		}
+	}
+	return false
+}
+
+// preferCalled reports whether candidate (a called finding's trace, condensed
+// to candPath and candFrames) should replace the current call path. A path that
+// does not only format a message beats one that does; among paths of the same
+// kind preferCandidate decides: shorter first, then the deterministic tiebreak.
+// When every path only formats a message the preferCandidate choice stands
+// unchanged. The result depends only on the paths, not on arrival order.
+func preferCalled(candTrace []traceEntry, candPath []string, candFrames []CallFrame, curFormats bool, curPath []string, curFrames []CallFrame) bool {
+	if len(candPath) == 0 {
+		return false
+	}
+	if len(curPath) == 0 {
+		return true
+	}
+	if candFormats := formatsMessage(candTrace); candFormats != curFormats {
+		return !candFormats
+	}
+	return preferCandidate(candPath, candFrames, curPath, curFrames)
+}
+
+// callCondition names, in one short sentence, what the project must do to reach
+// a called finding, read only from the chosen trace (innermost frame first):
+// the first frame outside the project's own code that follows a project frame,
+// rendered package.Receiver.Function. It returns "" when no frame of the trace
+// is a project frame (roots unknown, or the path starts inside a dependency) or
+// when no frame follows one. It never says anything about configuration.
+func callCondition(trace []traceEntry, roots map[string]bool) string {
+	sawProject := false
+	for i := len(trace) - 1; i >= 0; i-- { // outermost first
+		t := trace[i]
+		if t.Function == "" {
+			continue
+		}
+		if roots[t.Package] {
+			sawProject = true
+			continue
+		}
+		if !sawProject {
+			// The path starts inside a dependency: there is no project call to name.
+			return ""
+		}
+		return "reached through " + frameName(t)
+	}
+	return ""
 }
 
 // frameName renders a trace frame the way govulncheck prints it: package, then
@@ -734,6 +819,11 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 	// calledSinks collects, per "module@osvID", the vulnerable symbol of every
 	// called finding. It is sorted, deduplicated and capped once after the loop.
 	calledSinks := make(map[string][]string)
+	// chosenTrace is, per "module@osvID", the raw trace of the finding whose
+	// path was kept as CallPath, and chosenFormats whether that trace only
+	// formats a message. Condition is read from the trace after the loop.
+	chosenTrace := make(map[string][]traceEntry)
+	chosenFormats := make(map[string]bool)
 
 	for _, f := range findings {
 		osv, ok := osvs[f.OSV]
@@ -778,8 +868,9 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 			}
 			if reach == "called" {
 				cur := &results[modPath][idx]
-				if p, frames := condense(f.Trace, roots); preferCandidate(p, frames, cur.CallPath, cur.CallTrace) {
+				if p, frames := condense(f.Trace, roots); preferCalled(f.Trace, p, frames, chosenFormats[key], cur.CallPath, cur.CallTrace) {
 					cur.CallPath, cur.CallTrace = p, frames
+					chosenTrace[key], chosenFormats[key] = f.Trace, formatsMessage(f.Trace)
 				}
 				calledSinks[key] = appendCalledSink(calledSinks[key], f.Trace)
 			}
@@ -802,6 +893,7 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 		}
 		if reach == "called" {
 			vuln.CallPath, vuln.CallTrace = condense(f.Trace, roots)
+			chosenTrace[key], chosenFormats[key] = f.Trace, formatsMessage(f.Trace)
 			calledSinks[key] = appendCalledSink(calledSinks[key], f.Trace)
 		}
 
@@ -818,7 +910,11 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 
 	for modPath, vulns := range results {
 		for i := range vulns {
-			vulns[i].CalledSymbols = capCalledSymbols(calledSinks[modPath+"@"+vulns[i].ID])
+			key := modPath + "@" + vulns[i].ID
+			vulns[i].CalledSymbols = capCalledSymbols(calledSinks[key])
+			if len(vulns[i].CallPath) > 0 {
+				vulns[i].Condition = callCondition(chosenTrace[key], roots)
+			}
 		}
 	}
 

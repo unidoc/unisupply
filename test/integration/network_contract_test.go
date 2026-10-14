@@ -70,7 +70,8 @@ type rowMatcher struct {
 // it. Hosts listed in undrivenRows are exempt and must not appear here.
 var rowMatchers = map[string][]rowMatcher{
 	"proxy.golang.org": {
-		{name: "maintenance and resilience version lookups", match: anyPath},
+		{name: "maintenance and resilience version lookups", match: not(contains("/fixmod/@v/"))},
+		{name: "fix-release date lookups", match: contains("/fixmod/@v/")},
 	},
 	"api.github.com": {
 		{name: "maintainer scanner (contributor list)", match: hasSuffix("/contributors")},
@@ -79,7 +80,8 @@ var rowMatchers = map[string][]rowMatcher{
 		{name: "GHSA severity enrichment", match: hasPrefix("/advisories")},
 	},
 	"api.osv.dev": {
-		{name: "OSV severity enrichment (advisory and alias records)", match: anyPath},
+		{name: "OSV severity enrichment (advisory and alias records)", match: hasPrefix("/v1/vulns/")},
+		{name: "the module's own advisories", match: hasPrefix("/v1/query")},
 	},
 	"services.nvd.nist.gov": {
 		{name: "NVD severity enrichment", match: anyPath},
@@ -93,6 +95,10 @@ var rowMatchers = map[string][]rowMatcher{
 }
 
 func anyPath(string) bool { return true }
+
+func not(m func(string) bool) func(string) bool {
+	return func(path string) bool { return !m(path) }
+}
 
 func hasPrefix(p string) func(string) bool {
 	return func(path string) bool { return strings.HasPrefix(path, p) }
@@ -339,6 +345,15 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	}
 	scanner.NewVulnEnricher(scanner.VulnEnricherOptions{CacheDir: t.TempDir()}).Enrich(ctx, v)
 
+	// api.osv.dev (the module's own advisories) and proxy.golang.org (fix-release
+	// dates). The stub answers OSV with 404, so the lookup is an error here;
+	// the request is what this suite records. The dated vuln drives the proxy.
+	if _, err := scanner.ScanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{CacheDir: t.TempDir()}, "example.com/fixmod", "v1.0.0"); err != nil {
+		t.Logf("module advisory lookup reported %v", err)
+	}
+	dated := []scanner.Vulnerability{{ID: "GO-2026-0002", FixedVersion: "v1.0.1"}}
+	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
+
 	// api.first.org + www.cisa.gov
 	ti := scanner.NewThreatIntelClient(scanner.ThreatIntelOptions{CacheDir: t.TempDir()})
 	if _, err := ti.LookupEPSS(ctx, []string{"CVE-2026-0001"}); err != nil {
@@ -562,7 +577,12 @@ func TestNetworkContract_TrustIndexContactsOnlyConfiguredHost(t *testing.T) {
 func TestNetworkContract_OSVAliasBeforeNVD(t *testing.T) {
 	rec := driveNetworkScanners(t)
 
-	got := rec.paths("api.osv.dev")
+	var got []string
+	for _, p := range rec.paths("api.osv.dev") {
+		if strings.HasPrefix(p, "/v1/vulns/") { // the module's own /v1/query is a different row
+			got = append(got, p)
+		}
+	}
 	want := []string{"/v1/vulns/GO-2026-0001", "/v1/vulns/CVE-2026-0001"}
 	if len(got) != len(want) {
 		t.Fatalf("OSV paths = %v, want %v", got, want)
