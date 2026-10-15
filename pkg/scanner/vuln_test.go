@@ -1438,7 +1438,7 @@ func TestCallCondition(t *testing.T) {
 }
 
 // A path through a standard-library callback is not explained by the standard library: the frame named is the first
-// one in a dependency.
+// one in a dependency; when only the standard library follows the project, the first such frame is named.
 func TestCallCondition_SkipsStandardLibraryFrames(t *testing.T) {
 	roots := map[string]bool{"example.com/app": true}
 	std := func(pkg, fn, recv string) traceEntry {
@@ -1455,10 +1455,14 @@ func TestCallCondition_SkipsStandardLibraryFrames(t *testing.T) {
 	if got, want := callCondition(trace, roots), "reached through example.com/dep.Func"; got != want {
 		t.Errorf("callCondition = %q, want %q", got, want)
 	}
-	// Only the standard library follows the project: nothing to name.
+	// Only the standard library follows the project: the first standard-library frame is named.
 	trace = []traceEntry{std("crypto/tls", "Dial", ""), std("net/http", "Get", ""), app("main")}
-	if got := callCondition(trace, roots); got != "" {
-		t.Errorf("callCondition = %q, want empty when only standard-library frames follow the project", got)
+	if got, want := callCondition(trace, roots), "reached through net/http.Get"; got != want {
+		t.Errorf("callCondition = %q, want %q when only standard-library frames follow the project", got, want)
+	}
+	trace = []traceEntry{std("net/http", "Serve", ""), std("net/http", "ListenAndServe", ""), app("main")}
+	if got, want := callCondition(trace, roots), "reached through net/http.ListenAndServe"; got != want {
+		t.Errorf("callCondition = %q, want %q", got, want)
 	}
 }
 

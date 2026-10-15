@@ -62,6 +62,28 @@ func TestDataQualityNote_NoneWhenNothingEstimated(t *testing.T) {
 	}
 }
 
+// The Estimates paragraph says what docs/grading.md says: any letter an unknown severity could change, on any row.
+func TestMethodologySections_EstimatesParagraph(t *testing.T) {
+	var body string
+	for _, s := range methodologySections() {
+		if s.title == "Estimates (*)" {
+			body = s.body
+		}
+	}
+	for _, want := range []string{
+		"every such severity as low and as critical",
+		"a different letter in either run marks the result, whichever row the unknown severity is on",
+		"a row that does not rest on an estimate decides",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Estimates paragraph missing %q: %q", want, body)
+		}
+	}
+	if strings.Contains(body, "no other row or rule certifies") {
+		t.Errorf("Estimates paragraph still restricts the mark to a C: %q", body)
+	}
+}
+
 func TestMethodologySections_MatchGradingV2(t *testing.T) {
 	var sb strings.Builder
 	for _, s := range methodologySections() {
@@ -70,7 +92,7 @@ func TestMethodologySections_MatchGradingV2(t *testing.T) {
 	all := sb.String()
 	for _, want := range []string{
 		"the larger of its vulnerability score and its upkeep score", "worst row", "Called:", "Imported:", "Graph only:",
-		"never changes the letter", "PENDING", "marked with * only when", "halved", "Whole-tree rules",
+		"never changes the letter", "PENDING", "marked with * (for example C*) when that estimate could change it", "halved", "Whole-tree rules",
 		"scores 35 when it is the module itself, 20 when it is a dependency and 10 when it is test-only or not compiled in",
 		"never D or F", "policy values", "14-day",
 	} {

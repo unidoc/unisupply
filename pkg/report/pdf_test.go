@@ -322,12 +322,12 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 	for _, want := range []string{
 		"Standard Library Vulnerabilities",
 		"These affect the Go standard library used to build dependencies.",
-		"Vulnerability: GO-2026-4001 (HIGH)",
+		"Vulnerability: GO-2026-4001 (called; severity HIGH)",
 		"Summary: Unbounded allocation in net/http",
 		"Fix available: go1.26.3",
 		"Reached via: example.com/app.main (main.go:21) > net/http.ListenAndServe",
 		"Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve",
-		"Vulnerability: GO-2026-4002 (MEDIUM) (imported)",
+		"Vulnerability: GO-2026-4002 (imported; severity MEDIUM)",
 		"Summary: Parser panic in encoding/asn1",
 	} {
 		if !strings.Contains(got, want) {
@@ -339,6 +339,20 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 	}
 	if i, j := strings.Index(got, "GO-2026-4001"), strings.Index(got, "GO-2026-4002"); i < 0 || j < i {
 		t.Errorf("stdlib vulnerabilities not in the given order:\n%s", got)
+	}
+}
+
+// TestVulnLine_StdlibWithoutFinding pins, without a PDF licence, the first line printed for the stdlib advisories
+// (no grade finding): the same inputs as TestWriteStdlibVulnSection_Extraction.
+func TestVulnLine_StdlibWithoutFinding(t *testing.T) {
+	vs := stdlibTestVulns()
+	for i, want := range []string{
+		"Vulnerability: GO-2026-4001 (called; severity HIGH)",
+		"Vulnerability: GO-2026-4002 (imported; severity MEDIUM)",
+	} {
+		if got := vulnLine(&vs[i], nil); got != want {
+			t.Errorf("vulnLine(%s) = %q, want %q", vs[i].ID, got, want)
+		}
 	}
 }
 

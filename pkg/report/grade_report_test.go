@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/grade"
+	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -342,5 +344,43 @@ func TestGradePDF_WriteAndExtract(t *testing.T) {
 				t.Errorf("%s: PDF text contains removed %q", name, bad)
 			}
 		}
+	}
+}
+
+func TestScanDetailsAreReported(t *testing.T) {
+	info := &scanner.ScanInfo{Platform: "linux/amd64", GoVersion: "go1.26.9", GovulncheckVersion: "v1.1.4", VulnDB: "https://vuln.go.dev", VulnDBLastModified: "2026-10-14T10:00:00Z"}
+	var buf bytes.Buffer
+	writeScanInfoText(&buf, info)
+	out := buf.String()
+	for _, want := range []string{"SCAN DETAILS", "linux/amd64", "go1.26.9", "govulncheck v1.1.4", "https://vuln.go.dev", "2026-10-14T10:00:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%q missing from %q", want, out)
+		}
+	}
+	buf.Reset()
+	writeScanInfoText(&buf, nil)
+	writeScanInfoText(&buf, &scanner.ScanInfo{})
+	if buf.Len() != 0 {
+		t.Errorf("nothing to say: %q", buf.String())
+	}
+	var j bytes.Buffer
+	graph := &resolver.Graph{Root: "example.com/app", Dependencies: map[string]*resolver.Dependency{}}
+	if err := WriteJSON(graph, &scorer.ProjectScore{}, JSONOptions{Scan: info}, &j); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(j.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	scan, _ := m["scan"].(map[string]any)
+	if scan["go_version"] != "go1.26.9" || scan["vuln_db_last_modified"] != "2026-10-14T10:00:00Z" || scan["platform"] != "linux/amd64" {
+		t.Errorf("the scan block: %v", m["scan"])
+	}
+	j.Reset()
+	_ = WriteJSON(graph, &scorer.ProjectScore{}, JSONOptions{}, &j)
+	m = map[string]any{}
+	_ = json.Unmarshal(j.Bytes(), &m)
+	if _, has := m["scan"]; has {
+		t.Error("no scan block when no scan ran")
 	}
 }

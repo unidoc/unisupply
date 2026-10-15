@@ -284,8 +284,15 @@ func TestBuildClassification_CobraGo115(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
 		t.Fatalf("unmarshal JSON: %v", err)
 	}
-	if _, ok := raw["headline"]; ok {
-		t.Error("the legacy headline object is no longer published")
+	// the headline is the deprecated, grade-derived one: it has no candidates any more
+	var head struct {
+		Candidates []any `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw["headline"], &head); err != nil || head.Candidates == nil || len(head.Candidates) != 0 {
+		t.Errorf("the deprecated headline carries no candidates: %s (%v)", raw["headline"], err)
+	}
+	if _, ok := raw["mean_dep_risk_score"]; ok {
+		t.Error("mean_dep_risk_score has no equivalent in the grade and is no longer published")
 	}
 
 	byModule := make(map[string]map[string]any, len(out.Deps))

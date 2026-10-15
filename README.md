@@ -451,6 +451,7 @@ The most frequently used flags:
 | `--scan-workflows`      | Audit `.github/workflows/*.yml` and `*.yaml` only                                                                    |
 | `--scan-ci`             | Full CI/CD audit: workflows + Dockerfile / Makefile / scripts                                                        |
 | `--module-version`      | Published version of the scanned module (e.g. `v1.4.0`): also grades the module itself, from its own OSV advisories and archive status |
+| `--grade-stdlib`        | Let the Go standard library decide the letter. It is always listed, with the Go release it was matched against, but not graded by default: its findings follow the toolchain that runs the scan |
 | `--response-history`    | Look up how fast the project adopted its dependencies' fixes in the past (extra proxy and OSV requests; needs `--module-version`) |
 | `--direct-only`         | Skip transitive dependencies                                                                                         |
 | `-v, --verbose`         | Per-dependency breakdown                                                                                             |

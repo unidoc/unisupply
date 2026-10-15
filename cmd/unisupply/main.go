@@ -42,6 +42,8 @@ func main() {
 		noColor                bool
 		moduleVersion          string
 		responseHistory        bool
+		gradeStdlib            bool
+		strictArchived         bool
 		directOnly             bool
 		timeout                time.Duration
 		showHelp               bool
@@ -83,6 +85,8 @@ func main() {
 	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
 	flag.BoolVar(&offlineMode, "offline", false, "Make no network requests; scanners that need the network degrade to UNKNOWN with a warning")
 	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
+	flag.BoolVar(&gradeStdlib, "grade-stdlib", false, "Let the Go standard library decide the letter (it is always listed, with the Go release it was matched against, but not graded by default: its findings follow the Go toolchain that runs the scan)")
+	flag.BoolVar(&strictArchived, "strict-archived", false, "Make an archived flag that could not be read (GitHub rate limit without a token) make the grade Pending, instead of grading on what is known with a note")
 	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
@@ -124,6 +128,8 @@ func main() {
 		noColor:                noColor,
 		moduleVersion:          moduleVersion,
 		responseHistory:        responseHistory,
+		gradeStdlib:            gradeStdlib,
+		strictArchived:         strictArchived,
 		directOnly:             directOnly,
 		timeout:                timeout,
 		scanWorkflows:          scanWorkflows,
@@ -164,6 +170,8 @@ type runConfig struct {
 	noColor                bool
 	moduleVersion          string
 	responseHistory        bool
+	gradeStdlib            bool
+	strictArchived         bool
 	directOnly             bool
 	timeout                time.Duration
 	scanWorkflows          bool
@@ -289,6 +297,8 @@ func run(cfg *runConfig) error {
 		WorkflowPath:           cfg.workflowPath,
 		SelfVersion:            cfg.moduleVersion,
 		ResponseHistory:        cfg.responseHistory,
+		GradeStdlib:            cfg.gradeStdlib,
+		StrictArchivedStatus:   cfg.strictArchived,
 	})
 	if err != nil {
 		return err
@@ -355,6 +365,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
+			Scan:            scanResult.ScanInfo,
 			NoColor:         cfg.noColor,
 			Verbose:         cfg.verbose,
 			Writer:          writer,
@@ -365,6 +376,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 		})
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
+			Scan:            scanResult.ScanInfo,
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,

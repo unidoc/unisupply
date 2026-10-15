@@ -45,8 +45,13 @@ func TestBuildGradeInput_MapsTheScannerOutput(t *testing.T) {
 	if f.Severity != "HIGH" || !f.Exploited || f.FixReleasedAt == nil || f.Condition != "reached through x.Y" || f.FixDateSource != "module_proxy" {
 		t.Errorf("%+v", f)
 	}
-	if !in.Deps[1].Upkeep.Missing {
-		t.Error("an archived flag that could not be read is unknown, not 'not archived'")
+	// by default the grade is given without an archived flag that could not be read, and says so (it is never "not archived")
+	if in.Deps[1].Upkeep.Missing || !in.Deps[1].Upkeep.ArchivedUnread {
+		t.Errorf("an unread archived flag is marked ArchivedUnread, not Missing, by default: %+v", in.Deps[1].Upkeep)
+	}
+	strict := buildGradeInput(&gradeInputs{Graph: g, Maintenance: map[string]*scanner.MaintenanceInfo{"example.com/b": {ArchivedCheck: scanner.ArchivedCheckFailed}}, StrictArchived: true})
+	if !strict.Deps[1].Upkeep.Missing || strict.Deps[1].Upkeep.ArchivedUnread {
+		t.Errorf("the strict rule makes it Missing: %+v", strict.Deps[1].Upkeep)
 	}
 	if in.Deps[2].Findings[0].Reachability != "imported" {
 		t.Errorf("%+v", in.Deps[2])
@@ -158,11 +163,11 @@ func TestGradeAll_ChecksumMismatchIsF(t *testing.T) {
 
 func TestGradedStdlib(t *testing.T) {
 	v := []scanner.Vulnerability{{ID: "GO-1", Severity: "CRITICAL", Reachability: "called"}}
-	if got := gradedStdlib(&Options{}, v); len(got) != 1 {
-		t.Errorf("the CLI grades the standard library: %v", got)
+	if got := gradedStdlib(&Options{}, v); got != nil {
+		t.Errorf("the standard library is listed, not graded, by default: %v", got)
 	}
-	if got := gradedStdlib(&Options{ExcludeStdlibFromGrade: true}, v); got != nil {
-		t.Errorf("excluded: %v", got)
+	if got := gradedStdlib(&Options{GradeStdlib: true}, v); len(got) != 1 {
+		t.Errorf("graded when asked: %v", got)
 	}
 }
 
@@ -179,7 +184,7 @@ func TestGradeAll_ArchiveUncheckedNote(t *testing.T) {
 	for _, m := range maint {
 		m.LastRelease = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
-	got := archiveUnchecked(maint)
+	got := archiveUnchecked(maint, nil)
 	want := []string{"github.com/gone/repo", "gitlab.example/z/unsupported", "vanity.example/nowhere"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("archiveUnchecked = %v, want %v", got, want)
@@ -254,7 +259,143 @@ func TestKEVUnchecked(t *testing.T) {
 		{ID: "GO-4", Aliases: []string{"GHSA-xxxx"}, Reachability: "called"},                    // no CVE: cannot be listed
 		{ID: "GO-5", Aliases: []string{"CVE-2026-5"}, Reachability: ""},                         // undetermined is scored as called
 	}}
-	if got := kevUnchecked(vulns, nil); got != 2 {
+	if got := kevUnchecked(vulns, nil, nil); got != 2 {
 		t.Errorf("got %d, want 2", got)
+	}
+}
+
+func TestLocalReplaced(t *testing.T) {
+	gm := &parser.GoMod{Replaces: map[string]parser.Replace{
+		"a/lib": {New: parser.Module{Path: "../lib"}},
+		"b/lib": {New: parser.Module{Path: "./staging/b"}},
+		"c/lib": {New: parser.Module{Path: "/abs/c"}},
+		"d/lib": {New: parser.Module{Path: "github.com/fork/d", Version: "v1.0.0"}},
+		"e/lib": {New: parser.Module{Path: "example.com/e"}},
+		"f/lib": {New: parser.Module{Path: ".."}},
+	}}
+	got := localReplaced(gm)
+	for _, p := range []string{"a/lib", "b/lib", "c/lib", "f/lib"} {
+		if !got[p] {
+			t.Errorf("%s is a local replacement", p)
+		}
+	}
+	for _, p := range []string{"d/lib", "e/lib"} {
+		if got[p] {
+			t.Errorf("%s is a published replacement, not a local one", p)
+		}
+	}
+	if len(localReplaced(nil)) != 0 {
+		t.Error("nil go.mod")
+	}
+}
+
+// A dependency replaced by a local directory is the project's own code: the proxy has no such module, so its maintenance
+// data is absent for ever. It must not make the grade Pending (monorepos), and no go.sum is expected when that is all there is.
+func TestGradeAll_LocalReplaceDoesNotMakeThePendingGrade(t *testing.T) {
+	gm := &parser.GoMod{ModulePath: "example.com/app", Replaces: map[string]parser.Replace{"example.com/lib": {New: parser.Module{Path: "../lib"}}}}
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/lib": {Module: parser.Module{Path: "example.com/lib", Version: "v0.0.0"}, Direct: true}}}
+	res := gradeAll(t.Context(), &gradeRun{
+		GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true,
+		Integrity:   &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedSkipped}, // no go.sum: only local code
+		Maintenance: map[string]*scanner.MaintenanceInfo{},                                 // the proxy answered 404: nothing for the local module
+	})
+	if res.Pending != nil || res.Letter != grade.LetterA {
+		t.Fatalf("a locally replaced dependency made the grade %+v %s", res.Pending, res.Letter)
+	}
+	lib := res.Rows[0]
+	for _, r := range res.Rows {
+		if r.Module == "example.com/lib" {
+			lib = r
+		}
+	}
+	if lib.UpkeepState != "not_assessed" {
+		t.Errorf("%+v", lib)
+	}
+	// control: the same dependency replaced by a published module IS missing data (Pending), and with a go.sum that could
+	// not be verified the checksum check applies
+	gm.Replaces["example.com/lib"] = parser.Replace{New: parser.Module{Path: "github.com/fork/lib", Version: "v1.0.0"}}
+	if p := gradeAll(t.Context(), &gradeRun{GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true,
+		Integrity: &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedSkipped}, Maintenance: map[string]*scanner.MaintenanceInfo{}}); p.Pending == nil {
+		t.Error("a published replacement with no data and an unverified go.sum must stay Pending")
+	}
+}
+
+func TestGradeAll_TokenHintInThePendingReason(t *testing.T) {
+	gm := &parser.GoMod{ModulePath: "example.com/app"}
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"github.com/x/y": {Module: parser.Module{Path: "github.com/x/y", Version: "v1.0.0"}, Direct: true}}}
+	res := gradeAll(t.Context(), &gradeRun{Opts: Options{StrictArchivedStatus: true}, GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true, TokenMissing: true,
+		Integrity:   &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedTrue},
+		Maintenance: map[string]*scanner.MaintenanceInfo{"github.com/x/y": {ArchivedCheck: scanner.ArchivedCheckFailed}}})
+	if res.Pending == nil || !strings.Contains(res.Pending.Reason, "set GITHUB_TOKEN") {
+		t.Errorf("%+v", res.Pending)
+	}
+	with := gradeAll(t.Context(), &gradeRun{Opts: Options{StrictArchivedStatus: true}, GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true, TokenMissing: false,
+		Integrity:   &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedTrue},
+		Maintenance: map[string]*scanner.MaintenanceInfo{"github.com/x/y": {ArchivedCheck: scanner.ArchivedCheckFailed}}})
+	if with.Pending == nil || strings.Contains(with.Pending.Reason, "set GITHUB_TOKEN") {
+		t.Errorf("with a token the hint is wrong: %+v", with.Pending)
+	}
+}
+
+func TestKEVUnchecked_ExcludesConfirmedTestOnly(t *testing.T) {
+	v := scanner.Vulnerability{ID: "GO-1", Aliases: []string{"CVE-2026-1"}, Reachability: "called"}
+	vulns := map[string][]scanner.Vulnerability{"example.com/test": {v}, "example.com/prod": {v}, "example.com/unknown": {v}}
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+		"example.com/test":    {IsTestOnly: tp(true)},
+		"example.com/prod":    {IsTestOnly: tp(false)},
+		"example.com/unknown": {},
+	}}
+	if got := kevUnchecked(vulns, nil, g); got != 2 {
+		t.Errorf("got %d, want 2 (confirmed test-only excluded, production and unknown counted)", got)
+	}
+	stale := time.Now()
+	checked := v
+	checked.KEVChecked, checked.KEVCatalogStaleSince = true, &stale
+	if got := kevUnchecked(map[string][]scanner.Vulnerability{"example.com/prod": {checked}}, nil, g); got != 0 {
+		t.Errorf("a finding checked against a stale catalog counted as unchecked: %d", got)
+	}
+}
+
+// By default (the CLI) a grade is given when the only gap is the archived flag of a dependency, with a note: an archived
+// dependency adds at most 20 to its row. The strict rule (a service that publishes letters) makes it Pending instead.
+func TestGradeAll_ArchivedFlagGapIsGradedWithANoteByDefault(t *testing.T) {
+	gm := &parser.GoMod{ModulePath: "example.com/app"}
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+		"github.com/x/y": {Module: parser.Module{Path: "github.com/x/y", Version: "v1.0.0"}, Direct: true},
+		"github.com/x/z": {Module: parser.Module{Path: "github.com/x/z", Version: "v1.0.0"}, Direct: true},
+	}}
+	run := func(strict bool) *grade.Result {
+		return gradeAll(t.Context(), &gradeRun{Opts: Options{StrictArchivedStatus: strict}, GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true, TokenMissing: true,
+			Integrity: &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedTrue},
+			Maintenance: map[string]*scanner.MaintenanceInfo{
+				"github.com/x/y": {ArchivedCheck: scanner.ArchivedCheckFailed},
+				"github.com/x/z": {ArchivedCheck: scanner.ArchivedCheckFailed},
+			}})
+	}
+	res := run(false)
+	if res.Pending != nil || res.Letter != grade.LetterA {
+		t.Fatalf("graded on what is known: %+v %s", res.Pending, res.Letter)
+	}
+	if len(res.ArchivedUnread) != 2 || res.ArchivedUnread[0] != "github.com/x/y" {
+		t.Errorf("%v", res.ArchivedUnread)
+	}
+	found := false
+	for _, n := range res.Notes {
+		if strings.Contains(n, "could not be read") && strings.Contains(n, "at most 20") && strings.Contains(n, "set GITHUB_TOKEN") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the note must say what is missing, the size of the gap and what to do: %v", res.Notes)
+	}
+	if s := run(true); s.Pending == nil || s.Pending.Check != "dependency_maintenance" {
+		t.Errorf("the strict rule is Pending: %+v", s.Pending)
+	}
+	// a gap in the proxy's data (not just the flag) is still Pending in the default mode
+	missing := gradeAll(t.Context(), &gradeRun{GoMod: gm, Graph: g, ScanStart: time.Now(), VulnScanned: true,
+		Integrity:   &scanner.IntegrityReport{GoSumVerified: scanner.GoSumVerifiedTrue},
+		Maintenance: map[string]*scanner.MaintenanceInfo{"github.com/x/y": {ModCheckFailed: true}}})
+	if missing.Pending == nil {
+		t.Error("an unreadable go.mod notice is missing data, not just the archived flag")
 	}
 }

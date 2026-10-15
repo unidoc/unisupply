@@ -3,9 +3,11 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -292,5 +294,41 @@ func TestGopkgInRepository(t *testing.T) {
 	ms.resolveRepository("gopkg.in/yaml.v2", info, &proxyVersionInfo{})
 	if info.RepositoryURL != "https://github.com/go-yaml/yaml" || info.ArchivedCheck != "" {
 		t.Errorf("%+v", info)
+	}
+}
+
+// A 200 answer that does not parse as a go.mod is not cached: the next scan asks again, so the module is not kept
+// "unread" for the cache's lifetime after the proxy recovers.
+func TestMaintenanceScanner_UnparsableGoModIsNotCached(t *testing.T) {
+	var mod atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/example.com/m/@latest", "/example.com/m/@v/v1.0.0.info":
+			fmt.Fprint(w, `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)
+		case "/example.com/m/@v/v1.0.0.mod":
+			mod.Add(1)
+			fmt.Fprint(w, "module (\nexample.com/m\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	scan := func() *MaintenanceInfo {
+		ms := NewMaintenanceScanner(5 * time.Second)
+		ms.proxyURL = srv.URL
+		ms.diskCache = newMaintainerCache(dir, time.Hour)
+		info, err := ms.checkModule(context.Background(), "example.com/m", "v1.0.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	if a := scan(); !a.ModCheckFailed {
+		t.Fatalf("an unparsable go.mod is an unread notice: %+v", a)
+	}
+	scan()
+	if n := mod.Load(); n != 2 {
+		t.Errorf("the unparsable body was cached: %d go.mod requests for two scans, want 2", n)
 	}
 }

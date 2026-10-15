@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
@@ -58,13 +59,45 @@ func TestRun_NoDependencies(t *testing.T) {
 	if result.CIReport != nil {
 		t.Errorf("result.CIReport = %+v, want nil (ScanWorkflows/ScanCI were not requested)", result.CIReport)
 	}
-	// A module with no dependencies still runs the vulnerability scan (the standard library is part of every build). Here
-	// the network is refused, so the scan did not look: the grade is Pending, never an A.
-	if result.Grade == nil || result.Grade.Letter != "" || result.Grade.Pending == nil || result.Grade.Pending.Check != "vulnerability_scan" {
-		t.Errorf("result.Grade = %+v, want Pending (vulnerability_scan): the scan did not run", result.Grade)
+	// The standard library is listed, not graded, by default, so a module with no dependencies has nothing a scan could
+	// find that would change the grade: none is run, and the grade is the module's own row (an A, "not assessed").
+	if result.Grade == nil || result.Grade.Letter != "A" || result.Grade.Pending != nil || result.VulnScanErr != nil {
+		t.Errorf("result.Grade = %+v, VulnScanErr = %v, want a graded A with no scan", result.Grade, result.VulnScanErr)
 	}
-	if result.VulnScanErr == nil {
-		t.Error("result.VulnScanErr is nil although the vulnerability scan did not run")
+	if result.Grade != nil && len(result.Grade.Rows) == 1 && result.Grade.Rows[0].UpkeepState != "not_assessed" {
+		t.Errorf("the module itself was not assessed: %+v", result.Grade.Rows[0])
+	}
+
+	// When the caller grades the standard library the scan runs, and with the network refused it did not look: Pending.
+	graded, err := Run(context.Background(), Options{Path: tmpDir, GradeStdlib: true, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if graded.Grade == nil || graded.Grade.Letter != "" || graded.Grade.Pending == nil || graded.Grade.Pending.Check != "vulnerability_scan" || graded.VulnScanErr == nil {
+		t.Errorf("graded stdlib, scan refused: %+v / %v, want Pending (vulnerability_scan)", graded.Grade, graded.VulnScanErr)
+	}
+	// The scan was attempted on the zero-dependency path, so it states its platform.
+	if graded.ScanInfo == nil || !strings.Contains(graded.ScanInfo.Platform, "/") {
+		t.Errorf("graded.ScanInfo = %+v, want a platform for the scan that was attempted", graded.ScanInfo)
+	}
+	if result.ScanInfo != nil {
+		t.Errorf("no scan ran by default, so there is nothing to say about one: %+v", result.ScanInfo)
+	}
+}
+
+func TestRun_OfflineHasNoScanInfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module github.com/example/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	result, err := Run(context.Background(), Options{Path: tmpDir, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ScanInfo != nil {
+		t.Errorf("ScanInfo = %+v, want nil: no scan ran offline", result.ScanInfo)
 	}
 }
 

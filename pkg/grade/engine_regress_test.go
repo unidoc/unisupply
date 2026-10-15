@@ -1,10 +1,12 @@
 package grade
 
 import (
+	"encoding/json"
 	"math/rand"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fnd(id, sev, reach string) Finding {
@@ -263,9 +265,55 @@ func TestRegression_NotAssessedRowsAreNotFinished(t *testing.T) {
 
 func TestRegression_StdlibVersionNote(t *testing.T) {
 	std := Row{Module: "stdlib", Direct: true, Findings: []Finding{{ID: "GO-1", Severity: "LOW", Reachability: "imported", FixedVersion: "go1.26.9"}}}
-	r := run(Input{Self: self(), Deps: []Row{std}, Checks: Checks{StdlibVersion: "go1.26.3"}})
-	if len(r.Notes) != 1 || !strings.Contains(r.Notes[0], "go1.26.3") {
+	r := run(Input{Self: self(), Deps: []Row{std}, Checks: Checks{StdlibVersion: "go1.26.3", StdlibGraded: true}})
+	if len(r.Notes) != 1 || !strings.Contains(r.Notes[0], "graded at go1.26.3") {
 		t.Errorf("%v", r.Notes)
+	}
+	// the version is said when the standard library is clean too, and when it is only listed
+	clean := run(Input{Self: self(), Checks: Checks{StdlibVersion: "go1.26.3", StdlibGraded: true}})
+	listed := run(Input{Self: self(), Checks: Checks{StdlibVersion: "go1.26.3"}})
+	if len(clean.Notes) != 1 || len(listed.Notes) != 1 || !strings.Contains(listed.Notes[0], "listed, not graded") {
+		t.Errorf("%v / %v", clean.Notes, listed.Notes)
+	}
+}
+
+// A Go advisory without a severity whose GitHub alias is rated HIGH is one finding with a published severity: nothing
+// it rests on is estimated, so the critical recomputation must not star the letter.
+func TestRegression_MergeBeforeTheEstimateCheck(t *testing.T) {
+	goAdv := Finding{ID: "GO-1", Aliases: []string{"CVE-1", "GHSA-1"}, Severity: "", Reachability: "called", FixedVersion: "v2"}
+	ghsa := Finding{ID: "GHSA-1", Aliases: []string{"CVE-1", "GO-1"}, Severity: "HIGH", Reachability: "called", FixedVersion: "v2"}
+	for _, fs := range [][]Finding{{goAdv, ghsa}, {ghsa, goAdv}} {
+		r := run(Input{Self: self(), Deps: []Row{dep("example.com/x", fs...)}})
+		if r.Letter != LetterD || r.Estimated {
+			t.Errorf("%s estimated=%v (the merged finding is HIGH, published)", r.Letter, r.Estimated)
+		}
+	}
+}
+
+// A Pending result publishes no score; a graded one always does, also when it is 0.
+func TestRegression_PendingJSONHasNoScore(t *testing.T) {
+	p := run(Input{Self: self(), Checks: Checks{VulnScanFailed: true}})
+	b, _ := json.Marshal(p)
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := m["score"]; has || m["pending"] == nil {
+		t.Errorf("%s", b)
+	}
+	g := run(Input{Self: self()})
+	b, _ = json.Marshal(g)
+	_ = json.Unmarshal(b, &m)
+	if v, has := m["score"]; !has || v.(float64) != 0 || m["letter"] != "A" {
+		t.Errorf("a real 0 stays published: %s", b)
+	}
+}
+
+func TestRegression_MaintenanceHintIsInThePendingReason(t *testing.T) {
+	m := Row{Module: "example.com/m", Direct: true, InBuild: ptr(true), Upkeep: Upkeep{Missing: true}}
+	r := run(Input{Self: self(), Deps: []Row{m}, Checks: Checks{MaintenanceHint: "GitHub allows 60 unauthenticated requests an hour: set GITHUB_TOKEN."}})
+	if r.Pending == nil || !strings.Contains(r.Pending.Reason, "set GITHUB_TOKEN") {
+		t.Errorf("%+v", r.Pending)
 	}
 }
 
@@ -295,5 +343,12 @@ func TestRegression_PendingPublishesNoDecidingRow(t *testing.T) {
 	r := run(Input{Self: self(), Deps: []Row{dep("example.com/x", fnd("H", "HIGH", "called"))}, Checks: Checks{VulnScanFailed: true}})
 	if r.Pending == nil || r.Letter != "" || r.Deciding != nil || r.Score != 0 {
 		t.Errorf("%+v", r)
+	}
+}
+
+func TestRegression_StaleKEVCatalogNote(t *testing.T) {
+	r := run(Input{Self: self(), Checks: Checks{KEVStaleSince: time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)}})
+	if len(r.Notes) != 1 || !strings.Contains(r.Notes[0], "2026-10-12") || r.Pending != nil {
+		t.Errorf("%v %+v", r.Notes, r.Pending)
 	}
 }

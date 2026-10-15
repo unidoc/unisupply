@@ -442,11 +442,14 @@ func (ms *MaintenanceScanner) checkGoModDeprecation(ctx context.Context, modPath
 			info.ModCheckFailed = true
 			return
 		}
-		ms.putProxyBody(url, body)
 	}
 	if _, err := modfile.ParseLax("go.mod", body, nil); err != nil {
 		info.ModCheckFailed = true
 		return
+	}
+	if !hit {
+		// cached only once it parsed: a 200 answer that is not a go.mod must not keep the module unread for a day
+		ms.putProxyBody(url, body)
 	}
 	if msg := goModDeprecation(body); msg != "" {
 		info.Deprecated = true

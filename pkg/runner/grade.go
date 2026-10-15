@@ -36,6 +36,13 @@ type gradeInputs struct {
 
 	// StdlibVersion is the Go release the standard library row was graded at.
 	StdlibVersion string
+
+	// StrictArchived makes an unread archived flag Missing (the grade may be Pending) instead of grading without it.
+	StrictArchived bool
+
+	// LocalReplaced holds the modules a replace directive points at a local directory: they are the project's own code, so
+	// there is no published module to look up.
+	LocalReplaced map[string]bool
 }
 
 // buildGradeInput maps the scanner outputs onto the rows of the grade.
@@ -51,6 +58,11 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 	if in.Graph != nil {
 		for _, path := range in.Graph.SortedPaths() {
 			d := in.Graph.Dependencies[path]
+			upkeep := upkeepOfRule(in.Maintenance[path], in.StrictArchived)
+			if in.LocalReplaced[path] {
+				// the project's own code: nobody to ask (the proxy has no such module), so not assessed, never Missing
+				upkeep = grade.Upkeep{NotAssessed: true}
+			}
 			row := grade.Row{
 				Module:   path,
 				Version:  d.Module.Version,
@@ -58,7 +70,7 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 				TestOnly: d.IsTestOnly,
 				InBuild:  d.InBuild,
 				Findings: findingsOf(path, in.Vulns[path]),
-				Upkeep:   upkeepOf(in.Maintenance[path]),
+				Upkeep:   upkeep,
 			}
 			out.Deps = append(out.Deps, row)
 		}
@@ -104,7 +116,12 @@ func FindingFromVuln(module string, v *scanner.Vulnerability) grade.Finding {
 }
 
 // upkeepOf maps maintenance data onto the upkeep facts; nil means the lookup produced nothing.
-func upkeepOf(m *scanner.MaintenanceInfo) grade.Upkeep {
+func upkeepOf(m *scanner.MaintenanceInfo) grade.Upkeep { return upkeepOfRule(m, true) }
+
+// upkeepOfRule is upkeepOf with the caller's rule for an unread archived flag: strict makes it Missing (the grade may be
+// Pending); otherwise, when the archived flag is the only thing missing, the row is graded on what is known and marked
+// ArchivedUnread, so the result says so.
+func upkeepOfRule(m *scanner.MaintenanceInfo, strict bool) grade.Upkeep {
 	if m == nil {
 		return grade.Upkeep{Missing: true}
 	}
@@ -121,8 +138,16 @@ func upkeepOf(m *scanner.MaintenanceInfo) grade.Upkeep {
 		LastActivity: m.LastActivity,
 		// An archived flag we could not check is not "not archived": the state is unknown.
 		// A repository that does not exist cannot be asked again, so it is not held against the grade as Pending.
-		Missing: !m.Archived && (m.ModCheckFailed || (m.ArchivedCheck == scanner.ArchivedCheckFailed && !m.RepositoryNotFound)),
+		Missing: !m.Archived && (m.ModCheckFailed || (strict && archivedFlagFailed(m))),
+		// the archived flag alone could not be read, and the caller grades without it (see upkeepOfRule)
+		ArchivedUnread: !strict && !m.Archived && !m.ModCheckFailed && archivedFlagFailed(m),
 	}
+}
+
+// archivedFlagFailed is true when the GitHub call for the archived flag failed (a repository that does not exist cannot
+// be asked again, and is not a failure).
+func archivedFlagFailed(m *scanner.MaintenanceInfo) bool {
+	return m.ArchivedCheck == scanner.ArchivedCheckFailed && !m.RepositoryNotFound
 }
 
 // archiveUnchecked lists, sorted, the modules whose archived flag was never read for a reason other than a failed
@@ -130,10 +155,10 @@ func upkeepOf(m *scanner.MaintenanceInfo) grade.Upkeep {
 // GitHub says it does not exist. A failed call is not listed: it is Missing in upkeepOf and makes the grade Pending
 // instead. A module whose lookup was not attempted although a GitHub repository is known (offline, no lookup) is not
 // listed either: that is a degraded scan, which the scan's own warnings already say.
-func archiveUnchecked(maintenance map[string]*scanner.MaintenanceInfo) []string {
+func archiveUnchecked(maintenance map[string]*scanner.MaintenanceInfo, local map[string]bool) []string {
 	var out []string
 	for path, m := range maintenance {
-		if m == nil || m.Archived {
+		if m == nil || m.Archived || local[path] {
 			continue
 		}
 		switch {
@@ -183,6 +208,14 @@ type gradeRun struct {
 	VulnScanned    bool
 	VulnScanReason string
 	Interrupted    bool
+
+	// StdlibScanned is true when govulncheck ran (the standard library was matched against the scan's Go release).
+	StdlibScanned bool
+	// TokenMissing is true when no GitHub token was used: the archived flags then come from the 60 unauthenticated requests
+	// an hour, and a missing one says so.
+	TokenMissing bool
+	// KEVStaleSince is the date of the CISA catalog copy used when it could not be refreshed (zero: fresh or none).
+	KEVStaleSince time.Time
 }
 
 func errString(err error) string {
@@ -196,18 +229,21 @@ func errString(err error) string {
 // gradeAll builds the grade: the module's own row (status and advisories), every dependency's row, and the checks the
 // grade depends on. It never fails: a lookup that did not work is recorded in Checks, and the grade says Pending.
 func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
+	local := localReplaced(r.GoMod)
 	in := gradeInputs{
-		Graph:       r.Graph,
-		Vulns:       r.Vulns,
-		Stdlib:      r.Stdlib,
-		Maintenance: r.Maintenance,
-		Now:         r.ScanStart,
+		LocalReplaced:  local,
+		StrictArchived: r.Opts.StrictArchivedStatus,
+		Graph:          r.Graph,
+		Vulns:          r.Vulns,
+		Stdlib:         r.Stdlib,
+		Maintenance:    r.Maintenance,
+		Now:            r.ScanStart,
 		Checks: grade.Checks{
 			VulnScanFailed: !r.VulnScanned,
 			VulnScanReason: r.VulnScanReason,
 			ScanTimedOut:   r.Interrupted,
 
-			ArchiveUnchecked: archiveUnchecked(r.Maintenance),
+			ArchiveUnchecked: archiveUnchecked(r.Maintenance, local),
 		},
 	}
 	if r.Integrity != nil {
@@ -216,14 +252,28 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 			in.GoSumInfo = "go mod verify reported a checksum mismatch"
 		}
 	}
-	in.Checks.KEVUnchecked = kevUnchecked(r.Vulns, r.Stdlib)
+	in.Checks.KEVStaleSince = r.KEVStaleSince
+	in.Checks.KEVUnchecked = kevUnchecked(r.Vulns, r.Stdlib, r.Graph)
 	// `go mod verify` that could not complete leaves a checksum mismatch (an F) unruled-out; a module with no
 	// dependencies has no go.sum to verify.
+	// Only a module that has a checksum counts: a locally replaced one is the project's own code, and a project that has
+	// nothing but those has no go.sum at all.
 	in.Checks.ChecksumUnverified = r.Integrity != nil && r.Integrity.GoSumVerified == scanner.GoSumVerifiedSkipped &&
-		r.Graph != nil && len(r.Graph.Dependencies) > 0
-	if len(r.Stdlib) > 0 {
+		countChecksummed(r.Graph, local) > 0
+	if r.StdlibScanned {
+		// recorded whenever the standard library was scanned, whether or not it had findings: a clean result holds for this
+		// Go release only
 		in.StdlibVersion = scanToolchainVersion(ctx, r.ProjectDir)
 		in.Checks.StdlibVersion = in.StdlibVersion
+		in.Checks.StdlibGraded = r.Opts.GradeStdlib
+	}
+	if r.TokenMissing && !offline.Enabled() {
+		for _, m := range r.Maintenance {
+			if m != nil && m.ArchivedCheck == scanner.ArchivedCheckFailed {
+				in.Checks.MaintenanceHint = "GitHub allows 60 unauthenticated requests an hour, so most archived flags could not be read: set GITHUB_TOKEN"
+				break
+			}
+		}
 	}
 	in.Self = assessSelf(ctx, r, &in.Checks)
 
@@ -271,6 +321,9 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 		if row.Upkeep.Missing {
 			checks.SelfStatusFailed = true
 			checks.SelfStatusReason = "archived status could not be read"
+			if info != nil && info.ModCheckFailed {
+				checks.SelfStatusReason = "its go.mod notices (deprecation, retraction) could not be read"
+			}
 		}
 	}
 
@@ -297,7 +350,7 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 
 // gradedStdlib is the standard library advisories that take part in the grade.
 func gradedStdlib(opts *Options, vulns []scanner.Vulnerability) []scanner.Vulnerability {
-	if opts.ExcludeStdlibFromGrade {
+	if !opts.GradeStdlib {
 		return nil
 	}
 	return vulns
@@ -313,7 +366,9 @@ func selfStatusFailureReason(modulePath string) string {
 }
 
 // kevUnchecked counts the findings that could be a known-exploited F (reached, with a CVE) whose catalog check did not run.
-func kevUnchecked(vulns map[string][]scanner.Vulnerability, stdlib []scanner.Vulnerability) int {
+// A finding of a confirmed test-only dependency is left out: such a row can never reach F. A check against a stale
+// catalog counts as run (KEVChecked is true).
+func kevUnchecked(vulns map[string][]scanner.Vulnerability, stdlib []scanner.Vulnerability, graph *resolver.Graph) int {
 	n := 0
 	count := func(list []scanner.Vulnerability) {
 		for i := range list {
@@ -329,7 +384,12 @@ func kevUnchecked(vulns map[string][]scanner.Vulnerability, stdlib []scanner.Vul
 			}
 		}
 	}
-	for _, list := range vulns {
+	for mod, list := range vulns {
+		if graph != nil {
+			if d := graph.Dependencies[mod]; d != nil && d.IsTestOnly != nil && *d.IsTestOnly {
+				continue
+			}
+		}
 		count(list)
 	}
 	count(stdlib)
@@ -347,4 +407,34 @@ func scanToolchainVersion(ctx context.Context, dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// localReplaced is the set of modules a replace directive points at a local directory (./lib, ../lib, /abs/lib).
+func localReplaced(gm *parser.GoMod) map[string]bool {
+	out := map[string]bool{}
+	if gm == nil {
+		return out
+	}
+	for path, rep := range gm.Replaces {
+		p := rep.New.Path
+		if p == "." || p == ".." || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") ||
+			strings.HasPrefix(p, `.\`) || strings.HasPrefix(p, `..\`) || (len(p) > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) {
+			out[path] = true
+		}
+	}
+	return out
+}
+
+// countChecksummed is the number of modules of the graph that have a go.sum entry to verify (not locally replaced).
+func countChecksummed(g *resolver.Graph, local map[string]bool) int {
+	if g == nil {
+		return 0
+	}
+	n := 0
+	for path := range g.Dependencies {
+		if !local[path] {
+			n++
+		}
+	}
+	return n
 }

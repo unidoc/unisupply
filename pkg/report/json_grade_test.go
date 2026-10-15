@@ -168,12 +168,12 @@ func TestWriteJSON_GradeNullWhenNil(t *testing.T) {
 // removedTopLevel, removedSummary and removedDependency are the Grading v1 keys that must no longer be emitted.
 var (
 	removedTopLevel = []string{
-		"overall_risk_score", "overall_risk_level", "mean_dep_risk_score", "severity_adjusted_vuln_score",
-		"headline_driver", "headline", "worst_cve_id", "worst_cve_score", "worst_cve_severity", "worst_cve_module",
+		"mean_dep_risk_score", "severity_adjusted_vuln_score",
+		"headline_driver", "worst_cve_id", "worst_cve_score", "worst_cve_severity", "worst_cve_module",
 		"diagnostics", "debug_scoring", "headline_unscored_reason", "takeover_candidates",
 	}
-	removedSummary    = []string{"critical_risk_count", "high_risk_count", "medium_risk_count", "low_risk_count"}
-	removedDependency = []string{"risk_score", "risk_level", "score_breakdown", "risk_factors"}
+	removedSummary    = []string{}
+	removedDependency = []string{"score_breakdown", "risk_factors"}
 	removedVuln       = []string{"severity_scored"}
 )
 
@@ -232,7 +232,7 @@ func TestWriteJSON_RemovedKeysAbsent(t *testing.T) {
 		}
 	}
 	// A cheap guard against a key moving somewhere not covered above.
-	for _, k := range []string{`"risk_score"`, `"risk_level"`, `"overall_risk_score"`, `"severity_scored"`} {
+	for _, k := range []string{`"mean_dep_risk_score"`, `"severity_scored"`, `"takeover_candidates"`} {
 		if bytes.Contains(raw, []byte(k)) {
 			t.Errorf("raw JSON contains %s", k)
 		}
@@ -509,5 +509,62 @@ func TestSBOM_PendingAndEstimatedGrades(t *testing.T) {
 	}
 	if len(doc.Annotations) != 1 || doc.Annotations[0].Comment != "grade=PENDING (dependency_maintenance)" {
 		t.Errorf("document annotations = %+v", doc.Annotations)
+	}
+}
+
+// The fields published before Grading v2 stay for one release, marked deprecated and derived from the grade (not from the
+// scorer's own numbers, which are never published).
+func TestWriteJSON_DeprecatedFieldsAreDerivedFromTheGrade(t *testing.T) {
+	dep := plainDep()
+	dep.RiskScore = 99 // the scorer's own number must never reach the output
+	dep.RiskLevel = scorer.RiskLow
+	ps := gradeTestScore(dep)
+	ps.OverallScore = 3
+	g := &grade.Result{
+		RuleVersion: grade.RuleVersion, Letter: grade.LetterD, Score: 70,
+		Deciding: &grade.Deciding{Module: dep.Module, Reason: "called high GO-1 (70)", Score: 70},
+		Rows: []grade.RowResult{
+			{Module: dep.Module, Score: 70, Letter: grade.LetterD},
+			{Module: "example.com/app", Self: true, Score: 0, Letter: grade.LetterA},
+		},
+	}
+	_, top := renderJSON(t, ps, JSONOptions{GoVersion: "1.21", Grade: g})
+	var score int
+	var level string
+	_ = json.Unmarshal(top["overall_risk_score"], &score)
+	_ = json.Unmarshal(top["overall_risk_level"], &level)
+	if score != 70 || level != "HIGH" {
+		t.Errorf("overall %d %s: from the grade, not the scorer's 3", score, level)
+	}
+	var head struct {
+		Level       string `json:"level"`
+		Driver      string `json:"driver"`
+		DrivingItem string `json:"driving_item"`
+		Candidates  []any  `json:"candidates"`
+	}
+	_ = json.Unmarshal(top["headline"], &head)
+	if head.Level != "HIGH" || head.Driver != "grade_row" || head.DrivingItem != dep.Module || head.Candidates == nil || len(head.Candidates) != 0 {
+		t.Errorf("headline %s", top["headline"])
+	}
+	var summary map[string]int
+	_ = json.Unmarshal(top["summary"], &summary)
+	if summary["high_risk_count"] != 1 || summary["low_risk_count"] != 0 {
+		t.Errorf("summary counts the dependency rows (not the module itself): %v", summary)
+	}
+	var deps []map[string]any
+	_ = json.Unmarshal(top["dependencies"], &deps)
+	if deps[0]["risk_score"] != float64(70) || deps[0]["risk_level"] != "HIGH" {
+		t.Errorf("dependency %v: from the grade's row, not the scorer's 99", deps[0])
+	}
+	var names []string
+	_ = json.Unmarshal(top["deprecated_fields"], &names)
+	if len(names) == 0 {
+		t.Error("the report must say which fields are deprecated")
+	}
+	// no grade, or a Pending one: UNKNOWN, never a made-up level
+	_, top = renderJSON(t, ps, JSONOptions{GoVersion: "1.21"})
+	_ = json.Unmarshal(top["overall_risk_level"], &level)
+	if level != "UNKNOWN" {
+		t.Errorf("no grade reads UNKNOWN, got %q", level)
 	}
 }

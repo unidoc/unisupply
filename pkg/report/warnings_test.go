@@ -23,6 +23,7 @@ const (
 func TestPublishedWarnings(t *testing.T) {
 	got := publishedWarnings([]string{warnMaintainer, warnMaintenance, warnResilience, warnVulnScan, warnEPSS, warnKEV, warnVulnScan, "GitHub token rejected"})
 	want := []string{
+		"GitHub API unauthenticated — maintainer data unavailable for 3 module(s)",
 		"maintenance data unavailable for 2 module(s)",
 		warnResilience,
 		"vulnerability scan did not run",
@@ -32,7 +33,7 @@ func TestPublishedWarnings(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("publishedWarnings =\n%q\nwant\n%q", got, want)
 	}
-	if publishedWarnings(nil) != nil || publishedWarnings([]string{warnMaintainer, warnEPSS}) != nil {
+	if publishedWarnings(nil) != nil || publishedWarnings([]string{warnEPSS}) != nil {
 		t.Error("expected nil when nothing is left")
 	}
 	if got := publishedWarnings([]string{"all weight excluded"}); got != nil {
@@ -62,13 +63,17 @@ func TestRetiredWarningsNotWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, out := range map[string]string{"text": tb.String(), "json": strings.Join(rep.Warnings, "\n")} {
-		for _, bad := range []string{"weight", "comparable", "reachability manually", "maintainer data"} {
+		for _, bad := range []string{"weight", "comparable", "reachability manually"} {
 			if strings.Contains(out, bad) {
 				t.Errorf("%s output contains %q:\n%s", name, bad, out)
 			}
 		}
 		if !strings.Contains(out, "vulnerability scan did not run") {
 			t.Errorf("%s output lost the vulnerability scan warning:\n%s", name, out)
+		}
+		// The strict policy preset still reads maintainer data, so the report must say it was missing.
+		if !strings.Contains(out, "maintainer data unavailable for 3 module(s)") {
+			t.Errorf("%s output lost the maintainer data warning:\n%s", name, out)
 		}
 	}
 }

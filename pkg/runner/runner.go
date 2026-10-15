@@ -68,11 +68,18 @@ type Options struct {
 	// project directory) if empty, matching the CLI's own default.
 	WorkflowPath string
 
-	// ExcludeStdlibFromGrade leaves the Go standard library out of the grade: its advisories are still listed in
-	// Result.StdlibVulns, but no row for them is graded. Set it when the toolchain the scan runs with is not the one the
-	// project is built with (a service that scans other people's repositories), so the grade does not rest on the
-	// scanner's own Go. The CLI scans with the project's toolchain and leaves it false.
-	ExcludeStdlibFromGrade bool
+	// StrictArchivedStatus makes an archived flag that could not be read (GitHub's 60 unauthenticated requests an hour) make the
+	// grade Pending when it could change the letter. By default the grade is given on what is known, with a note: an archived
+	// dependency adds at most 20 to its row, so the letter may be one band better than it would be with the flag. A service
+	// that publishes letters (gorisk) sets it: a letter without the data is not published.
+	StrictArchivedStatus bool
+
+	// GradeStdlib grades the Go standard library as a row named "stdlib". It is off by default, as in the agreed
+	// grading rules: the standard library's advisories are always listed in Result.StdlibVulns (with the Go release they
+	// were matched against), but they decide the letter only when this is set. They follow the Go toolchain the scan runs
+	// with, which is not necessarily the one the project is built with, so the same project can grade differently on
+	// another machine.
+	GradeStdlib bool
 
 	// SelfVersion is the version of the module being scanned, as published (a tag such as v1.4.0). It lets the grade
 	// look up the module's own advisories (OSV) and its own archived/deprecated status. Empty means the module is not
@@ -124,6 +131,14 @@ type Result struct {
 	// (the standard library is part of every build), so it can fail there too;
 	// IntegrityReport.GoSumVerified is empty on that path, as there is no go.sum to verify.
 	VulnScanErr error
+	// ScanInfo is what the vulnerability scan ran with: platform, Go version,
+	// govulncheck and vulnerability-database versions. Nil when no scan ran
+	// (offline mode). Fields govulncheck did not report are empty.
+	ScanInfo *scanner.ScanInfo
+	// KEVStaleSince is the date of the CISA KEV catalog copy used when the
+	// catalog could not be refreshed. Zero when the catalog was fresh or
+	// unavailable.
+	KEVStaleSince time.Time
 	// Interrupted is true when the context ended before every scanner finished,
 	// so the report may be incomplete.
 	Interrupted bool
@@ -221,21 +236,31 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	githubToken := tokenStatus.token
 
 	if len(graph.Dependencies) == 0 {
-		// No dependency means no per-dependency scanner has anything to do, but the standard library is part of every
-		// build and is graded: govulncheck still runs, so a module with no dependencies does not get a letter that never
-		// saw its one possible finding.
-		rep.Stage("Scanning vulnerabilities (govulncheck)")
-		vulns, vulnWarnings, vulnScanned, verr := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey})
-		if verr != nil {
-			rep.Warn("Vulnerability scan failed: %v", verr)
+		// No dependency means no per-dependency scanner has anything to do. The standard library is part of every build,
+		// but it decides the letter only when the caller grades it (Options.GradeStdlib); then govulncheck still runs, so a
+		// module with no dependencies does not get a letter that never saw its one possible finding. Otherwise nothing a
+		// scan could find would change the grade, and none is run (as before).
+		var stdlibVulns []scanner.Vulnerability
+		var emptyVulnErr error
+		var scanInfo scanner.ScanInfo
+		vulnScanned := !opts.GradeStdlib // "nothing to scan" is not a failed scan
+		if opts.GradeStdlib {
+			rep.Stage("Scanning vulnerabilities (govulncheck)")
+			var vulns map[string][]scanner.Vulnerability
+			var vulnWarnings []string
+			var verr error
+			vulns, vulnWarnings, vulnScanned, verr = scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
+			if verr != nil {
+				rep.Warn("Vulnerability scan failed: %v", verr)
+			}
+			emptyVulnErr = vulnScanFailure(verr, vulnScanned, vulnWarnings)
+			for _, w := range vulnWarnings {
+				rep.Warn("%s", w)
+			}
+			rep.Done("%d standard library advisories", len(vulns["stdlib"]))
+			resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
+			stdlibVulns = takeStdlibVulns(vulns)
 		}
-		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
-		for _, w := range vulnWarnings {
-			rep.Warn("%s", w)
-		}
-		rep.Done("%d standard library advisories", len(vulns["stdlib"]))
-		resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
-		stdlibVulns := takeStdlibVulns(vulns)
 
 		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
 		// real empty-graph score looks like.
@@ -248,10 +273,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 			Timeout: timeout, ScanStart: scanStart, ProjectDir: projectDir,
 			Stdlib:      gradedStdlib(&opts, stdlibVulns),
-			VulnScanned: emptyVulnErr == nil, VulnScanReason: errString(emptyVulnErr),
+			VulnScanned: emptyVulnErr == nil, VulnScanReason: errString(emptyVulnErr), StdlibScanned: opts.GradeStdlib,
+			KEVStaleSince: kevStaleSince(&scanInfo),
 		})
 		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
-			StdlibVulns: stdlibVulns, VulnScanErr: emptyVulnErr}, nil
+			StdlibVulns: stdlibVulns, VulnScanErr: emptyVulnErr,
+			ScanInfo: scanInfoPtr(&scanInfo), KEVStaleSince: kevStaleSince(&scanInfo)}, nil
 	}
 
 	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
@@ -265,7 +292,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey})
+	var scanInfo scanner.ScanInfo
+	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
 	// The scanner reports availability directly: govulncheck failures come back
 	// as a warning with a nil error, so err alone reads a failed scan as clean.
 	vulnScanUnavailable := !vulnScanned
@@ -435,6 +463,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		ProjectDir: projectDir,
 		Vulns:      vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
+		StdlibScanned: true, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
 	})
 
 	return &Result{
@@ -446,6 +475,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		StdlibVulns:     stdlibVulns,
 		IntegrityReport: integrityReport,
 		VulnScanErr:     vulnScanErr,
+		ScanInfo:        scanInfoPtr(&scanInfo),
+		KEVStaleSince:   kevStaleSince(&scanInfo),
 		Interrupted:     interrupted,
 
 		GithubTokenRejected: tokenStatus.rejected,
@@ -524,4 +555,20 @@ func resolveAllFixDates(ctx context.Context, opts scanner.FixDateOptions, stage 
 			scanner.ResolveFixDates(ctx, opts, path, vulns[path])
 		}
 	}
+}
+
+// scanInfoPtr is info when a scan started (Platform is set as it starts), else nil.
+func scanInfoPtr(info *scanner.ScanInfo) *scanner.ScanInfo {
+	if info.Platform == "" {
+		return nil
+	}
+	return info
+}
+
+// kevStaleSince is the stale KEV catalog date recorded in info, or the zero time.
+func kevStaleSince(info *scanner.ScanInfo) time.Time {
+	if info.KEVStaleSince == nil {
+		return time.Time{}
+	}
+	return *info.KEVStaleSince
 }

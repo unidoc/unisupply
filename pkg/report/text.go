@@ -39,6 +39,9 @@ type TextOptions struct {
 
 	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
 	Grade *grade.Result
+
+	// Scan is what the vulnerability scan ran with (platform, Go release, govulncheck, vulnerability database). nil: none ran.
+	Scan *scanner.ScanInfo
 }
 
 // WriteText generates the human-readable terminal output.
@@ -65,6 +68,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
 	writeGradeText(w, c, opts.Grade, opts.Verbose)
+	writeScanInfoText(w, opts.Scan)
 
 	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
 	// undeniable visibility, even when the headline already reflects them.
@@ -692,4 +696,27 @@ func writeVulnAliasGlossary(w io.Writer, ps *scorer.ProjectScore, stdlib []scann
 		fmt.Fprintf(w, "  %s = %s\n", e.ID, strings.Join(e.Aliases, ", "))
 	}
 	fmt.Fprintln(w)
+}
+
+// writeScanInfoText says what the vulnerability scan ran with, so a letter can be reproduced: the platform, the Go release the
+// standard library was matched against, the govulncheck version and the vulnerability database with its last-modified time.
+func writeScanInfoText(w io.Writer, info *scanner.ScanInfo) {
+	if info == nil {
+		return
+	}
+	var parts []string
+	add := func(label, v string) {
+		if v != "" {
+			parts = append(parts, label+" "+v)
+		}
+	}
+	add("platform", info.Platform)
+	add("Go", info.GoVersion)
+	add("govulncheck", info.GovulncheckVersion)
+	add("database", info.VulnDB)
+	add("database modified", info.VulnDBLastModified)
+	if len(parts) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nSCAN DETAILS\n  %s\n", strings.Join(parts, " · "))
 }

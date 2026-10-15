@@ -315,3 +315,89 @@ func (rt *routingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		Header:     make(http.Header),
 	}, nil
 }
+
+// kevAt loads the catalog through a client whose clock reads now, over a cache
+// directory shared with other clients in the same test.
+func kevAt(t *testing.T, dir string, now time.Time, st *staticTransport) (KEVCatalog, error) {
+	t.Helper()
+	ti := newThreatIntelWithTransport(t, st, dir, func() time.Time { return now })
+	return ti.LoadKEVCatalog(context.Background())
+}
+
+func TestLoadKEVCatalog_FreshCacheIsNotStale(t *testing.T) {
+	dir := t.TempDir()
+	t0 := fixedClock()
+	if _, err := kevAt(t, dir, t0, &staticTransport{statusCode: 200, body: kevTestCatalog}); err != nil {
+		t.Fatal(err)
+	}
+	down := &staticTransport{statusCode: 503}
+	c, err := kevAt(t, dir, t0.Add(time.Hour), down)
+	if err != nil || c.Stale || len(c.Entries) != 2 || down.calls != 0 {
+		t.Errorf("err=%v stale=%v entries=%d calls=%d, want a fresh cache hit without network", err, c.Stale, len(c.Entries), down.calls)
+	}
+}
+
+func TestLoadKEVCatalog_ExpiredCacheAndFailureUsesStaleCopy(t *testing.T) {
+	dir := t.TempDir()
+	t0 := fixedClock()
+	if _, err := kevAt(t, dir, t0, &staticTransport{statusCode: 200, body: kevTestCatalog}); err != nil {
+		t.Fatal(err)
+	}
+	for _, down := range []*staticTransport{{statusCode: 503, body: "x"}, {statusCode: 200, body: "<html>"}} {
+		c, err := kevAt(t, dir, t0.Add(10*24*time.Hour), down)
+		if err != nil {
+			t.Fatalf("a stale copy exists, want no error, got %v", err)
+		}
+		if !c.Stale || !c.StaleSince.Equal(t0) || len(c.Entries) != 2 {
+			t.Errorf("Stale=%v since=%v entries=%d, want stale since %v with the old entries", c.Stale, c.StaleSince, len(c.Entries), t0)
+		}
+	}
+	// The stale copy must survive the failures for the next attempt.
+	c, err := kevAt(t, dir, t0.Add(11*24*time.Hour), &staticTransport{statusCode: 503})
+	if err != nil || !c.Stale || !c.StaleSince.Equal(t0) {
+		t.Errorf("second outage: err=%v stale=%v since=%v", err, c.Stale, c.StaleSince)
+	}
+	// A successful refresh replaces it and is not stale.
+	c, err = kevAt(t, dir, t0.Add(12*24*time.Hour), &staticTransport{statusCode: 200, body: kevTestCatalog})
+	if err != nil || c.Stale {
+		t.Errorf("refresh: err=%v stale=%v", err, c.Stale)
+	}
+}
+
+func TestLoadKEVCatalog_NoCacheAndFailureIsNotAvailable(t *testing.T) {
+	c, err := kevAt(t, t.TempDir(), fixedClock(), &staticTransport{statusCode: 503})
+	if err == nil || c.Entries != nil || c.Stale {
+		t.Errorf("err=%v entries=%v stale=%v, want an error and no catalog", err, c.Entries, c.Stale)
+	}
+}
+
+func TestEnrichThreatIntel_StaleCatalogChecksAndWarns(t *testing.T) {
+	dir := t.TempDir()
+	t0 := fixedClock()
+	if _, err := kevAt(t, dir, t0, &staticTransport{statusCode: 200, body: kevTestCatalog}); err != nil {
+		t.Fatal(err)
+	}
+	ti := NewThreatIntelClient(ThreatIntelOptions{CacheDir: dir, clockFn: func() time.Time { return t0.Add(5 * 24 * time.Hour) }})
+	ti.client.Transport = &routingTransport{epssBody: `{"data":[]}`, kevBody: "down", kevStatus: 503}
+
+	results := map[string][]Vulnerability{"m": {{ID: "GO-1", Aliases: []string{"CVE-2024-0001"}, Severity: "HIGH"}}}
+	warnings, since := enrichThreatIntelStale(context.Background(), ti, results)
+
+	v := results["m"][0]
+	if !v.KEVChecked || !v.InKEV || v.KEVCatalogStaleSince == nil || !v.KEVCatalogStaleSince.Equal(t0) || !since.Equal(t0) {
+		t.Errorf("KEVChecked=%v InKEV=%v stale=%v since=%v", v.KEVChecked, v.InKEV, v.KEVCatalogStaleSince, since)
+	}
+	want := "CISA KEV catalog could not be refreshed; using the copy from " + t0.Format("2006-01-02")
+	found := false
+	for _, w := range warnings {
+		if w == want {
+			found = true
+		}
+		if strings.Contains(w, "unavailable") {
+			t.Errorf("a stale catalog is not unavailable: %q", w)
+		}
+	}
+	if !found {
+		t.Errorf("warnings %v lack %q", warnings, want)
+	}
+}

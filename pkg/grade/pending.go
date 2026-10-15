@@ -7,16 +7,19 @@ import (
 )
 
 // pendingFor says whether the grade must be Pending: no letter, the reason, and what is known anyway. A check that failed
-// is never read as a clean result. The module is Pending if any of these failed:
+// is never read as a clean result. The grade is Pending (Pending.Check names which) if any of these did not run:
 //
-//  1. the vulnerability scan;
-//  2. the scan as a whole (a timeout or interruption);
-//  3. the module's own advisories (the OSV lookup), or its own status (archived, deprecated) when the worst upkeep score it
-//     could still get (35) would beat the worst row known so far;
-//  4. the maintenance data of a dependency, when the worst upkeep score it could still get (20, or 10 if it is test-only or
-//     not compiled in) would beat the worst row known so far.
+//  1. vulnerability_scan: the vulnerability scan;
+//  2. scan_incomplete: the scan as a whole (a timeout or interruption);
+//  3. checksum: `go mod verify`, when a mismatch (F) could still raise the letter;
+//  4. known_exploited: the CISA catalog, for a reached finding with a CVE, when an F could still raise the letter;
+//  5. module_advisories / module_status: the module's own advisories (the OSV lookup), or its own status (archived,
+//     deprecated) when the worst upkeep score it could still get (35) would beat the worst row known so far;
+//  6. dependency_maintenance: the maintenance data of a dependency, when the worst upkeep score it could still get (20, or
+//     10 if it is test-only or not compiled in) would beat the worst row known so far.
 //
-// A module with no dependencies has nothing to scan and is not Pending for that; its own row still needs 3.
+// A module with no dependencies has no dependency check to fail; its own row still needs 5, and the vulnerability scan
+// (1) runs for it only when the standard library is graded (without it there is nothing the scan could change).
 func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 	c := in.Checks
 	known := knownFacts(in, rows)
@@ -64,7 +67,7 @@ func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 			names = names[:3]
 		}
 		return &Pending{Check: "dependency_maintenance", Known: known,
-			Reason: fmt.Sprintf("the maintenance data of %s%s could not be read, and an archived or deprecated state (%d) would be worse than anything found so far", strings.Join(names, ", "), more, maxPossible)}
+			Reason: fmt.Sprintf("the maintenance data of %s%s could not be read, and an archived or deprecated state (%d) would be worse than anything found so far%s", strings.Join(names, ", "), more, maxPossible, hintSuffix(c.MaintenanceHint))}
 	}
 	return nil
 }
@@ -98,4 +101,11 @@ func knownFacts(in *Input, rows []RowResult) []string {
 		out = append(out, fmt.Sprintf("worst row so far: %s, %s", who, w.Reason))
 	}
 	return out
+}
+
+func hintSuffix(h string) string {
+	if h = strings.TrimSpace(h); h == "" {
+		return ""
+	}
+	return ". " + h
 }

@@ -152,6 +152,10 @@ type Vulnerability struct {
 	// CVE alias to look up — i.e. InKEV is a real answer, not a default.
 	KEVChecked bool `json:"kev_checked,omitempty"`
 
+	// KEVCatalogStaleSince is set when the KEV catalog could not be refreshed
+	// and this vuln was checked against the older copy fetched at that time.
+	KEVCatalogStaleSince *time.Time `json:"kev_catalog_stale_since,omitempty"`
+
 	// KEVDateAdded is the date CISA added the CVE to the catalog.
 	KEVDateAdded string `json:"kev_date_added,omitempty"`
 
@@ -438,6 +442,7 @@ func preferCalled(candTrace []traceEntry, candPath []string, candFrames []CallFr
 // anything about configuration.
 func callCondition(trace []traceEntry, roots map[string]bool) string {
 	sawProject := false
+	var firstStd *traceEntry
 	for i := len(trace) - 1; i >= 0; i-- { // outermost first
 		t := trace[i]
 		if t.Function == "" {
@@ -452,9 +457,19 @@ func callCondition(trace []traceEntry, roots map[string]bool) string {
 			return ""
 		}
 		if isStdlibFrame(t) {
+			// A standard-library frame that only forwards to a later dependency or
+			// project frame (a callback) does not explain the path; remember the
+			// first one in case nothing else follows.
+			if firstStd == nil {
+				c := t
+				firstStd = &c
+			}
 			continue
 		}
 		return "reached through " + frameName(t)
+	}
+	if firstStd != nil {
+		return "reached through " + frameName(*firstStd)
 	}
 	return ""
 }
@@ -578,6 +593,11 @@ type VulnScanOptions struct {
 	GitHubToken string
 	// NVDAPIKey is sent as the apiKey header to services.nvd.nist.gov only.
 	NVDAPIKey string
+	// Info, when non-nil, is filled with the platform, govulncheck and
+	// vulnerability-database versions the scan ran with. Platform is set as
+	// soon as a scan starts; the rest come from govulncheck's config message
+	// and stay empty when the output has none.
+	Info *ScanInfo
 }
 
 // ScanVulnsWithOptions is ScanVulns with explicit credentials for the
@@ -609,6 +629,10 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	parseOpts := gvcParseOptions{}
 	if projectErr == nil && scannerErr == nil {
 		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
+	}
+	if opts.Info != nil {
+		*opts.Info = ScanInfo{Platform: scanPlatform()}
+		parseOpts.info = opts.Info
 	}
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
@@ -666,7 +690,11 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	}
 	warnings = append(warnings, collapseSeverityLookupWarnings(enrichWarnings)...)
 
-	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
+	tiWarnings, kevStale := enrichThreatIntelStale(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)
+	warnings = append(warnings, tiWarnings...)
+	if opts.Info != nil && !kevStale.IsZero() {
+		opts.Info.KEVStaleSince = &kevStale
+	}
 
 	// A non-nil exitErr means govulncheck failed even though it emitted parseable
 	// output, so the results are partial. Report the axis as unmeasured rather
@@ -694,6 +722,14 @@ func CVEAlias(v *Vulnerability) string {
 // has a CVE alias. Both lookups are best-effort: failures produce warnings,
 // never errors — the scan completes with the threat-intel fields absent.
 func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string) {
+	warnings, _ = enrichThreatIntelStale(ctx, ti, results)
+	return warnings
+}
+
+// enrichThreatIntelStale is enrichThreatIntel that also returns the date of the
+// KEV catalog copy used when the catalog could not be refreshed (zero when the
+// catalog was fresh or unavailable).
+func enrichThreatIntelStale(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string, kevStaleSince time.Time) {
 	// Collect the distinct CVE IDs across all vulns.
 	cveSet := make(map[string]bool)
 	for _, modVulns := range results {
@@ -704,7 +740,7 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 		}
 	}
 	if len(cveSet) == 0 {
-		return nil
+		return nil, time.Time{}
 	}
 	cveIDs := make([]string, 0, len(cveSet))
 	for cve := range cveSet {
@@ -718,7 +754,12 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 			"EPSS lookup incomplete; exploitation probability may be missing for some CVEs: %v", epssErr))
 	}
 
-	kev, kevErr := ti.LoadKEV(ctx)
+	kevCat, kevErr := ti.LoadKEVCatalog(ctx)
+	kev := kevCat.Entries
+	if kevCat.Stale {
+		kevStaleSince = kevCat.StaleSince
+		warnings = append(warnings, kevStaleWarning(kevCat.StaleSince))
+	}
 	if kevErr != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"CISA KEV catalog unavailable; known-exploited status unchecked: %v", kevErr))
@@ -741,6 +782,10 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 			// KEVChecked false so consumers see "not checked", not "not listed".
 			if kev != nil {
 				v.KEVChecked = true
+				if kevCat.Stale {
+					since := kevCat.StaleSince
+					v.KEVCatalogStaleSince = &since
+				}
 				if entry, ok := kev[cve]; ok {
 					v.InKEV = true
 					v.KEVDateAdded = entry.DateAdded
@@ -751,7 +796,7 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 		results[modPath] = modVulns
 	}
 
-	return warnings
+	return warnings, kevStaleSince
 }
 
 // gvcParseOptions carries the toolchain locations needed to normalise
@@ -761,6 +806,8 @@ type gvcParseOptions struct {
 	scannerGOROOT string
 	// projectGOROOT is the GOROOT of the scanned project's toolchain.
 	projectGOROOT string
+	// info, when non-nil, receives govulncheck's config message.
+	info *ScanInfo
 }
 
 // parseGovulncheckJSON parses govulncheck's JSON stream without any standard
@@ -786,6 +833,10 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 		var raw map[string]json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			continue
+		}
+
+		if cfg, ok := raw["config"]; ok && opts.info != nil {
+			opts.info.apply(cfg)
 		}
 
 		if osvData, ok := raw["osv"]; ok {
@@ -916,6 +967,14 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 		if osv.Published != "" {
 			if t, err := time.Parse(time.RFC3339, osv.Published); err == nil {
 				vuln.PublishedAt = &t
+				// The advisory date is the fallback fix date for EVERY
+				// finding with a fix, whether or not severity enrichment
+				// runs; ResolveFixDates takes the later of it and the
+				// proxy's time for the fixed version.
+				if fixedVersion != "" {
+					fp := t
+					vuln.FixPublishedAt = &fp
+				}
 			}
 		}
 

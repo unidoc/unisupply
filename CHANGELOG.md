@@ -143,12 +143,19 @@ breaks consumers that read the old fields.**
   grade has no letter and says which check and why. It is never an A.
 - **Response window.** A fix released within the last 14 days is labelled with the date its window ends; the label never
   changes the letter. `fix_released_at` and `fix_date_source` come from the module proxy.
-- **Removed from every output:** `overall_risk_score`, `overall_risk_level`, `headline`, `headline_driver`,
-  `mean_dep_risk_score`, `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`,
-  `headline_unscored_reason`, the per-dependency `risk_score`, `risk_level`, `score_breakdown` and `risk_factors`,
-  `severity_scored`, the `*_risk_count` summary fields, `takeover_candidates` (and `pkg/runner.Result.Takeovers`), the
-  AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` / `unisupply:risk_level` (now
-  `unisupply:grade` and `unisupply:grade_reason`).
+- **Deprecated, kept for one release (JSON only), derived from the grade:** `overall_risk_score` (the worst row's policy
+  value), `overall_risk_level` (the coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN
+  without a letter), `headline` (the deciding row in the old shape, with an empty `candidates`), the `*_risk_count`
+  summary fields (dependency rows by level) and the per-dependency `risk_score` / `risk_level`. They no longer carry their
+  old meaning (a weighted risk score); `deprecated_fields` in the report lists them. Read `grade` instead: they are removed
+  in the next release.
+- **Removed from every output (no equivalent in the grade):** `headline_driver`, `mean_dep_risk_score`,
+  `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`, `headline_unscored_reason`, the
+  per-dependency `score_breakdown` and `risk_factors`, `severity_scored`, `takeover_candidates` (and
+  `pkg/runner.Result.Takeovers`), the AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` /
+  `unisupply:risk_level` (now `unisupply:grade` and `unisupply:grade_reason`). The Go types behind them in `pkg/report`
+  (`JSONTakeover`, `JSONScoreBreakdown`, `JSONDiagnostics`, `JSONCandidate`) are removed; `JSONHeadline` and the
+  deprecated fields above remain.
 - **CLI:** `--min-risk` and `--debug-scoring` are removed. New `--module-version` grades the scanned module itself at a
   published version, and `--response-history` adds how fast the project adopted past fixes.
 - **Policy:** `max_risk_score` and `max_overall_score` are removed (a policy file that contains them is rejected). New
@@ -174,10 +181,21 @@ breaks consumers that read the old fields.**
     errors in the `FAIL: N policy violation(s)` line, listing warnings separately.
   - The AI-generation scanner no longer runs and its result is not published (`pkg/scanner/aigen.go` is kept but not
     called).
-  - `runner.Options.ExcludeStdlibFromGrade` is new: it leaves the standard library out of the grade while its
-    advisories are still listed.
+  - `runner.Options.StrictArchivedStatus` is new (`--strict-archived`, default off): by default a grade is given when the
+    only gap is a dependency's archived flag that GitHub's rate limit kept unread (an archived dependency adds at most 20 to
+    its row): the result lists the modules in `grade.archived_unread` and says in a note that the letter may be one band
+    better. With the strict rule the grade is Pending instead (a service that publishes letters sets it). The module's
+    own archived flag is always required.
+  - `runner.Options.GradeStdlib` is new (`--grade-stdlib` on the CLI, default off): the Go standard library's advisories
+    are always listed (`runner.Result.StdlibVulns`, with the Go release they were matched against in `grade.notes`), but
+    they decide the letter only when it is set, as in the agreed rules. A module with no dependencies runs the
+    vulnerability scan only then.
   - `grade.Result` gains `ChecksumMismatch` and `ChecksumDetail` (`checksum_mismatch`, `checksum_detail` in JSON), and
-    a `grade.RowResult` may have an empty `Letter`: its upkeep could not be read (the text and PDF reports show `-`).
+    a `grade.RowResult` may have an empty `Letter` (the key is present and `""`, not omitted): its upkeep could not be
+    read (the text and PDF reports show `-`).
+  - JSON contract since the first draft of this change: `upkeep_state` has the new value `not_assessed` (the module
+    itself without a published version, a locally replaced dependency, the standard library); `pending.check` has the new
+    values `checksum` and `known_exploited`; a Pending result has neither a letter, a `deciding` row nor a `score`.
 - **Published scan warnings** no longer carry the retired score language: lines about excluded axis weights, scores
   that are "NOT comparable" and the high-EPSS "verify reachability manually" notice are dropped or shortened (for
   example "vulnerability scan did not run"). Warnings about data that could not be fetched are kept.

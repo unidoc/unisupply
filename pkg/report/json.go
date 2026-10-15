@@ -26,6 +26,17 @@ type JSONReport struct {
 	// passes no result); a consumer that gates on the letter MUST treat null and a missing "letter" as "no result".
 	Grade *grade.Result `json:"grade"`
 
+	// Deprecated: kept for one release, derived from Grade (see json_deprecated.go). OverallRisk is the worst row's policy
+	// value, OverallLevel the coarse band of the letter (UNKNOWN without one) and Headline the deciding row in the old shape.
+	OverallRisk      int          `json:"overall_risk_score"`
+	OverallLevel     string       `json:"overall_risk_level"`
+	Headline         JSONHeadline `json:"headline"`
+	DeprecatedFields []string     `json:"deprecated_fields"`
+
+	// Scan is what the vulnerability scan ran with: the platform, the Go release the standard library was matched against,
+	// the govulncheck version and the vulnerability database with its last-modified time. Absent when no scan ran.
+	Scan *scanner.ScanInfo `json:"scan,omitempty"`
+
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
 	Warnings []string `json:"warnings,omitempty"`
@@ -82,6 +93,12 @@ type JSONProject struct {
 
 // JSONSummary holds summary statistics.
 type JSONSummary struct {
+	// Deprecated: the number of dependency rows by coarse level, derived from the grade.
+	CriticalRiskCount int `json:"critical_risk_count"`
+	HighRiskCount     int `json:"high_risk_count"`
+	MediumRiskCount   int `json:"medium_risk_count"`
+	LowRiskCount      int `json:"low_risk_count"`
+
 	TotalVulns      int `json:"total_vulnerabilities"`
 	Unmaintained2yr int `json:"unmaintained_2yr"`
 	Unmaintained1yr int `json:"unmaintained_1yr"`
@@ -92,6 +109,9 @@ type JSONDependency struct {
 	Module  string `json:"module"`
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
+	// Deprecated: the row's policy value and its coarse level, derived from the grade (see json_deprecated.go).
+	RiskScore int    `json:"risk_score"`
+	RiskLevel string `json:"risk_level"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
 	// failed or was not run). When present it reflects the main module's own
 	// go list -deps ./... and go list -deps -test ./... results: true =
@@ -338,6 +358,10 @@ type JSONOptions struct {
 	// StdlibVulns are the standard library vulnerabilities, already sorted by
 	// the caller. They are reported as given.
 	StdlibVulns []scanner.Vulnerability
+
+	// Scan says what the vulnerability scan ran with (platform, Go release, govulncheck version, vulnerability database and
+	// its last-modified time, and the age of the CISA catalog when it could not be refreshed). nil when no scan ran.
+	Scan *scanner.ScanInfo
 }
 
 // toJSONVuln maps a scanned vulnerability to its JSON form. Dependency and
@@ -385,6 +409,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	directCount := graph.DirectCount()
 	transitiveCount := graph.TransitiveCount()
 
+	crit, high, med, low := deprecatedCounts(opts.Grade)
 	report := JSONReport{
 		Tool:        "unisupply",
 		Version:     version.Version,
@@ -396,22 +421,31 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			TransDeps:  transitiveCount,
 			TotalDeps:  directCount + transitiveCount,
 		},
-		Grade:     opts.Grade,
-		Warnings:  publishedWarnings(ps.Warnings),
-		Notes:     ps.Notes,
-		TimeBombs: collectJSONTimeBombs(ps),
+		Grade:            opts.Grade,
+		OverallRisk:      gradeScore(opts.Grade),
+		OverallLevel:     deprecatedHeadline(opts.Grade).Level,
+		Headline:         deprecatedHeadline(opts.Grade),
+		DeprecatedFields: deprecatedFields,
+		Scan:             opts.Scan,
+		Warnings:         publishedWarnings(ps.Warnings),
+		Notes:            ps.Notes,
+		TimeBombs:        collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
+			CriticalRiskCount: crit, HighRiskCount: high, MediumRiskCount: med, LowRiskCount: low,
 			TotalVulns:      ps.TotalVulns,
 			Unmaintained2yr: ps.Unmaintained2yr,
 			Unmaintained1yr: ps.Unmaintained1yr,
 		},
 	}
 
+	rows := deprecatedRows(opts.Grade)
 	for _, ds := range ps.Dependencies {
 		jd := JSONDependency{
 			Module:         ds.Module,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
+			RiskScore:      rows[ds.Module].Score,
+			RiskLevel:      deprecatedLevel(rows[ds.Module].Letter),
 			TestOnly:       ds.IsTestOnly,
 			InBuild:        ds.InBuild,
 			Platforms:      ds.Platforms,
@@ -651,8 +685,9 @@ var retiredWarningMarkers = []string{"weight excluded", "weight is excluded", "N
 //   - A warning about data that could not be fetched is kept. If it goes on to explain what the retired model did about
 //     it ("; ... weight excluded from those scores", "... NOT comparable to a scan that checked for CVEs"), that
 //     trailing clause is cut and the data statement stays, e.g. "vulnerability scan did not run".
-//   - "maintainer data unavailable" is dropped: only the retired maintainer weight read maintainer (GitHub) data, the
-//     grade does not, so a missing GitHub token or a rate limit no longer limits the letter.
+//   - "maintainer data unavailable" is kept (only its retired-weight clause is cut): the grade does not read maintainer
+//     data, but the strict policy preset (no_single_maintainer) does and skips modules without it, so a report must say
+//     the data was missing.
 //   - The high-EPSS "verify reachability manually" warning is dropped: EPSS is not an input of the grade. (The KEV one
 //     stays: a KEV finding counts in the grade at once.)
 //
@@ -661,7 +696,7 @@ func publishedWarnings(warnings []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, w := range warnings {
-		if strings.Contains(w, "maintainer data unavailable") || strings.HasPrefix(w, "high-EPSS CVE") {
+		if strings.HasPrefix(w, "high-EPSS CVE") {
 			continue
 		}
 		cut := -1

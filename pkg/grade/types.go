@@ -13,6 +13,7 @@
 package grade
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -92,6 +93,12 @@ type Upkeep struct {
 	// state is then "not_assessed", never "finished".
 	NotAssessed bool
 
+	// ArchivedUnread is true when the only thing that could not be read is the archived flag (GitHub's rate limit, no token),
+	// and the caller chose to grade without it: the row is graded on what is known, the result lists the module in
+	// Result.ArchivedUnread and says in a note that an archived module would add at most 20 to its row. It is never set for
+	// the module itself (an archived module is a C), nor when the caller asked for the strict rule.
+	ArchivedUnread bool
+
 	// Missing is true when the maintenance data could not be read (the lookup failed): the state is then unknown, and a
 	// check that could change the letter makes the grade Pending.
 	Missing bool
@@ -132,8 +139,17 @@ type Checks struct {
 	// ChecksumUnverified is true when `go mod verify` could not complete: a checksum mismatch (F) cannot be ruled out.
 	ChecksumUnverified bool
 
-	// StdlibVersion is the Go release the standard library row was graded at (the toolchain the scan ran with).
+	// StdlibVersion is the Go release the standard library was scanned at (the toolchain the scan ran with); StdlibGraded
+	// says whether the standard library takes part in the grade (it is listed either way).
 	StdlibVersion string
+	StdlibGraded  bool
+
+	// KEVStaleSince is set when the CISA catalog could not be refreshed and an older copy was used: the grade says so.
+	KEVStaleSince time.Time
+
+	// MaintenanceHint is appended to the reason of a Pending caused by missing maintenance data: why the data is missing
+	// and what to do (for example that GitHub allows 60 unauthenticated requests an hour).
+	MaintenanceHint string
 
 	SelfStatusReason     string // why the status lookup failed
 	SelfAdvisoriesReason string // why the advisory lookup failed
@@ -216,12 +232,13 @@ type RowResult struct {
 	UpkeepScore int    `json:"upkeep_score"`
 	Letter      Letter `json:"letter"`
 	// Reason is the one sentence that explains the score.
-	Reason       string          `json:"reason"`
-	UpkeepState  string          `json:"upkeep_state"`
-	UpkeepNote   string          `json:"upkeep_note,omitempty"` // the maintainers' own words (deprecation, retraction)
-	Estimated    bool            `json:"estimated,omitempty"`
-	UpkeepMissed bool            `json:"upkeep_missing,omitempty"`
-	Findings     []FindingResult `json:"findings,omitempty"`
+	Reason         string          `json:"reason"`
+	UpkeepState    string          `json:"upkeep_state"`
+	UpkeepNote     string          `json:"upkeep_note,omitempty"` // the maintainers' own words (deprecation, retraction)
+	Estimated      bool            `json:"estimated,omitempty"`
+	UpkeepMissed   bool            `json:"upkeep_missing,omitempty"`
+	ArchivedUnread bool            `json:"archived_unread,omitempty"` // graded without the archived flag (see Upkeep.ArchivedUnread)
+	Findings       []FindingResult `json:"findings,omitempty"`
 }
 
 // TreeRow is a whole-tree rule that raised the letter: it appears as its own row.
@@ -235,7 +252,7 @@ type TreeRow struct {
 
 // Pending is the answer when a check the letter depends on did not run: no letter, the reason, and what is known.
 type Pending struct {
-	Check  string   `json:"check"` // vulnerability_scan | scan_incomplete | module_status | module_advisories | dependency_maintenance
+	Check  string   `json:"check"` // vulnerability_scan | scan_incomplete | checksum | known_exploited | module_status | module_advisories | dependency_maintenance
 	Reason string   `json:"reason"`
 	Known  []string `json:"known,omitempty"` // what is known anyway, e.g. "Archived"
 }
@@ -256,6 +273,9 @@ type Result struct {
 	// Notes are things the letter does not cover or checks that were skipped (e.g. the module's own advisories were not
 	// looked up because no module version was given).
 	Notes []string `json:"notes,omitempty"`
+	// ArchivedUnread lists the dependencies whose archived flag could not be read although the grade was given (see
+	// Upkeep.ArchivedUnread): the letter may be one band better than it would be with the flag.
+	ArchivedUnread []string `json:"archived_unread,omitempty"`
 	// ChecksumMismatch is true when `go mod verify` found a module that does not match its checksum, and ChecksumDetail
 	// says which. It is a fact of the result whether or not a whole-tree row is what decides the letter: when a row already
 	// scores F, the rule does not raise the letter and so has no tree row, but the mismatch must not be lost.
@@ -270,4 +290,17 @@ type Deciding struct {
 	Tree   string `json:"tree_rule,omitempty"`
 	Reason string `json:"reason"`
 	Score  int    `json:"score"`
+}
+
+// MarshalJSON leaves out the score of a Pending result: there is no worst row to take it from, so a published 0 would read
+// as a clean result.
+func (r Result) MarshalJSON() ([]byte, error) {
+	type plain Result // no methods: avoids recursion
+	if r.Pending != nil {
+		return json.Marshal(struct {
+			plain
+			Score *int `json:"score,omitempty"`
+		}{plain: plain(r)})
+	}
+	return json.Marshal(plain(r))
 }

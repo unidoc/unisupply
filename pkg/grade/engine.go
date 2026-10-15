@@ -337,7 +337,7 @@ func gradeRow(r Row, in *Input) RowResult {
 		Module: r.Module, Version: r.Version, Self: r.Self, Direct: r.Direct,
 		TestOnly: isConfirmed(r.TestOnly), NotBuilt: isRefuted(r.InBuild),
 		Score: score, VulnScore: vs, UpkeepScore: us, Letter: bandOf(score),
-		UpkeepState: state, UpkeepNote: strings.TrimSpace(r.Upkeep.Message), UpkeepMissed: r.Upkeep.Missing,
+		UpkeepState: state, UpkeepNote: strings.TrimSpace(r.Upkeep.Message), UpkeepMissed: r.Upkeep.Missing, ArchivedUnread: r.Upkeep.ArchivedUnread,
 	}
 	// A row whose upkeep could not be read has no letter when what it could still be would change it: a row shown as A
 	// while its archived flag is unknown would read as a clean result.
@@ -462,12 +462,28 @@ func gradeOnce(input *Input) Result {
 			res.Notes = append(res.Notes, note+".")
 		}
 	}
+	for i := range in.Deps {
+		if in.Deps[i].Upkeep.ArchivedUnread {
+			res.ArchivedUnread = append(res.ArchivedUnread, in.Deps[i].Module)
+		}
+	}
+	if n := len(res.ArchivedUnread); n > 0 {
+		sort.Strings(res.ArchivedUnread)
+		note := fmt.Sprintf("The archived status of %d module%s could not be read: an archived module would add at most %d to its row, so this letter may be one band better than it would be with the flag.", n, plural(n, "", "s"), upkeepDependency)
+		if h := strings.TrimSpace(in.Checks.MaintenanceHint); h != "" {
+			note += " " + h + "."
+		}
+		res.Notes = append(res.Notes, note)
+	}
+	if t := in.Checks.KEVStaleSince; !t.IsZero() {
+		res.Notes = append(res.Notes, "The known-exploited catalog (CISA) could not be refreshed: the copy from "+t.UTC().Format("2006-01-02")+" was used.")
+	}
 	if v := strings.TrimSpace(in.Checks.StdlibVersion); v != "" {
-		for i := range rows {
-			if rows[i].Module == "stdlib" && len(rows[i].Findings) > 0 {
-				res.Notes = append(res.Notes, "The standard library is graded at "+v+", the Go toolchain this scan ran with.")
-				break
-			}
+		// said whether or not it had findings: a clean result holds for this Go release only
+		if in.Checks.StdlibGraded {
+			res.Notes = append(res.Notes, "The standard library is graded at "+v+", the Go toolchain this scan ran with.")
+		} else {
+			res.Notes = append(res.Notes, "The standard library was scanned at "+v+", the Go toolchain this scan ran with; its findings are listed, not graded.")
 		}
 	}
 	if in.Checks.SelfAdvisoriesSkipped {
@@ -506,12 +522,15 @@ func Grade(input *Input) Result {
 	if input == nil {
 		input = &Input{}
 	}
-	res := gradeOnce(input)
-	if res.Pending != nil || !hasEstimatedSeverity(input) {
+	// Merge the advisories first: a Go advisory with no severity whose GitHub alias is rated HIGH has a published severity
+	// once they are one finding, and only what is still estimated after the merge is substituted below.
+	merged := mergedInput(input)
+	res := gradeOnce(&merged)
+	if res.Pending != nil || !hasEstimatedSeverity(&merged) {
 		return res
 	}
 	for _, sev := range []string{"LOW", "CRITICAL"} {
-		alt := withEstimatedSeverity(input, sev)
+		alt := withEstimatedSeverity(&merged, sev)
 		if r := gradeOnce(&alt); r.Letter != res.Letter {
 			res.Estimated = true
 			break
@@ -558,6 +577,18 @@ func withEstimatedSeverity(in *Input, sev string) Input {
 	for i := range in.Deps {
 		out.Deps[i] = in.Deps[i]
 		out.Deps[i].Findings = set(in.Deps[i].Findings)
+	}
+	return out
+}
+
+// mergedInput is a copy of the input whose rows have their advisories merged (one finding per vulnerability).
+func mergedInput(in *Input) Input {
+	out := *in
+	out.Self.Findings = mergeAdvisories(in.Self.Findings)
+	out.Deps = make([]Row, len(in.Deps))
+	for i := range in.Deps {
+		out.Deps[i] = in.Deps[i]
+		out.Deps[i].Findings = mergeAdvisories(in.Deps[i].Findings)
 	}
 	return out
 }

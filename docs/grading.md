@@ -96,14 +96,30 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 6. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
    already F: one on that list would grade F.
 
-A Pending result publishes no letter, no deciding row and no score (`score` is 0 and means nothing then); `pending.known`
-says what is known. A module with no dependencies still runs the vulnerability scan: the standard library is part of every
-build, so such a module does not get a letter from a scan that never looked. A module with no Go package at all cannot be
-analysed by govulncheck, and its grade is Pending for the same reason.
+A Pending result publishes no letter, no deciding row and no score; `pending.known` says what is known.
 
-The standard library is graded as a row named `stdlib`, at the Go release the scan ran with (named in `grade.notes`): the
-same project can grade differently under another toolchain, and the report says which one it was. A row nobody assessed (the
-module itself without a published version, the standard library) has the upkeep state `not_assessed`, never `finished`.
+**The standard library** is listed, not graded, by default (`--grade-stdlib` grades it as a row named `stdlib`): its advisories
+follow the Go toolchain that runs the scan, which is not necessarily the one the project is built with, so the same project could
+grade differently on another machine. The Go release it was matched against is always named in `grade.notes`, whether or not it
+had findings. When it is graded, a module with no dependencies runs the vulnerability scan too (so it never gets a letter from a
+scan that did not look), and a module with no Go package at all, which govulncheck cannot analyse, is Pending.
+
+**Reachability that was not determined** is scored as called (the worst case): the finding says so
+(`tier_assumed`, "Reachability not determined, scored as called"). Nothing is ever scored lower because the analysis could not tell.
+
+**A dependency replaced by a local directory** (`replace example.com/lib => ../lib`) is the project's own code: there is no
+published module to ask the proxy about, so its upkeep state is `not_assessed`, never "missing", and it does not make the grade
+Pending; a project that has only such dependencies has no `go.sum`, and that is not read as a failed `go mod verify`.
+
+**Archived flags need a GitHub token** for any project with more than a few GitHub-hosted modules: unauthenticated, GitHub allows
+60 requests an hour. By default a grade is still given when the only gap is a dependency's archived flag: an archived dependency
+adds at most 20 to its row, so the letter may be one band better than it would be with the flag. The row is graded on what is known,
+the module is listed in `grade.archived_unread`, and a note says so and says to set `GITHUB_TOKEN`. With `--strict-archived`
+(`StrictArchivedStatus`, used by services that publish letters) the same gap makes the grade Pending instead. The module's own
+archived flag (a C) is always required.
+
+A row nobody assessed (the module itself without a published version, a locally replaced dependency, the standard library) has the
+upkeep state `not_assessed`, never `finished`.
 
 A gate must treat a missing letter as "no result", never as a pass.
 
@@ -130,10 +146,15 @@ fixes in the past (the median over at least three fixes), as context and not a f
 
 ## What is not published
 
-The old 0 to 100 risk score (overall and per dependency), the five headline candidates, the AI-generation heuristic,
+The old 0 to 100 risk score as a weighted measurement (overall and per dependency), the five headline candidates, the AI-generation heuristic,
 EPSS-adjusted scores and the takeover label are no longer published in any output. The 0 to 100 numbers that remain in
 the grade rows are the policy values described at the top of this page, shown for traceability, not a score.
 EPSS and KEV facts remain on each vulnerability as data.
+
+For ONE release the JSON still carries `overall_risk_score`, `overall_risk_level`, `headline`, the `*_risk_count` summary fields and
+the per-dependency `risk_score` / `risk_level`, derived from the grade (the score is the worst row's policy value, the level the
+coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN without a letter) so consumers can move to the
+`grade` object in steps. They are deprecated, listed in `deprecated_fields`, and removed in the next release.
 
 The CI/CD audit (`--scan-ci`, `--scan-workflows`) is not part of the grade. It keeps its own 0 to 100 score, which is
 reported in the CI/CD section of the output and is what the policy field `max_ci_score` gates on.

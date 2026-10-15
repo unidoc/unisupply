@@ -464,9 +464,10 @@ func TestResponseHistoryNeedsAModuleVersion(t *testing.T) {
 	}
 }
 
-// A module with nothing to scan has no report, but a policy is still evaluated, and the vulnerability scan still runs (the
-// standard library is part of every build): offline it did not look, so the grade is Pending and the gate fails, unless
-// the policy allows Pending. A gate must not pass because there was nothing to look at.
+// A module with nothing to scan has no report, but a policy is still evaluated. By default the standard library is listed,
+// not graded, so nothing a scan could find would change the grade and none is run: the module grades A. When the caller
+// grades the standard library the scan runs; offline it did not look, so the grade is Pending and the gate fails, unless
+// the policy allows Pending. A gate must not pass because nothing was looked at.
 func TestPolicyIsEvaluatedForAModuleWithNoDependencies(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/empty\n\ngo 1.25\n"), 0o644); err != nil {
@@ -476,17 +477,20 @@ func TestPolicyIsEvaluatedForAModuleWithNoDependencies(t *testing.T) {
 	if err := os.WriteFile(strict, []byte(`{"max_grade":"A"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := func(policy string) *runConfig {
-		return &runConfig{path: dir, format: "json", timeout: 5 * time.Second, policyFile: policy, progressMode: "none", offlineMode: true, output: filepath.Join(dir, "out.json")}
+	cfg := func(policy string, gradeStdlib bool) *runConfig {
+		return &runConfig{path: dir, format: "json", timeout: 5 * time.Second, policyFile: policy, progressMode: "none", offlineMode: true, gradeStdlib: gradeStdlib, output: filepath.Join(dir, "out.json")}
 	}
-	if err := run(cfg(strict)); !errors.Is(err, errPolicyViolation) {
-		t.Fatalf("a Pending grade must fail max_grade even with nothing to scan: %v", err)
+	if err := run(cfg(strict, false)); err != nil {
+		t.Fatalf("a module with nothing to scan grades A and passes max_grade A: %v", err)
+	}
+	if err := run(cfg(strict, true)); !errors.Is(err, errPolicyViolation) {
+		t.Fatalf("with the standard library graded and no scan possible the grade is Pending and fails the gate: %v", err)
 	}
 	lenient := filepath.Join(dir, "lenient.json")
 	if err := os.WriteFile(lenient, []byte(`{"max_grade":"A","allow_pending":true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(cfg(lenient)); err != nil {
+	if err := run(cfg(lenient, true)); err != nil {
 		t.Fatalf("allow_pending passes with a warning: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "out.json")); err == nil {
@@ -497,7 +501,7 @@ func TestPolicyIsEvaluatedForAModuleWithNoDependencies(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{"max_risk_score": 70}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(cfg(bad)); err == nil {
+	if err := run(cfg(bad, false)); err == nil {
 		t.Error("an invalid policy was silently skipped")
 	}
 }

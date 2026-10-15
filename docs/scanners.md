@@ -317,10 +317,10 @@ the fixed version exists. `fix_released_at` is the better date: the **later** of
 version (`GET <proxy>/<module>/@v/<version>.info`, the `Time` field; the module
 path and version are escaped as the proxy requires).
 
-`fix_published_at` is an **advisory publication date**, not a fix date, and it is read only when the severity
-enrichment ran for that finding (a finding with a published severity has none). So for such a finding whose fixed version
-the proxy cannot date, `fix_released_at` stays absent and the grade says "Fix release date unavailable": it never
-substitutes a date it does not know.
+`fix_published_at` is an **advisory publication date**, not a fix date. It is set for every finding that has a fixed
+version, from the `published` field of the OSV entry govulncheck emits (and by the severity enrichment when that entry has
+none), so a finding whose fixed version the proxy cannot date still has a fix date: the advisory's, with source
+`advisory`. The fix date is the later of the advisory date and the proxy's time; it is never a date nobody gave.
 
 | `fix_date_source` | Meaning |
 | ----------------- | ------- |
@@ -379,7 +379,20 @@ the KEV catalog (single ~1.5 MB bulk fetch per scan) under
 `$XDG_CACHE_HOME/unisupply/kev/`, both with a 24-hour TTL (EPSS scores are
 recomputed daily; KEV updates weekly at most). Both lookups are best-effort:
 on failure the scan completes with a warning and the fields absent —
-threat-intel unavailability never fails a scan.
+threat-intel unavailability never fails a scan. When the KEV catalog cannot be
+refreshed after its 24-hour cache has expired, the older cached copy (of any age)
+is used instead: findings count as checked (`kev_checked: true`) against that
+list, each carries `kev_catalog_stale_since`, and a warning says "CISA KEV catalog
+could not be refreshed; using the copy from <date>". Only when no catalog was
+ever cached is KEV "not available" and `kev_checked` absent.
+
+### Scan details
+
+The vulnerability scan records what it ran with (`scanner.ScanInfo`, `Result.ScanInfo`):
+the platform (`goos/goarch`, from `GOOS`/`GOARCH` or the running binary), the Go
+version, the govulncheck version and the vulnerability database with its
+last-modified time, read from govulncheck's leading `config` message. Output
+without that message leaves the tool and database fields empty.
 
 > **Coverage caveat:** EPSS and KEV apply per-CVE; they do not change which
 > CVEs are detected. Coverage is bounded by govulncheck + OSV enrichment, and
