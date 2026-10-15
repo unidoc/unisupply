@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // findingResult is a finding after grading: its tier, its score, whether it was graded, its VEX status and the context
@@ -50,6 +52,12 @@ func joinLimited(items []string, n int) string {
 //
 // A generic "overdue" label is deliberately not used: users can usually take the fix themselves.
 func responseFor(f *Finding, r Row, in *Input) Response {
+	resp := responseBase(f, r, in)
+	addFixGo(&resp, f, in)
+	return resp
+}
+
+func responseBase(f *Finding, r Row, in *Input) Response {
 	resp := Response{}
 	if f.Exploited {
 		resp.Status = "exploited"
@@ -111,3 +119,40 @@ func dayMonth(t, now time.Time) string {
 }
 
 func monthYear(t time.Time) string { return t.UTC().Format("Jan 2006") }
+
+// fix compatibility with the Go the graded module supports (Response.FixCompat).
+const (
+	FixCompatible     = "compatible"     // the fix needs no newer Go than the module supports
+	FixRaisesMinimum  = "raises_minimum" // the fix needs a newer Go: taking it raises the module's minimum Go version
+	fixGoNoteTemplate = " The fix requires Go %s or newer; this module supports Go %s, so taking it raises the minimum Go version."
+)
+
+// addFixGo adds what the fix asks of the Go version. The grade does not change for it (the fix exists), but the choice it
+// forces is visible: a module that supports older Go releases cannot take a fix that only exists in a version needing a newer
+// one without dropping them (the x/* modules raise their minimum to the previous Go release soon after each Go release).
+func addFixGo(resp *Response, f *Finding, in *Input) {
+	need := strings.TrimSpace(f.FixRequiresGo)
+	if need == "" || strings.TrimSpace(f.FixedVersion) == "" {
+		return
+	}
+	resp.FixRequiresGo = need
+	have := strings.TrimSpace(in.ProjectGo)
+	switch cmp, ok := compareGo(need, have); {
+	case have == "" || !ok:
+		resp.Text += " The fix requires Go " + need + " or newer."
+	case cmp > 0:
+		resp.FixCompat = FixRaisesMinimum
+		resp.Text += fmt.Sprintf(fixGoNoteTemplate, need, have)
+	default:
+		resp.FixCompat = FixCompatible
+	}
+}
+
+// compareGo compares two Go versions as written in a go directive ("1.24", "1.26.0"); ok is false when either is not one.
+func compareGo(a, b string) (int, bool) {
+	x, y := "v"+strings.TrimPrefix(a, "go"), "v"+strings.TrimPrefix(b, "go")
+	if !semver.IsValid(x) || !semver.IsValid(y) {
+		return 0, false
+	}
+	return semver.Compare(x, y), true
+}

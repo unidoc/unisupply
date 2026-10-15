@@ -148,7 +148,7 @@ func TestMaintenanceScanner_ModCheckFailed(t *testing.T) {
 	}{
 		{"mod fetch ok", http.StatusOK, false, false},
 		{"mod fetch non-200", http.StatusInternalServerError, false, true},
-		{"no latest version", http.StatusOK, true, true},
+		{"latest unavailable (5xx)", http.StatusOK, true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -156,7 +156,8 @@ func TestMaintenanceScanner_ModCheckFailed(t *testing.T) {
 				switch {
 				case strings.HasSuffix(r.URL.Path, "/@latest"):
 					if c.noLatest {
-						http.NotFound(w, r)
+						// a 5xx is a failure; a 404 means "no tagged release" (maintenance_notags_test.go)
+						http.Error(w, "boom", http.StatusInternalServerError)
 						return
 					}
 					fmt.Fprint(w, `{"Version":"v1.2.0","Time":"2026-01-01T00:00:00Z"}`)

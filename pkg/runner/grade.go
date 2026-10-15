@@ -37,6 +37,9 @@ type gradeInputs struct {
 	// StdlibVersion is the Go release the standard library row was graded at.
 	StdlibVersion string
 
+	// ProjectGo is the module's own go directive ("1.24").
+	ProjectGo string
+
 	// StrictArchived makes an unread archived flag Missing (the grade may be Pending) instead of grading without it.
 	StrictArchived bool
 
@@ -54,6 +57,7 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 		Checks:           in.Checks,
 		History:          in.History,
 		Now:              in.Now,
+		ProjectGo:        in.ProjectGo,
 	}
 	if in.Graph != nil {
 		for _, path := range in.Graph.SortedPaths() {
@@ -100,18 +104,21 @@ func findingsOf(module string, vulns []scanner.Vulnerability) []grade.Finding {
 // adjustments (EPSS, tier promotion) are not part of the v2 grade.
 func FindingFromVuln(module string, v *scanner.Vulnerability) grade.Finding {
 	return grade.Finding{
-		ID:               v.ID,
-		Aliases:          v.Aliases,
-		Module:           module,
-		Summary:          v.Summary,
-		Severity:         strings.ToUpper(v.Severity),
-		Reachability:     v.Reachability,
-		Exploited:        v.InKEV,
-		FixedVersion:     v.FixedVersion,
-		FixReleasedAt:    v.FixReleasedAt,
-		FixDateSource:    v.FixDateSource,
-		AffectedPackages: v.AffectedPackages,
-		Condition:        v.Condition,
+		ID:           v.ID,
+		Aliases:      v.Aliases,
+		Module:       module,
+		Summary:      v.Summary,
+		Severity:     strings.ToUpper(v.Severity),
+		Reachability: v.Reachability,
+		Exploited:    v.InKEV,
+		// a lookup that failed is a check that did not run (Pending), not an unpublished severity (an estimate)
+		SeverityLookupFailed: v.EnrichmentFailed && (strings.TrimSpace(v.Severity) == "" || strings.EqualFold(v.Severity, "UNKNOWN")),
+		FixedVersion:         v.FixedVersion,
+		FixRequiresGo:        v.FixRequiresGo,
+		FixReleasedAt:        v.FixReleasedAt,
+		FixDateSource:        v.FixDateSource,
+		AffectedPackages:     v.AffectedPackages,
+		Condition:            v.Condition,
 	}
 }
 
@@ -232,6 +239,7 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 	local := localReplaced(r.GoMod)
 	in := gradeInputs{
 		LocalReplaced:  local,
+		ProjectGo:      goDirective(r.GoMod),
 		StrictArchived: r.Opts.StrictArchivedStatus,
 		Graph:          r.Graph,
 		Vulns:          r.Vulns,
@@ -437,4 +445,12 @@ func countChecksummed(g *resolver.Graph, local map[string]bool) int {
 		}
 	}
 	return n
+}
+
+// goDirective is the module's own go directive ("1.24"), or "" without one.
+func goDirective(gm *parser.GoMod) string {
+	if gm == nil {
+		return ""
+	}
+	return strings.TrimSpace(gm.GoVersion)
 }

@@ -462,6 +462,17 @@ func gradeOnce(input *Input) Result {
 			res.Notes = append(res.Notes, note+".")
 		}
 	}
+	// reached findings whose fix needs a newer Go than the module supports: said once, the grade is unchanged
+	for i := range rows {
+		for j := range rows[i].Findings {
+			if f := &rows[i].Findings[j]; f.Counted && f.Response.FixCompat == FixRaisesMinimum {
+				res.FixesNeedNewerGo++
+			}
+		}
+	}
+	if n := res.FixesNeedNewerGo; n > 0 {
+		res.Notes = append(res.Notes, fmt.Sprintf("%d reached finding%s fixed only in versions that need a newer Go than this module supports (go %s): taking the fix raises the module's minimum Go version. The grade does not change for that.", n, plural(n, " is", "s are"), strings.TrimSpace(in.ProjectGo)))
+	}
 	for i := range in.Deps {
 		if in.Deps[i].Upkeep.ArchivedUnread {
 			res.ArchivedUnread = append(res.ArchivedUnread, in.Deps[i].Module)
@@ -526,7 +537,14 @@ func Grade(input *Input) Result {
 	// once they are one finding, and only what is still estimated after the merge is substituted below.
 	merged := mergedInput(input)
 	res := gradeOnce(&merged)
-	if res.Pending != nil || !hasEstimatedSeverity(&merged) {
+	if res.Pending != nil {
+		return res
+	}
+	if p := severityLookupPending(&merged, &res); p != nil {
+		res.Pending, res.Letter, res.Deciding, res.Score, res.Estimated = p, "", nil, 0, false
+		return res
+	}
+	if !hasEstimatedSeverity(&merged) {
 		return res
 	}
 	for _, sev := range []string{"LOW", "CRITICAL"} {
@@ -589,6 +607,69 @@ func mergedInput(in *Input) Input {
 	for i := range in.Deps {
 		out.Deps[i] = in.Deps[i]
 		out.Deps[i].Findings = mergeAdvisories(in.Deps[i].Findings)
+	}
+	return out
+}
+
+// severityLookupPending is the Pending answer when a severity whose lookup FAILED could change the letter: the grade is
+// computed again with every such severity as low and as critical, and a different letter in either run means the letter
+// depends on a check that did not run. A severity nobody has published (not a failed lookup) is an estimate instead, and
+// marks the letter with a star (see Grade).
+func severityLookupPending(merged *Input, res *Result) *Pending {
+	var ids []string
+	collect := func(fs []Finding) {
+		for i := range fs {
+			if fs[i].SeverityLookupFailed {
+				ids = append(ids, fs[i].ID)
+			}
+		}
+	}
+	collect(merged.Self.Findings)
+	for i := range merged.Deps {
+		collect(merged.Deps[i].Findings)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	differs := false
+	for _, sev := range []string{"LOW", "CRITICAL"} {
+		alt := withLookupSeverity(merged, sev)
+		if r := gradeOnce(&alt); r.Letter != res.Letter {
+			differs = true
+			break
+		}
+	}
+	if !differs {
+		return nil
+	}
+	sort.Strings(ids)
+	ids = slices.Compact(ids)
+	shown, more := ids, ""
+	if len(shown) > 3 {
+		more = fmt.Sprintf(" and %d more", len(ids)-3)
+		shown = shown[:3]
+	}
+	return &Pending{Check: "severity_lookup", Known: knownFacts(merged, res.Rows),
+		Reason: fmt.Sprintf("the severity of %s%s could not be looked up (OSV, NVD and GitHub did not answer, often a rate limit: set NVD_API_KEY), and a different severity would change the letter", strings.Join(shown, ", "), more)}
+}
+
+// withLookupSeverity is a copy of the input in which every finding whose severity lookup failed has the given severity.
+func withLookupSeverity(in *Input, sev string) Input {
+	out := *in
+	set := func(fs []Finding) []Finding {
+		cp := append([]Finding(nil), fs...)
+		for i := range cp {
+			if cp[i].SeverityLookupFailed {
+				cp[i].Severity = sev
+			}
+		}
+		return cp
+	}
+	out.Self.Findings = set(in.Self.Findings)
+	out.Deps = make([]Row, len(in.Deps))
+	for i := range in.Deps {
+		out.Deps[i] = in.Deps[i]
+		out.Deps[i].Findings = set(in.Deps[i].Findings)
 	}
 	return out
 }

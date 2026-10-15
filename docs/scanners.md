@@ -261,6 +261,22 @@ estimated (`C*`) when it rests on that estimate. Only the label differs; the tex
 advisories in a separate Data-quality note. Unscored advisories are rechecked
 after one hour.
 
+**NVD pacing and retries.** NVD lookups are paced process-wide: at most 5
+requests per 30 seconds without a key (one every 6.2 s) and 50 with one (one
+every 0.7 s). A request answered 429, 403 or 5xx, or lost to a network error, is
+retried up to 3 times, waiting for the `Retry-After` header (seconds or an HTTP
+date, at most 60 s) or backing off 5, 10 and 20 s. All this waiting is bounded
+by one budget of 3 minutes per scan; once it is used up the remaining NVD
+lookups fail at once, without waiting. A lookup that still fails stays
+`enrichment_failed: true` and `enrichment_errors` names the cause (`NVD rate
+limited (HTTP 429)`, `NVD HTTP 503`, `NVD network error`). When the cause is
+rate limiting the warning reads `severity could not be looked up (NVD rate
+limit: set NVD_API_KEY) for N advisories`. A failure caused by rate limiting is
+cached for 2 minutes, other failures for 1 hour. NVD's CVSS v3.1, v3.0 and v4.0
+metrics all count, whoever published them: NVD's own (Primary) is preferred, but
+a CNA's (Secondary) metric is used when it is the only one, as on a fresh
+advisory that is still "Awaiting Analysis".
+
 **NVD API key.** NVD allows 5 requests per rolling 30 seconds without a key and
 50 with one. Set `--nvd-api-key` (or `NVD_API_KEY`) to make the NVD fallback
 less likely to be rate limited. The key is sent only as an `apiKey` header to
@@ -483,6 +499,15 @@ means "not checked", and the grade treats the module's upkeep as missing data
 (Pending) unless the module is archived anyway. The pinned version passed to the
 proxy must be a full canonical version (`vMAJOR.MINOR.PATCH[-pre]`, optionally
 `+incompatible`); anything else is not requested.
+
+**A module with no tagged release.** A dependency required at a pseudo-version
+(for example `github.com/itchyny/go-yaml`) has no tags, and the proxy answers
+`@latest` for it with 404 or 410. That is an answer, not a failure: the pinned
+version is then taken as the latest. Its `.info` gives the release time and the
+origin, `latest_version` is the pinned version (so no "newer release" is
+claimed), and deprecation and retraction are read from the pinned version's
+`go.mod`. A 5xx, a timeout or any other failure of `@latest` is still a
+failure: `mod_check_failed` is set as above.
 
 **Repository and archive status.** The repository behind a module path is
 resolved first, from the `Origin` the module proxy records for the latest (else

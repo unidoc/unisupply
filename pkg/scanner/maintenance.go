@@ -294,7 +294,15 @@ func (ms *MaintenanceScanner) checkModule(ctx context.Context, modPath, version 
 	}
 
 	// Check latest version to see if there's a newer release.
-	latestInfo := ms.fetchLatestInfo(ctx, modPath)
+	latestInfo, noTags := ms.fetchLatestInfoStatus(ctx, modPath)
+	if latestInfo == nil && noTags && versionErr == nil && versionInfo != nil {
+		// The proxy answers 404/410 for @latest when the module has no tagged
+		// release (a dependency required at a pseudo-version). That is an
+		// answer, not a failure: the pinned version is then the newest the
+		// proxy knows, so its record stands in for the latest one. A 5xx or a
+		// timeout is not this case and stays a failure.
+		latestInfo = versionInfo
+	}
 	var latestVersion string
 	var latestTime time.Time
 	if latestInfo != nil {
@@ -378,6 +386,14 @@ func (ms *MaintenanceScanner) fetchLatestVersion(ctx context.Context, modPath st
 // carries the origin (the repository) the version was built from, or nil when
 // the proxy cannot answer.
 func (ms *MaintenanceScanner) fetchLatestInfo(ctx context.Context, modPath string) *proxyVersionInfo {
+	info, _ := ms.fetchLatestInfoStatus(ctx, modPath)
+	return info
+}
+
+// fetchLatestInfoStatus is fetchLatestInfo that also reports noTags: the proxy
+// answered 404 or 410 for @latest, meaning the module has no tagged release,
+// as opposed to a failed request or a 5xx.
+func (ms *MaintenanceScanner) fetchLatestInfoStatus(ctx context.Context, modPath string) (info *proxyVersionInfo, noTags bool) {
 	escapedPath := encodeModulePath(modPath)
 	url := fmt.Sprintf("%s/%s/@latest", ms.proxyURL, escapedPath)
 
@@ -385,16 +401,22 @@ func (ms *MaintenanceScanner) fetchLatestInfo(ctx context.Context, modPath strin
 		Host:    proxyHost(ms.proxyURL),
 		Purpose: "maintenance:latest",
 	})
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return nil
+	if err != nil {
+		return nil, false
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		return nil, true
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
 	}
 
-	var info proxyVersionInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return nil
+	var li proxyVersionInfo
+	if err := json.Unmarshal(body, &li); err != nil {
+		return nil, false
 	}
 
-	return &info
+	return &li, false
 }
 
 func (ms *MaintenanceScanner) checkDeprecation(ctx context.Context, modPath string, info *MaintenanceInfo) {

@@ -166,6 +166,10 @@ type Vulnerability struct {
 	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod ("1.26"): the Go release the fix needs. Empty when there is
+	// no fix or it could not be read. The fix may need a newer Go than the scanned module supports.
+	FixRequiresGo string `json:"fix_requires_go,omitempty"`
+
 	// FixPublishedAt is the date a fix became available, derived from OSV's
 	// published timestamp for the fixed version event.
 	FixPublishedAt *time.Time `json:"fix_published_at,omitempty"`
@@ -1052,6 +1056,11 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 // rewords all three at once.
 const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
 
+// severityRateLimitedPrefix opens the per-advisory message for a lookup that
+// failed because NVD rate limited it (or the pacing budget ran out). It has
+// its own prefix so the collapsed summary can tell the user to set NVD_API_KEY.
+const severityRateLimitedPrefix = "severity could not be looked up (NVD rate limit: set NVD_API_KEY) for "
+
 // severityUnscoredPrefix opens the enricher's per-advisory "no severity
 // published yet" message. It is not a failure: every source consulted answered
 // and none carried a severity. Kept next to severityLookupFailedPrefix for the same
@@ -1074,7 +1083,8 @@ const maxListedFailedIDs = 5
 // (failures) or SeveritySource (unscored), which is what the JSON report
 // exposes.
 func collapseSeverityLookupWarnings(warnings []string) []string {
-	out := collapseWarningGroup(warnings, severityLookupFailedPrefix, "advisories; severities remain UNKNOWN")
+	out := collapseWarningGroup(warnings, severityRateLimitedPrefix, "advisories; severities remain UNKNOWN")
+	out = collapseWarningGroup(out, severityLookupFailedPrefix, "advisories; severities remain UNKNOWN")
 	return collapseWarningGroup(out, severityUnscoredPrefix, "advisories; not lookup failures, scored conservatively")
 }
 

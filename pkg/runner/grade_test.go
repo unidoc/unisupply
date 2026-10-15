@@ -399,3 +399,22 @@ func TestGradeAll_ArchivedFlagGapIsGradedWithANoteByDefault(t *testing.T) {
 		t.Error("an unreadable go.mod notice is missing data, not just the archived flag")
 	}
 }
+
+func TestFindingFromVuln_SeverityLookupFailedOnlyWhenTheLookupFailed(t *testing.T) {
+	failed := FindingFromVuln("m", &scanner.Vulnerability{ID: "GO-1", Severity: "UNKNOWN", EnrichmentFailed: true})
+	unscored := FindingFromVuln("m", &scanner.Vulnerability{ID: "GO-2", Severity: "UNKNOWN", EnrichmentAttempted: true})
+	known := FindingFromVuln("m", &scanner.Vulnerability{ID: "GO-3", Severity: "HIGH", EnrichmentFailed: true})
+	if !failed.SeverityLookupFailed || unscored.SeverityLookupFailed || known.SeverityLookupFailed {
+		t.Errorf("failed=%v unscored=%v known=%v", failed.SeverityLookupFailed, unscored.SeverityLookupFailed, known.SeverityLookupFailed)
+	}
+}
+
+func TestFindingFromVuln_CarriesTheGoTheFixNeeds(t *testing.T) {
+	f := FindingFromVuln("golang.org/x/image", &scanner.Vulnerability{ID: "GO-1", FixedVersion: "v0.46.0", FixRequiresGo: "1.26.0"})
+	if f.FixRequiresGo != "1.26.0" {
+		t.Errorf("%+v", f)
+	}
+	if got := goDirective(&parser.GoMod{GoVersion: " 1.24 "}); got != "1.24" || goDirective(nil) != "" {
+		t.Errorf("%q", got)
+	}
+}

@@ -12,21 +12,26 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 const (
-	osvHost           = "api.osv.dev"
-	nvdHost           = "services.nvd.nist.gov"
-	ghsaHost          = "api.github.com"
-	enrichMaxBytes    = 512 * 1024 // 512 KB per spec
-	cacheSubDir       = "unisupply/vuln"
-	cacheTTL          = 24 * time.Hour
-	cacheFailTTL      = 1 * time.Hour
-	cacheFileMode     = 0o600
-	cacheDirMode      = 0o700
-	cacheFallbackBase = "unisupply-vuln-cache"
+	osvHost        = "api.osv.dev"
+	nvdHost        = "services.nvd.nist.gov"
+	ghsaHost       = "api.github.com"
+	enrichMaxBytes = 512 * 1024 // 512 KB per spec
+	cacheSubDir    = "unisupply/vuln"
+	cacheTTL       = 24 * time.Hour
+	cacheFailTTL   = 1 * time.Hour
+	// cacheRateLimitFailTTL bounds how long a failure caused by NVD rate
+	// limiting is remembered, so the next scan retries soon instead of
+	// reporting the same unanswered lookup for an hour.
+	cacheRateLimitFailTTL = 2 * time.Minute
+	cacheFileMode         = 0o600
+	cacheDirMode          = 0o700
+	cacheFallbackBase     = "unisupply-vuln-cache"
 	// currentCacheVersion must be incremented when the on-disk shape changes
 	// in a backward-incompatible way. Entries with a different version are
 	// treated as cache misses, providing a one-time self-healing invalidation.
@@ -36,6 +41,22 @@ const (
 	// can list over 150 cross-references, and only v.Aliases is walked, but a
 	// hostile or malformed alias list must still not fan out unbounded.
 	maxAliasLookups = 4
+
+	// DefaultEnrichBudget is the default overall time one VulnEnricher (one
+	// scan) may spend waiting on NVD pacing and retry backoff. When the next
+	// NVD request cannot start before the budget ends, that lookup and the
+	// remaining ones fail at once, without waiting, as a rate-limit failure.
+	DefaultEnrichBudget = 3 * time.Minute
+
+	// NVD allows 5 requests per rolling 30 s without a key and 50 with one.
+	// The spacings sit just above 30s/5 and 30s/50 so a steady stream stays
+	// under the limit.
+	nvdSpacingKeyless = 6200 * time.Millisecond
+	nvdSpacingKeyed   = 700 * time.Millisecond
+
+	nvdMaxRetries    = 3
+	nvdBackoffBase   = 5 * time.Second
+	nvdRetryAfterCap = 60 * time.Second
 )
 
 // vulnIDPattern enforces the allowed character set for vulnerability IDs.
@@ -59,6 +80,14 @@ type VulnEnricherOptions struct {
 	// a TempDir() fallback.
 	CacheDir string
 
+	// EnrichBudget caps the time spent waiting on NVD pacing and retries over
+	// the enricher's lifetime (one scan). Zero means DefaultEnrichBudget.
+	EnrichBudget time.Duration
+
+	// nvdPacer overrides the process-wide NVD pacer. Tests inject one with a
+	// fake clock so nothing sleeps.
+	nvdPacer *nvdPacer
+
 	// clockFn is the time source for TTL checks. Defaults to time.Now.
 	// Tests inject a fake to advance the clock without sleeping.
 	clockFn func() time.Time
@@ -79,6 +108,12 @@ type VulnEnricher struct {
 	// be sent as a header value; the rest of the scan queries NVD
 	// unauthenticated, as if no key had been given.
 	nvdKeyRejected atomic.Bool
+
+	pacer  *nvdPacer
+	budget time.Duration
+	// deadline is set on the first NVD request: that moment plus budget.
+	deadlineMu sync.Mutex
+	deadline   time.Time
 }
 
 // NewVulnEnricher creates a new VulnEnricher. The returned enricher is safe
@@ -94,6 +129,14 @@ func NewVulnEnricher(opts VulnEnricherOptions) *VulnEnricher {
 		client: NewClient(ClientOptions{Timeout: 10 * time.Second}),
 		opts:   opts,
 		now:    now,
+		pacer:  opts.nvdPacer,
+		budget: opts.EnrichBudget,
+	}
+	if e.pacer == nil {
+		e.pacer = processNVDPacer
+	}
+	if e.budget <= 0 {
+		e.budget = DefaultEnrichBudget
 	}
 	e.cacheDir = e.resolveCache(opts.CacheDir)
 	return e
@@ -164,7 +207,10 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		case cached == nil || cached.Source == "none" || cached.Severity == "":
 			// Cached failure — restore failure state identically to the live path.
 			markEnrichmentFailed(v)
-			msg := severityLookupFailedPrefix + v.ID + "; severity remains UNKNOWN"
+			msg := failureMessage(v.ID, cached != nil && cached.RateLimited, "")
+			if cached != nil {
+				msg = failureMessage(v.ID, cached.RateLimited, cached.FailReason)
+			}
 			if len(v.EnrichmentErrors) == 0 {
 				v.EnrichmentErrors = []string{msg}
 			}
@@ -227,11 +273,13 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 		}
 	}
 
+	var nvdFail *nvdFailure
 	if cveID != "" {
 		// NVD lookup (canonical CVSS authority for CVEs).
 		// fetchNVD and fetchGHSAByCVE return nil on failure and a non-nil
 		// (possibly empty) result when the API answered.
-		nvdResult, nvdWarns := e.fetchNVD(ctx, cveID)
+		nvdResult, fail, nvdWarns := e.fetchNVD(ctx, cveID)
+		nvdFail = fail
 		warnings = append(warnings, nvdWarns...)
 		if nvdResult == nil {
 			allAnswered = false
@@ -270,9 +318,15 @@ func (e *VulnEnricher) Enrich(ctx context.Context, v *Vulnerability) []string {
 	// A lookup failed — cache the failure for 1h so transient outages don't
 	// hammer three APIs on every scan, and apply the failure state to the vuln.
 	failureResult := &enrichResult{Source: "none"}
+	reason := ""
+	if nvdFail != nil {
+		failureResult.RateLimited = nvdFail.rateLimited
+		failureResult.FailReason = nvdFail.reason
+		reason = nvdFail.reason
+	}
 	e.saveCache(v.ID, failureResult)
 	markEnrichmentFailed(v)
-	msg := severityLookupFailedPrefix + v.ID + "; severity remains UNKNOWN"
+	msg := failureMessage(v.ID, failureResult.RateLimited, reason)
 	v.EnrichmentErrors = []string{msg}
 	warnings = append(warnings, msg)
 	return warnings
@@ -339,6 +393,22 @@ func (e *VulnEnricher) lookupAliases(ctx context.Context, v *Vulnerability) (res
 	return nil, allOK, warnings
 }
 
+// failureMessage is the per-advisory warning and EnrichmentErrors entry for a
+// failed lookup. A failure caused by NVD rate limiting gets its own prefix, so
+// the collapsed summary can tell the user what to do about it; any other
+// failure keeps the generic prefix. reason, when set, names the cause.
+func failureMessage(id string, rateLimited bool, reason string) string {
+	prefix := severityLookupFailedPrefix
+	if rateLimited {
+		prefix = severityRateLimitedPrefix
+	}
+	msg := prefix + id + "; severity remains UNKNOWN"
+	if reason != "" {
+		msg += " (" + reason + ")"
+	}
+	return msg
+}
+
 // unscoredMessage is the per-advisory warning for an unscored advisory.
 func unscoredMessage(id string) string {
 	return severityUnscoredPrefix + id + "; severity not yet published"
@@ -364,6 +434,10 @@ func markEnrichmentFailed(v *Vulnerability) {
 type enrichResult struct {
 	Severity string `json:"severity"`
 	Source   string `json:"source,omitempty"` // "osv", "nvd", "ghsa", "none" (failed) or "unscored"
+	// RateLimited and FailReason describe a failed lookup (Source "none"):
+	// whether NVD rate limiting caused it, and the cause in words.
+	RateLimited bool   `json:"rate_limited,omitempty"`
+	FailReason  string `json:"fail_reason,omitempty"`
 	// SeverityAlias is the alias ID whose OSV record supplied the severity.
 	SeverityAlias string     `json:"severity_alias,omitempty"`
 	PublishedAt   *time.Time `json:"published_at,omitempty"`
@@ -514,111 +588,6 @@ type ghsaResponse struct {
 	Severity    string `json:"severity"` // low/medium/high/critical
 	PublishedAt string `json:"published_at"`
 	UpdatedAt   string `json:"updated_at"`
-}
-
-// nvdCVSSMetric is one entry in the NVD CVE metrics array (v3.1 or v3.0).
-type nvdCVSSMetric struct {
-	CVSSData struct {
-		BaseScore    float64 `json:"baseScore"`
-		BaseSeverity string  `json:"baseSeverity"`
-	} `json:"cvssData"`
-}
-
-// nvdResponse is a partial decode of the NVD CVE 2.0 API response.
-type nvdResponse struct {
-	TotalResults    int `json:"totalResults"`
-	Vulnerabilities []struct {
-		CVE struct {
-			Published string `json:"published"`
-			Metrics   struct {
-				CVSSV31 []nvdCVSSMetric `json:"cvssMetricV31"`
-				CVSSV30 []nvdCVSSMetric `json:"cvssMetricV30"`
-			} `json:"metrics"`
-		} `json:"cve"`
-	} `json:"vulnerabilities"`
-}
-
-// fetchNVD queries https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<id>
-// and returns an enrichResult. Returns (nil, warnings) on network or parse
-// failure; returns (&enrichResult{}, nil) when NVD has no data for the CVE.
-func (e *VulnEnricher) fetchNVD(ctx context.Context, cveID string) (result *enrichResult, warnings []string) {
-	url := "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cveID
-	getOpts := GetOptions{
-		Host:     nvdHost,
-		MaxBytes: enrichMaxBytes,
-		Accept:   "application/json",
-		Purpose:  "vulnenrich:nvd",
-	}
-	useKey := e.opts.NVDAPIKey != "" && !e.nvdKeyRejected.Load()
-	if useKey && !validHeaderValue(e.opts.NVDAPIKey) {
-		// net/http would refuse the request before sending it, failing every
-		// NVD lookup in the scan.
-		useKey = false
-		if e.nvdKeyRejected.CompareAndSwap(false, true) {
-			warnings = append(warnings, "vuln enrichment: NVD API key contains characters not allowed in an HTTP header; continuing unauthenticated")
-		}
-	}
-	if useKey {
-		getOpts.APIKeyHeader = "apiKey"
-		getOpts.APIKey = e.opts.NVDAPIKey
-	}
-	body, resp, err := e.client.Get(ctx, url, getOpts)
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD fetch error for %s: %v", cveID, err))
-		return nil, warnings
-	}
-	if useKey && nvdRejectsKey(resp) {
-		// A bad key must not cost more than no key: retry this request
-		// unauthenticated, and send no key for the rest of the scan.
-		if e.nvdKeyRejected.CompareAndSwap(false, true) {
-			warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD rejected the API key (HTTP %d); continuing unauthenticated", resp.StatusCode))
-		}
-		result, retryWarns := e.fetchNVD(ctx, cveID)
-		return result, append(warnings, retryWarns...)
-	}
-	if resp.StatusCode != 200 {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD returned HTTP %d for %s", resp.StatusCode, cveID))
-		return nil, warnings
-	}
-
-	var nvd nvdResponse
-	if err := json.Unmarshal(body, &nvd); err != nil {
-		warnings = append(warnings, fmt.Sprintf("vuln enrichment: NVD JSON parse error for %s: %v", cveID, err))
-		return nil, warnings
-	}
-	if nvd.TotalResults == 0 || len(nvd.Vulnerabilities) == 0 {
-		return &enrichResult{}, nil
-	}
-
-	cveData := nvd.Vulnerabilities[0].CVE
-	result = &enrichResult{}
-
-	// Prefer CVSS v3.1; fall back to v3.0 when v3.1 metrics are absent.
-	metrics := cveData.Metrics.CVSSV31
-	if len(metrics) == 0 {
-		metrics = cveData.Metrics.CVSSV30
-	}
-	if len(metrics) > 0 {
-		m := metrics[0]
-		if m.CVSSData.BaseScore > 0 {
-			result.Severity = cvssScoreToTier(m.CVSSData.BaseScore)
-		} else if m.CVSSData.BaseSeverity != "" {
-			result.Severity = cvssStringToTier(m.CVSSData.BaseSeverity)
-		}
-	}
-
-	if cveData.Published != "" {
-		t, err := time.Parse(time.RFC3339Nano, cveData.Published)
-		if err != nil {
-			t, err = time.Parse("2006-01-02T15:04:05.999", cveData.Published)
-		}
-		if err == nil {
-			result.PublishedAt = &t
-		}
-	}
-
-	result.Source = "nvd"
-	return result, warnings
 }
 
 // nvdRejectsKey reports whether resp says the API key is bad. NVD answers an
@@ -805,6 +774,9 @@ func (e *VulnEnricher) loadCache(id string) (*enrichResult, bool) {
 	ttl := cacheTTL
 	if entry.Result == nil || entry.Result.Source == "none" || entry.Result.Source == "unscored" || entry.Result.Severity == "" {
 		ttl = cacheFailTTL
+		if entry.Result != nil && entry.Result.Source == "none" && entry.Result.RateLimited {
+			ttl = cacheRateLimitFailTTL
+		}
 	}
 
 	if e.now().Sub(entry.FetchedAt) > ttl {

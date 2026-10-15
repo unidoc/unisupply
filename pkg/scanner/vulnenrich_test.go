@@ -285,7 +285,7 @@ func TestVulnEnrichment_OSVFails_NVDSucceeds_HonestSeverity(t *testing.T) {
 			ghStatus:        500,
 			wantSeverity:    "UNKNOWN",
 			wantFailed:      true,
-			wantCallsAtMost: 3,
+			wantCallsAtMost: 3 + nvdMaxRetries, // NVD 5xx is retried
 		},
 	}
 
@@ -1369,8 +1369,13 @@ func TestVulnEnrich_NVDKeyKeptOnOtherErrors(t *testing.T) {
 					t.Errorf("unexpected rejected-key warning: %q", w)
 				}
 			}
-			if keyed, keyless := tr.nvdRequests(); keyed != 2 || keyless != 0 {
-				t.Errorf("NVD requests keyed=%d keyless=%d, want 2 and 0", keyed, keyless)
+			// A 403 is retried (rate limiting), a 404 is not.
+			wantKeyed := 2
+			if status == 403 {
+				wantKeyed = 2 * (1 + nvdMaxRetries)
+			}
+			if keyed, keyless := tr.nvdRequests(); keyed != wantKeyed || keyless != 0 {
+				t.Errorf("NVD requests keyed=%d keyless=%d, want %d and 0", keyed, keyless, wantKeyed)
 			}
 		})
 	}

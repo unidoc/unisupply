@@ -200,6 +200,7 @@ func TestOffline_GradingInputsMakeNoRequest(t *testing.T) {
 		published := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		vulns := []scanner.Vulnerability{{ID: "GO-1", FixedVersion: "v1.0.1", FixPublishedAt: &published}}
 		scanner.ResolveFixDates(ctx, scanner.FixDateOptions{Timeout: timeout}, "example.com/m", vulns)
+		scanner.ResolveFixGoRequirements(ctx, scanner.FixDateOptions{Timeout: timeout}, "example.com/m", vulns)
 		if vulns[0].FixDateSource != scanner.FixDateAdvisory {
 			t.Errorf("FixDateSource = %q, want the advisory date %q", vulns[0].FixDateSource, scanner.FixDateAdvisory)
 		}

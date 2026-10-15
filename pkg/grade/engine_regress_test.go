@@ -352,3 +352,82 @@ func TestRegression_StaleKEVCatalogNote(t *testing.T) {
 		t.Errorf("%v %+v", r.Notes, r.Pending)
 	}
 }
+
+// G11: a severity lookup that FAILED is a check that did not run, not an unpublished severity: when the letter depends on it
+// the grade is Pending, not an estimate. (Found on the real replay: 23 modules hit by the 8 Oct x/net advisories graded C*
+// instead of F because the NVD lookups were rate limited.)
+func TestRegression_FailedSeverityLookupIsPendingNotAnEstimate(t *testing.T) {
+	failed := fnd("GO-2026-6603", "", "called")
+	failed.SeverityLookupFailed = true
+	r := run(Input{Self: self(), Deps: []Row{dep("example.com/x", failed)}})
+	if r.Pending == nil || r.Pending.Check != "severity_lookup" || r.Letter != "" || r.Estimated || !strings.Contains(r.Pending.Reason, "GO-2026-6603") {
+		t.Fatalf("%+v letter=%q estimated=%v", r.Pending, r.Letter, r.Estimated)
+	}
+	// unscored (nobody published a severity; the lookup answered): still an estimate with a star, never Pending
+	unscored := fnd("GO-2026-7", "", "called")
+	u := run(Input{Self: self(), Deps: []Row{dep("example.com/y", unscored)}})
+	if u.Pending != nil || u.Letter != LetterC || !u.Estimated {
+		t.Errorf("an unpublished severity is an estimate: %+v %s %v", u.Pending, u.Letter, u.Estimated)
+	}
+	// when the letter cannot depend on it, a failed lookup is not Pending: an F by the KEV floor, or a graph-only finding
+	k := fnd("GO-K", "", "called")
+	k.SeverityLookupFailed, k.Exploited = true, true
+	if f := run(Input{Self: self(), Deps: []Row{dep("example.com/k", k)}}); f.Pending != nil || f.Letter != LetterF {
+		t.Errorf("KEV makes it F whatever the severity: %+v %s", f.Pending, f.Letter)
+	}
+	g := fnd("GO-G", "", "required")
+	g.SeverityLookupFailed = true
+	if o := run(Input{Self: self(), Deps: []Row{dep("example.com/g", g)}}); o.Pending != nil || o.Letter != LetterA {
+		t.Errorf("a graph-only finding is not graded: %+v %s", o.Pending, o.Letter)
+	}
+	// another finding already makes it F: the lookup cannot change the letter
+	crit := dep("example.com/c", fnd("GO-C", "CRITICAL", "called"), failed)
+	if c := run(Input{Self: self(), Deps: []Row{crit}}); c.Pending != nil || c.Letter != LetterF {
+		t.Errorf("%+v %s", c.Pending, c.Letter)
+	}
+}
+
+// A fix that exists only in a version needing a newer Go than the module supports: the grade does not change for it, but the
+// report says it (the x/* modules raise their minimum to the previous Go release soon after each Go release; found by the
+// UniPDF/UniOffice release policy of supporting three Go versions).
+func TestRegression_FixThatNeedsANewerGoIsSaidAndDoesNotChangeTheLetter(t *testing.T) {
+	need := func(goVer string) Finding {
+		f := fnd("GO-2026-1", "HIGH", "called")
+		f.Module, f.FixRequiresGo = "golang.org/x/image", goVer
+		return f
+	}
+	base := run(Input{Self: self(), Deps: []Row{dep("golang.org/x/image", need(""))}})
+	r := run(Input{Self: self(), ProjectGo: "1.24", Deps: []Row{dep("golang.org/x/image", need("1.26.0"))}})
+	if r.Letter != base.Letter || r.Score != base.Score {
+		t.Fatalf("the letter must not change for the Go requirement: %s %d vs %s %d", r.Letter, r.Score, base.Letter, base.Score)
+	}
+	f := row(t, r, "golang.org/x/image").Findings[0]
+	if f.Response.FixCompat != FixRaisesMinimum || f.Response.FixRequiresGo != "1.26.0" ||
+		!strings.Contains(f.Response.Text, "requires Go 1.26.0 or newer") || !strings.Contains(f.Response.Text, "supports Go 1.24") {
+		t.Errorf("%+v", f.Response)
+	}
+	if r.FixesNeedNewerGo != 1 || len(r.Notes) != 1 || !strings.Contains(r.Notes[0], "go 1.24") || !strings.Contains(r.Notes[0], "does not change") {
+		t.Errorf("%d %v", r.FixesNeedNewerGo, r.Notes)
+	}
+	// a fix the module can take: compatible, nothing said, no note
+	c := run(Input{Self: self(), ProjectGo: "1.26", Deps: []Row{dep("golang.org/x/image", need("1.26.0"))}})
+	cf := row(t, c, "golang.org/x/image").Findings[0]
+	if cf.Response.FixCompat != FixCompatible || strings.Contains(cf.Response.Text, "requires Go") || c.FixesNeedNewerGo != 0 || len(c.Notes) != 0 {
+		t.Errorf("%+v %v", cf.Response, c.Notes)
+	}
+	// the module's go line is unknown: the requirement is still said, no judgement about it
+	u := run(Input{Self: self(), Deps: []Row{dep("golang.org/x/image", need("1.26"))}})
+	uf := row(t, u, "golang.org/x/image").Findings[0]
+	if uf.Response.FixCompat != "" || !strings.Contains(uf.Response.Text, "requires Go 1.26 or newer") {
+		t.Errorf("%+v", uf.Response)
+	}
+	// graph-only findings are shown, not graded: they are not counted in the note
+	g := need("1.26")
+	g.Reachability = "required"
+	if go1 := run(Input{Self: self(), ProjectGo: "1.24", Deps: []Row{dep("golang.org/x/image", g)}}); go1.FixesNeedNewerGo != 0 {
+		t.Errorf("a graph-only finding is not counted: %d", go1.FixesNeedNewerGo)
+	}
+	if _, ok := compareGo("1.26rc1", "1.24"); ok {
+		t.Error("a release candidate is not a go directive")
+	}
+}

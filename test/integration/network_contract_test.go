@@ -103,7 +103,8 @@ func osvQueryRow(withVersion bool) func(recordedRequest) bool {
 var rowMatchers = map[string][]rowMatcher{
 	"proxy.golang.org": {
 		{name: "maintenance and resilience version lookups", match: not(contains("/fixmod/@v/", "/rhmod/@v/", "/rhdep/@v/"))},
-		{name: "fix-release date lookups", match: contains("/fixmod/@v/")},
+		{name: "fix-release date lookups", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".info") }},
+		{name: "Go requirement of each fixed version", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".mod") }},
 		{name: "response history (scanned module and dependency releases)", match: contains("/rhmod/@v/", "/rhdep/@v/")},
 	},
 	"api.github.com": {
@@ -438,6 +439,7 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	}
 	dated := []scanner.Vulnerability{{ID: "GO-2026-0002", FixedVersion: "v1.0.1"}}
 	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
+	scanner.ResolveFixGoRequirements(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
 
 	// proxy.golang.org (the scanned module's releases, the dependency's fix
 	// date) and api.osv.dev (one query per dependency, no version): response

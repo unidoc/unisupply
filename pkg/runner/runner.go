@@ -553,6 +553,8 @@ func resolveAllFixDates(ctx context.Context, opts scanner.FixDateOptions, stage 
 			scanner.ResolveStdlibFixDates(ctx, opts, vulns[path])
 		} else {
 			scanner.ResolveFixDates(ctx, opts, path, vulns[path])
+			// the Go release each fix needs, so the report can say when taking it raises the module's minimum Go
+			scanner.ResolveFixGoRequirements(ctx, opts, path, vulns[path])
 		}
 	}
 }

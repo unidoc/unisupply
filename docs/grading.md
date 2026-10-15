@@ -94,7 +94,11 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 4. a dependency's maintenance data is missing and could still beat the worst row;
 5. `go mod verify` could not complete, so a checksum mismatch (F) cannot be ruled out;
 6. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
-   already F: one on that list would grade F.
+   already F: one on that list would grade F;
+7. `severity_lookup`: the severity of a reached finding could not be looked up (OSV, NVD and GitHub did not answer, usually
+   NVD's rate limit without an API key) and a different severity would change the letter. A lookup that failed is a check that
+   did not run, not an unpublished severity: it is retried (paced, with backoff) and, if it still fails, the grade is Pending.
+   A severity nobody has published (the lookup answered) stays an estimate and marks the letter with `*`.
 
 A Pending result publishes no letter, no deciding row and no score; `pending.known` says what is known.
 
@@ -103,6 +107,19 @@ follow the Go toolchain that runs the scan, which is not necessarily the one the
 grade differently on another machine. The Go release it was matched against is always named in `grade.notes`, whether or not it
 had findings. When it is graded, a module with no dependencies runs the vulnerability scan too (so it never gets a letter from a
 scan that did not look), and a module with no Go package at all, which govulncheck cannot analyse, is Pending.
+
+**A fix that needs a newer Go.** Many fixes only exist in versions that need a newer Go than the graded module supports: the x/*
+modules raise their minimum to the previous Go release soon after each Go release (Go 1.27 on 18 August, and x/image v0.46.0 and
+x/text v0.42.0 required Go 1.26 from 8 September), so a module that supports three Go releases cannot take a fix without dropping
+the oldest. The grade does not change for that (the fix exists), but every finding with a fix says what it needs
+(`response.fix_requires_go`, `response.fix_compat` = `raises_minimum` or `compatible`, and the text "The fix requires Go 1.26.0 or
+newer; this module supports Go 1.24, so taking it raises the minimum Go version"), and `grade.notes` counts them
+(`grade.fixes_need_newer_go`). The needed Go is the `go` directive of the fixed version's go.mod, read from the module proxy.
+
+**Deprecation and retraction** are read from the go.mod of the module's LATEST version, as Go itself reports them (`go list -m -u`): a
+dependency is deprecated when its latest go.mod says so (even if the pinned version predates the notice), and retracted when the
+pinned version lies in a `retract` range of that go.mod. A module with no tagged release (the proxy has no `@latest`) is read at the
+pinned version.
 
 **Reachability that was not determined** is scored as called (the worst case): the finding says so
 (`tier_assumed`, "Reachability not determined, scored as called"). Nothing is ever scored lower because the analysis could not tell.

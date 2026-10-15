@@ -476,6 +476,7 @@ the same data already public in your `go.mod`.
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version, or a branch name (the GitHub default branch, else `main`, then `master`) | Maintenance and resilience scanners: release history, the latest version's `go.mod` (deprecation notice), and the default branch's head commit | always runs |
 | `proxy.golang.org` | Module path + fixed version (or, for the standard library, `golang.org/toolchain@v0.0.1-go<version>.linux-amd64`) | Fix-release dates: the `.info` time of the first fixed version of an advisory, at most 8 lookups at a time, one per distinct fixed version | always runs when an advisory names a fixed version (no-op otherwise) |
+| `proxy.golang.org` | Module path + fixed version | Fix compatibility: the `.mod` of each fixed version, to read its `go` directive (the Go release the fix needs), one lookup per distinct fixed version, at most 8 at a time | always runs when an advisory names a fixed version (no-op otherwise) |
 | `proxy.golang.org` | The scanned module's path and its dependencies' module paths + fixed versions | Response history: the scanned module's version list (`@v/list`) and the `.info` and `.mod` of its newest releases, and the `.info` of the fixed versions of its dependencies' advisories; at most 2000 requests and 2 minutes per scan | only with `--response-history` (which needs `--module-version`); omit the flag to skip |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
 | `api.osv.dev` | Vulnerability ID (GO-\*, CVE-\*, or GHSA-\*), and its GHSA/CVE alias IDs (at most 4 aliases per advisory) | Severity enrichment when a vuln has unknown severity: the advisory's own record, then its alias records (GHSA first, then CVE; CVSS v3 vectors are scored locally) | always runs (no-op when no vulns) |
@@ -576,7 +577,7 @@ What `--offline` costs you, and how each loss is reported:
 | Maintainer, Resilience | UNKNOWN; not used by the grade |
 | **Grade** | **`PENDING` (no letter).** With no vulnerability data a letter would rest on upkeep alone, so the grade has none; `grade.pending` in JSON names the check that did not run and what is known anyway. A policy with `max_grade` fails on it unless `allow_pending` is set |
 | Response history (`--response-history`) | Not run — no request is made, and no response-history context is shown |
-| Module's own advisories, fix-release dates | Not queried — the lookup returns an error that is reported as pending, and fix dates stay on the advisory's date |
+| Module's own advisories, fix-release dates, the Go release each fix needs | Not queried — the lookup returns an error that is reported as pending, and fix dates stay on the advisory's date |
 | Threat intel (EPSS/KEV) | Not reached — enrichment runs over collected CVEs, and none are collected offline |
 | go.sum verification | Reported as `UNKNOWN (offline — verification skipped)`, never as a failure |
 | GitHub token validation | Skipped — a supplied token is not checked; with `--require-github-token` a warning says so and the run continues |

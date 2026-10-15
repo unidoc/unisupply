@@ -181,6 +181,19 @@ breaks consumers that read the old fields.**
     errors in the `FAIL: N policy violation(s)` line, listing warnings separately.
   - The AI-generation scanner no longer runs and its result is not published (`pkg/scanner/aigen.go` is kept but not
     called).
+  - Fixes that need a newer Go: each finding with a fix now says which Go the fixed version needs (`fix_requires_go`, the `go`
+    directive of its go.mod, read from the module proxy) and whether taking it raises the scanned module's minimum Go
+    (`response.fix_compat` = `raises_minimum` | `compatible`, in the response text); `grade.notes` and `grade.fixes_need_newer_go`
+    count them. The letter does not change for it. New `scanner.ResolveFixGoRequirements`, `Vulnerability.FixRequiresGo`.
+  - Severity lookups (from the 214-module replay): a lookup that FAILED is now a check that did not run, not an
+    unpublished severity. NVD requests are paced (5 per 30 s without `NVD_API_KEY`, 50 with), retried with backoff and
+    `Retry-After` (up to 3 times, within a 3-minute budget), and every CVSS v3.1, v3.0 and v4.0 metric counts, also a
+    Secondary (CNA) one with the record still "Awaiting Analysis". When it still fails, the grade is Pending
+    (`pending.check` = `severity_lookup`) if a different severity would change the letter; before, the finding was
+    estimated as MEDIUM and 23 modules hit by the 8 Oct x/net advisories graded `C*` instead of F. `grade.Finding` has the
+    new field `SeverityLookupFailed`.
+  - A dependency with no tagged release (the proxy answers 404 for `@latest`) is read at its pinned version, so it no
+    longer leaves the grade Pending for ever (`itchyny/go-yaml`).
   - `runner.Options.StrictArchivedStatus` is new (`--strict-archived`, default off): by default a grade is given when the
     only gap is a dependency's archived flag that GitHub's rate limit kept unread (an archived dependency adds at most 20 to
     its row): the result lists the modules in `grade.archived_unread` and says in a note that the letter may be one band

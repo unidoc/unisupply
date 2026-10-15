@@ -175,6 +175,9 @@ type JSONVuln struct {
 	// SeverityAlias is the alias ID (GHSA-* or CVE-*) whose OSV record supplied
 	// the severity, when it did not come from the advisory's own ID.
 	SeverityAlias string `json:"severity_alias,omitempty"`
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod: the Go release the fix needs. Whether that raises the
+	// scanned module's minimum Go is in grade.rows[].findings[].response.fix_compat.
+	FixRequiresGo string `json:"fix_requires_go,omitempty"`
 	// FixReleasedAt is when the first fixed version was released (the later of the advisory's fix date and the module
 	// proxy's time for that version); FixDateSource says which ("module_proxy" or "advisory"). Absent = unknown.
 	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
@@ -384,6 +387,7 @@ func toJSONVuln(v *scanner.Vulnerability) JSONVuln {
 		CalledSymbols:       v.CalledSymbols,
 		SeveritySource:      v.SeveritySource,
 		SeverityAlias:       v.SeverityAlias,
+		FixRequiresGo:       v.FixRequiresGo,
 		FixReleasedAt:       v.FixReleasedAt,
 		FixDateSource:       v.FixDateSource,
 		AffectedPackages:    v.AffectedPackages,

@@ -67,6 +67,14 @@ type Finding struct {
 	// is scored as called: the worst case, never a free pass).
 	Reachability string
 
+	// SeverityLookupFailed is true when the severity is unknown because the lookup FAILED (OSV, NVD and GitHub could not be
+	// reached or rate-limited), not because nobody has published one. A failed lookup is a check that did not run: when the
+	// letter could depend on it, the grade is Pending ("severity_lookup") instead of an estimate.
+	SeverityLookupFailed bool
+
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod ("1.26"); empty when unknown.
+	FixRequiresGo string
+
 	Exploited    bool // on CISA's Known Exploited Vulnerabilities list
 	FixedVersion string
 	// FixReleasedAt is when the first fixed version was released, and FixDateSource where that date came from.
@@ -165,6 +173,9 @@ type Input struct {
 	Self Row
 	Deps []Row
 
+	// ProjectGo is the module's own `go` directive ("1.24"): the oldest Go it supports. A fix that needs a newer Go raises it.
+	ProjectGo string
+
 	// ChecksumMismatch is true when `go mod verify` / go.sum found a module that does not match: a confirmed problem, F.
 	ChecksumMismatch bool
 	ChecksumDetail   string
@@ -194,6 +205,11 @@ type Response struct {
 	WindowEnds    *time.Time `json:"window_ends,omitempty"`
 	DaysSinceFix  int        `json:"days_since_fix,omitempty"`
 	Text          string     `json:"text"`
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod, and FixCompat says whether taking the fix raises the
+	// minimum Go version this module supports ("raises_minimum") or not ("compatible"); empty when unknown. Context only: the
+	// letter never changes for it.
+	FixRequiresGo string `json:"fix_requires_go,omitempty"`
+	FixCompat     string `json:"fix_compat,omitempty"`
 	// History is "Historically adopted comparable fixes in about 30 days (3 fixes, Jan 2025 to Sep 2026)", or "Not enough
 	// response history"; context, not a forecast.
 	History string `json:"history,omitempty"`
@@ -273,6 +289,8 @@ type Result struct {
 	// Notes are things the letter does not cover or checks that were skipped (e.g. the module's own advisories were not
 	// looked up because no module version was given).
 	Notes []string `json:"notes,omitempty"`
+	// FixesNeedNewerGo is the number of reached findings whose only fix needs a newer Go than the module supports.
+	FixesNeedNewerGo int `json:"fixes_need_newer_go,omitempty"`
 	// ArchivedUnread lists the dependencies whose archived flag could not be read although the grade was given (see
 	// Upkeep.ArchivedUnread): the letter may be one band better than it would be with the flag.
 	ArchivedUnread []string `json:"archived_unread,omitempty"`
