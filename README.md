@@ -478,6 +478,7 @@ the same data already public in your `go.mod`.
 | ---- | ------------ | ---- | ------- |
 | `proxy.golang.org` | Module path + version, or a branch name (the GitHub default branch, else `main`, then `master`) | Maintenance and resilience scanners: release history, the latest version's `go.mod` (deprecation notice), and the default branch's head commit | always runs |
 | `proxy.golang.org` | Module path + fixed version (or, for the standard library, `golang.org/toolchain@v0.0.1-go<version>.linux-amd64`) | Fix-release dates: the `.info` time of the first fixed version of an advisory, at most 8 lookups at a time, one per distinct fixed version | always runs when an advisory names a fixed version (no-op otherwise) |
+| `proxy.golang.org` | The scanned module's path + `--module-version` | Release time (`.info`) of the scanned version, cached, so a finding can say how long its fix existed before that version was released (`response.fix_age_at_release_days`); a failed lookup only leaves the figure out | only with `--module-version` |
 | `proxy.golang.org` | Module path + fixed version | Fix compatibility: the `.mod` of each fixed version, to read its `go` directive (the Go release the fix needs), one lookup per distinct fixed version, at most 8 at a time | always runs when an advisory names a fixed version (no-op otherwise) |
 | `proxy.golang.org` | The scanned module's path and its dependencies' module paths + fixed versions | Response history: the scanned module's version list (`@v/list`) and the `.info` and `.mod` of its newest releases, and the `.info` of the fixed versions of its dependencies' advisories; at most 2000 requests and 2 minutes per scan | only with `--response-history` (which needs `--module-version`); omit the flag to skip |
 | `vuln.go.dev` | Module paths | Vulnerability scanner (`golang.org/x/vuln`) | always runs |
@@ -592,6 +593,15 @@ an offline scan cannot read as a clean bill of health.
 `--offline` is rejected alongside `--trust-index-url` (a network service by
 definition) and `--format pdf` (UniPDF validates its license over the network
 before rendering). Use `--format text`, `json`, or `sbom-*` offline.
+
+With `--module-version`, a finding whose fix was released before that version says so in `response.text` and in the
+`response.fix_age_at_release_days` field of the JSON report ("Fix available for 87 days before this version was released
+(120 days to the scan date)"); the field is omitted when the release time is unknown or the fix came after the release.
+
+govulncheck runs inside unisupply, so it can only scan code that needs a Go release no newer than the one unisupply was
+built with. Otherwise the vulnerability scan is Pending with "this unisupply was built with go1.26.9 and cannot scan code
+that needs go1.27.2; rebuild unisupply with go1.27.2 or newer". Library callers (gorisk) can check at startup with
+`scanner.CheckToolchain("go1.27.2")`, which returns that error or nil.
 
 An offline scan cannot look up vulnerabilities, because govulncheck needs the Go
 vulnerability database: its grade is Pending (no letter), never a clean result. A

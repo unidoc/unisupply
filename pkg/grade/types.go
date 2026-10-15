@@ -187,6 +187,10 @@ type Input struct {
 	History map[string]*scanner.ResponseHistory
 
 	Now time.Time
+
+	// SelfReleasedAt is when the scanned module version (--module-version) was published, from the module proxy; nil when
+	// unknown. It lets a finding say how long its fix existed BEFORE that version was released.
+	SelfReleasedAt *time.Time
 }
 
 // VEXStatus is a finding's status in the terms a security reviewer already accepts.
@@ -204,7 +208,10 @@ type Response struct {
 	DateSource    string     `json:"fix_date_source,omitempty"`
 	WindowEnds    *time.Time `json:"window_ends,omitempty"`
 	DaysSinceFix  int        `json:"days_since_fix,omitempty"`
-	Text          string     `json:"text"`
+	// FixAgeAtReleaseDays is how many days the fix had existed when the scanned module version was released. Absent when the
+	// release time is unknown, when the fix came after the release, or when it came less than a day before.
+	FixAgeAtReleaseDays int    `json:"fix_age_at_release_days,omitempty"`
+	Text                string `json:"text"`
 	// FixRequiresGo is the `go` directive of the fixed version's go.mod, and FixCompat says whether taking the fix raises the
 	// minimum Go version this module supports ("raises_minimum") or not ("compatible"); empty when unknown. Context only: the
 	// letter never changes for it.

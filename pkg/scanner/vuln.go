@@ -628,6 +628,12 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
+	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
+	if projectErr == nil {
+		if err := CheckToolchain(projectGoVersion); err != nil {
+			return nil, nil, false, err
+		}
+	}
 	// A failure here only costs stdlib file positions, so it is not reported.
 	_, scannerGoRoot, scannerErr := resolveGoEnv(ctx, "")
 	parseOpts := gvcParseOptions{}
@@ -663,6 +669,9 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 			msg = exitErr.Error()
 		} else if !strings.HasPrefix(msg, "govulncheck:") {
 			msg = "govulncheck: " + msg
+		}
+		if terr := toolchainErrorFrom(msg); terr != nil {
+			msg = terr.Error()
 		}
 		warnings = append(warnings, msg)
 	}

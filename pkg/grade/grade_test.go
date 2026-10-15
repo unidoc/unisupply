@@ -1,6 +1,7 @@
 package grade
 
 import (
+	"encoding/json"
 	"math/rand"
 	"reflect"
 	"strings"
@@ -544,5 +545,56 @@ func TestOwnStatusFailureOnlyPendingWhenItCouldChangeTheLetter(t *testing.T) {
 	}
 	if r := run(Input{Self: bad, Checks: Checks{SelfAdvisoriesFailed: true}}); r.Pending == nil {
 		t.Error("an unread advisory list can always change the letter")
+	}
+}
+
+// F35: a failed severity lookup on one alias is not Pending once another alias of the same vulnerability supplies a severity.
+func TestMergeAdvisories_LookupFailureDroppedWhenAnAliasHasSeverity(t *testing.T) {
+	a := Finding{ID: "GHSA-aaaa-bbbb-cccc", Aliases: []string{"CVE-2026-1"}, SeverityLookupFailed: true, Reachability: "called"}
+	b := Finding{ID: "GO-2026-1", Aliases: []string{"CVE-2026-1"}, Severity: "LOW", Reachability: "called"}
+	for _, in := range [][]Finding{{a, b}, {b, a}} {
+		m := mergeAdvisories(in)
+		if len(m) != 1 || m[0].SeverityLookupFailed || m[0].Severity != "LOW" {
+			t.Errorf("%+v", m)
+		}
+	}
+	// both unknown and one failed: still failed
+	c := Finding{ID: "GO-2026-1", Aliases: []string{"CVE-2026-1"}, Reachability: "called"}
+	if m := mergeAdvisories([]Finding{a, c}); len(m) != 1 || !m[0].SeverityLookupFailed {
+		t.Errorf("%+v", m)
+	}
+	r := run(Input{Self: self(), Deps: []Row{dep("example.com/x", a, b)}})
+	if r.Pending != nil {
+		t.Errorf("a severity is known, so not Pending: %+v", r.Pending)
+	}
+}
+
+// The fix's age when the scanned version was released is said next to the age to the scan date.
+func TestResponseContext_FixAgeAtRelease(t *testing.T) {
+	fixed := now.Add(-120 * 24 * time.Hour)
+	released := now.Add(-33 * 24 * time.Hour) // the fix had existed 87 days
+	after := now.Add(-200 * 24 * time.Hour)   // the version predates the fix
+	mk := func(rel *time.Time) Response {
+		f := Finding{ID: "GO-2026-0777", Module: "golang.org/x/net", Severity: "HIGH", Reachability: "called", FixedVersion: "v0.60.0", FixReleasedAt: &fixed, FixDateSource: "module_proxy"}
+		r := run(Input{Self: self(), SelfReleasedAt: rel, Deps: []Row{dep("golang.org/x/net", f)}})
+		return row(t, r, "golang.org/x/net").Findings[0].Response
+	}
+	resp := mk(&released)
+	if resp.FixAgeAtReleaseDays != 87 || resp.DaysSinceFix != 120 ||
+		resp.Text != "Fix available for 87 days before this version was released (120 days to the scan date); the graded version still requires the affected golang.org/x/net version." {
+		t.Errorf("%+v", resp)
+	}
+	for name, rel := range map[string]*time.Time{"unknown": nil, "fix after release": &after} {
+		if r := mk(rel); r.FixAgeAtReleaseDays != 0 || strings.Contains(r.Text, "before this version") {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	b, _ := json.Marshal(mk(nil))
+	if strings.Contains(string(b), "fix_age_at_release_days") {
+		t.Errorf("omitted when unknown: %s", b)
+	}
+	b, _ = json.Marshal(resp)
+	if !strings.Contains(string(b), `"fix_age_at_release_days":87`) {
+		t.Errorf("%s", b)
 	}
 }

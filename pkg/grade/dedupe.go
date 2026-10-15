@@ -97,6 +97,8 @@ func mergeGroup(all []Finding, idx []int) Finding {
 		if severityRank(f.Severity) > severityRank(m.Severity) {
 			m.Severity = f.Severity
 		}
+		// a failed severity lookup only matters while no alias supplied a severity
+		m.SeverityLookupFailed = severityRank(m.Severity) == 0 && (m.SeverityLookupFailed || f.SeverityLookupFailed)
 		if reachRank(f.Reachability) > reachRank(m.Reachability) {
 			m.Reachability = f.Reachability
 		}

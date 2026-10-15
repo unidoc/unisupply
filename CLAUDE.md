@@ -59,6 +59,15 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   `--grade-stdlib`; a failed scan is Pending only with it). `StdlibScanned` follows the scan outcome. The scan runs through
   the `scanVulns` seam in `pkg/runner` (tests stub it). `scan.govulncheck_version` is `golang.org/x/vuln`'s version from the
   build info, never unisupply's own.
+- **Toolchain check**: govulncheck runs in-process with the Go unisupply was built with. `scanner.CheckToolchain(scanGo)`
+  (exported; gorisk calls it at startup) returns "this unisupply was built with go1.26.9 and cannot scan code that needs
+  go1.27.2; rebuild unisupply with go1.27.2 or newer" when `scanGo` is newer (compared with `go/version`, so rc and beta forms
+  order correctly). `ScanVulnsWithOptions` runs it on the project's resolved Go before starting, and rewrites the loader's "file
+  requires newer Go version" error to the same sentence; it becomes the `vulnerability_scan` Pending reason. Tests inject
+  `builtWithGo`.
+- **Fix age at release**: with `--module-version`, `scanner.ModuleVersionTime` (proxy `.info`, cached) gives the scanned version's
+  release time (`grade.Input.SelfReleasedAt`); `response.fix_age_at_release_days` is set when the fix predates it by a day or
+  more (the `selfReleaseTime` seam in `pkg/runner`).
 - **Estimated**: a letter that an unpublished severity (scored as medium) could change is shown with `*` (`C*`): the grade is recomputed with every such severity as low and as critical.
 - The 0-100 numbers in the rows (and `grade.score`) are policy values that pick a band. They are shown beside the
   letter for traceability; they are not a measurement and not a risk score.

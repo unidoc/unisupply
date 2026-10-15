@@ -47,6 +47,7 @@ func joinLimited(items []string, n int) string {
 //
 //	while the fix is new:   "Fix released 8 October · response window ends 22 October."
 //	after 14 days:          "Fix available for 14 days; the graded version still requires the affected x/net version."
+//	scanned version known:  "Fix available for 87 days before this version was released (120 days to the scan date); ..."
 //	no fix:                 "No fix available" (no clock);  no fix date: "Fix release date unavailable" (no deadline)
 //	known exploited:        counts at once; no response label.
 //
@@ -83,16 +84,26 @@ func responseBase(f *Finding, r Row, in *Input) Response {
 		days = 0
 	}
 	resp.DaysSinceFix = days
+	if in.SelfReleasedAt != nil && t.Before(*in.SelfReleasedAt) {
+		resp.FixAgeAtReleaseDays = int(in.SelfReleasedAt.Sub(t).Hours() / 24)
+	}
 	if in.Now.Before(ends) {
 		resp.Status = "within_window"
 		resp.Text = fmt.Sprintf("Fix released %s · response window ends %s.", dayMonth(t, in.Now), dayMonth(ends, in.Now))
+		if resp.FixAgeAtReleaseDays > 0 {
+			resp.Text += fmt.Sprintf(" The fix was available for %d days before this version was released.", resp.FixAgeAtReleaseDays)
+		}
 	} else {
 		resp.Status = "past_window"
 		module := f.Module
 		if module == "" {
 			module = r.Module
 		}
-		resp.Text = fmt.Sprintf("Fix available for %d days; the graded version still requires the affected %s version.", days, module)
+		if resp.FixAgeAtReleaseDays > 0 {
+			resp.Text = fmt.Sprintf("Fix available for %d days before this version was released (%d days to the scan date); the graded version still requires the affected %s version.", resp.FixAgeAtReleaseDays, days, module)
+		} else {
+			resp.Text = fmt.Sprintf("Fix available for %d days; the graded version still requires the affected %s version.", days, module)
+		}
 	}
 	resp.History = historyText(f, in)
 	return resp

@@ -15,6 +15,22 @@ import (
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
+// selfReleaseTime looks up when the scanned module version was published; a variable so tests need no network.
+var selfReleaseTime = scanner.ModuleVersionTime
+
+// lookupSelfRelease is when the scanned module version was published, or nil. Context only: an unknown release time just
+// leaves the "before this version was released" figure out of the findings.
+func lookupSelfRelease(ctx context.Context, r *gradeRun) *time.Time {
+	if r.Opts.SelfVersion == "" || offline.Enabled() {
+		return nil
+	}
+	t, ok := selfReleaseTime(ctx, scanner.FixDateOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, r.Opts.SelfVersion)
+	if !ok {
+		return nil
+	}
+	return &t
+}
+
 // stdlibModule is the row name of the Go standard library: it is part of every build, so its findings are graded like a
 // direct dependency's.
 const stdlibModule = "stdlib"
@@ -33,6 +49,9 @@ type gradeInputs struct {
 	Checks  grade.Checks
 	History map[string]*scanner.ResponseHistory
 	Now     time.Time
+
+	// SelfReleasedAt is when the scanned module version was published (nil: unknown or no --module-version).
+	SelfReleasedAt *time.Time
 
 	// StdlibVersion is the Go release the standard library row was graded at.
 	StdlibVersion string
@@ -58,6 +77,7 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 		History:          in.History,
 		Now:              in.Now,
 		ProjectGo:        in.ProjectGo,
+		SelfReleasedAt:   in.SelfReleasedAt,
 	}
 	if in.Graph != nil {
 		for _, path := range in.Graph.SortedPaths() {
@@ -284,6 +304,7 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 		}
 	}
 	in.Self = assessSelf(ctx, r, &in.Checks)
+	in.SelfReleasedAt = lookupSelfRelease(ctx, r)
 
 	if r.Opts.ResponseHistory && r.Opts.SelfVersion != "" && !offline.Enabled() {
 		// Context only: a failed lookup leaves the labels at "Not enough response history", never a Pending grade.

@@ -249,3 +249,31 @@ func proxyInfoTime(ctx context.Context, client *Client, proxy, host string, l fi
 	}
 	return info.Time, true
 }
+
+// versionTimeCache holds proxy release times of module versions: a published version's time never changes, so a
+// success is kept for the life of the process. Failures are not cached.
+var versionTimeCache sync.Map // key: proxy + "|" + module + "@" + version -> time.Time
+
+// ModuleVersionTime returns when module@version was published, from the module proxy's .info (opts.ProxyURL, default
+// proxy.golang.org). ok is false when it cannot be told: offline mode, a bad version, a failed or undated lookup.
+// Successes are cached per proxy, module and version.
+func ModuleVersionTime(ctx context.Context, opts FixDateOptions, module, version string) (time.Time, bool) {
+	if offline.Enabled() {
+		return time.Time{}, false
+	}
+	l := fixLookup{module, canonicalVersion(version)}
+	if l.version == "" {
+		return time.Time{}, false
+	}
+	key := strings.TrimRight(opts.ProxyURL, "/") + "|" + module + "@" + l.version
+	if v, ok := versionTimeCache.Load(key); ok {
+		return v.(time.Time), true
+	}
+	times := fetchProxyTimes(ctx, opts, []fixLookup{l})
+	t, ok := times[l]
+	if !ok {
+		return time.Time{}, false
+	}
+	versionTimeCache.Store(key, t)
+	return t, true
+}

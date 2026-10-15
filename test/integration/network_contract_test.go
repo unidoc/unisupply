@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,6 +93,8 @@ func osvQueryRow(withVersion bool) func(recordedRequest) bool {
 	}
 }
 
+var selfVerCounter atomic.Int64
+
 // rowMatchers declares, per documented host, one matcher per README table row.
 // Matching on the host alone would let two of the three api.github.com rows
 // stop running while a single GitHub request from the third kept the coverage
@@ -102,7 +105,8 @@ func osvQueryRow(withVersion bool) func(recordedRequest) bool {
 // it. Hosts listed in undrivenRows are exempt and must not appear here.
 var rowMatchers = map[string][]rowMatcher{
 	"proxy.golang.org": {
-		{name: "maintenance and resilience version lookups", match: not(contains("/fixmod/@v/", "/rhmod/@v/", "/rhdep/@v/"))},
+		{name: "maintenance and resilience version lookups", match: not(contains("/fixmod/@v/", "/rhmod/@v/", "/rhdep/@v/", "/selfver/@v/"))},
+		{name: "release time of the scanned --module-version", match: contains("/selfver/@v/")},
 		{name: "fix-release date lookups", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".info") }},
 		{name: "Go requirement of each fixed version", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".mod") }},
 		{name: "response history (scanned module and dependency releases)", match: contains("/rhmod/@v/", "/rhdep/@v/")},
@@ -440,6 +444,10 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	dated := []scanner.Vulnerability{{ID: "GO-2026-0002", FixedVersion: "v1.0.1"}}
 	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
 	scanner.ResolveFixGoRequirements(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
+
+	// proxy.golang.org (release time of the scanned --module-version). Its answers are cached per process, so each drive asks
+	// for a version no earlier drive did.
+	scanner.ModuleVersionTime(ctx, scanner.FixDateOptions{}, "example.com/selfver", fmt.Sprintf("v1.0.%d", selfVerCounter.Add(1)))
 
 	// proxy.golang.org (the scanned module's releases, the dependency's fix
 	// date) and api.osv.dev (one query per dependency, no version): response

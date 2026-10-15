@@ -50,6 +50,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
     `policy.Evaluate` no longer panics when only a grade is passed.
   - The retired score wording is gone from the published warnings; `.github` workflows and scripts read the grade.
 
+#### How long the fix existed before the scanned version was released
+
+- With `--module-version`, the module proxy's release time of that version (`scanner.ModuleVersionTime`, cached) is
+  compared with each fix's release date. The JSON `response.fix_age_at_release_days` and the text "Fix available for 87
+  days before this version was released (120 days to the scan date)" say how long the fix had existed at release; both are
+  absent when the release time is unknown or the fix came after the release. The letter does not change.
+
 #### NVD API key for severity lookups
 
 - **`--nvd-api-key` (or `NVD_API_KEY`) raises the NVD rate limit** of the CVE
@@ -408,6 +415,15 @@ breaks consumers that read the old fields.**
   score or the headline.
 
 ### Bug Fixes
+
+- **A failed severity lookup on one alias no longer makes the grade Pending when another alias of the same vulnerability
+  supplies the severity.** When advisories are merged, `SeverityLookupFailed` is kept only while the merged severity is
+  still unknown.
+- **A scan that needs a newer Go than unisupply was built with now says so.** govulncheck runs in-process, and the loader's
+  "file requires newer Go version go1.27 (application built with go1.26)" error was all a user saw. The scan now stops with
+  "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27.2; rebuild unisupply with go1.27.2 or
+  newer", which is the `vulnerability_scan` Pending reason. New exported `scanner.CheckToolchain(scanGo)` lets gorisk check
+  at startup.
 
 - **`--require-github-token` now fails (exit 3) when GitHub rejects the
   token, and a rejected token is reported as such.** The flag used to check

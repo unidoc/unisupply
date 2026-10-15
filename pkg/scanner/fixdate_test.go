@@ -308,3 +308,32 @@ func TestFixDate_Network(t *testing.T) {
 		t.Errorf("go1.21.0: %v %q, want a module_proxy date", vulns[0].FixReleasedAt, vulns[0].FixDateSource)
 	}
 }
+
+func TestModuleVersionTime(t *testing.T) {
+	p := newProxyFixture(t, map[string]string{"/example.com/m/@v/v1.4.0.info": "2026-05-01T00:00:00Z"})
+	defer p.srv.Close()
+	opts := FixDateOptions{ProxyURL: p.srv.URL}
+	for i := 0; i < 2; i++ { // the second answer comes from the cache
+		got, ok := ModuleVersionTime(context.Background(), opts, "example.com/m", "v1.4.0")
+		if !ok || !got.Equal(*ptrTime("2026-05-01T00:00:00Z")) {
+			t.Fatalf("got %v %v", got, ok)
+		}
+	}
+	p.mu.Lock()
+	n := p.hits["/example.com/m/@v/v1.4.0.info"]
+	p.mu.Unlock()
+	if n != 1 {
+		t.Errorf("want 1 proxy request (cached), got %d", n)
+	}
+	if _, ok := ModuleVersionTime(context.Background(), opts, "example.com/m", "v9.9.9"); ok {
+		t.Error("a 404 has no time")
+	}
+	if _, ok := ModuleVersionTime(context.Background(), opts, "example.com/m", "not-a-version"); ok {
+		t.Error("a bad version has no time")
+	}
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	if _, ok := ModuleVersionTime(context.Background(), FixDateOptions{ProxyURL: p.srv.URL}, "example.com/other", "v1.0.0"); ok {
+		t.Error("offline: no lookup")
+	}
+}

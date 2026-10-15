@@ -104,6 +104,12 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 
 A Pending result publishes no letter, no deciding row and no score; `pending.known` says what is known.
 
+**A scan that needs a newer Go than unisupply was built with.** govulncheck runs inside unisupply, compiled with one Go release. When
+the Go the scan resolves for the project (its `go` directive or `toolchain` line) is newer, the scan stops before loading anything
+and the grade is Pending (`vulnerability_scan`) with the reason "this unisupply was built with go1.26.9 and cannot scan code that
+needs go1.27.2; rebuild unisupply with go1.27.2 or newer". The same sentence replaces the loader's "file requires newer Go version"
+error when that surfaces during a scan. A caller can check at startup with `scanner.CheckToolchain(scanGo)`.
+
 **The standard library** is listed, not graded, by default (`--grade-stdlib` grades it as a row named `stdlib`): its advisories
 follow the Go toolchain that runs the scan, which is not necessarily the one the project is built with, so the same project could
 grade differently on another machine. The Go release it was matched against is always named in `grade.notes`, whether or not it
@@ -112,6 +118,12 @@ block and the Go release note. They are not graded unless `--grade-stdlib` is se
 warning (and no scan is claimed in the notes); under `--grade-stdlib` a failed scan is Pending (a letter must not come from a scan
 that did not look), and so is a module with no Go package at all, which govulncheck cannot analyse. The note about the Go release
 is written only when the scan ran.
+
+**How long the fix existed before the scanned version was released.** With `--module-version`, the module proxy's release time of
+that version is looked up (cached; a failed lookup only leaves the figure out). A finding whose fix was released more than a day
+before that version says how long it had existed then: `response.fix_age_at_release_days` and the text "Fix available for 87 days
+before this version was released (120 days to the scan date)". The field is absent when the release time is unknown, when the fix
+came after the release, or when it came less than a day before. It is context: the letter never changes for it.
 
 **A fix that needs a newer Go.** Many fixes only exist in versions that need a newer Go than the graded module supports: the x/*
 modules raise their minimum to the previous Go release soon after each Go release (Go 1.27 on 18 August, and x/image v0.46.0 and

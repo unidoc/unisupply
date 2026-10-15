@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -437,5 +438,57 @@ func TestFindingFromVuln_CarriesTheGoTheFixNeeds(t *testing.T) {
 	}
 	if got := goDirective(&parser.GoMod{GoVersion: " 1.24 "}); got != "1.24" || goDirective(nil) != "" {
 		t.Errorf("%q", got)
+	}
+}
+
+// With a module version, the proxy's release time of that version reaches the grade: a finding says how long its fix
+// existed before the version was released.
+func TestGradeAll_SelfReleaseTimeReachesTheFinding(t *testing.T) {
+	scanStart := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	released := scanStart.Add(-33 * 24 * time.Hour)
+	fixed := scanStart.Add(-120 * 24 * time.Hour)
+	prev := selfReleaseTime
+	t.Cleanup(func() { selfReleaseTime = prev })
+	selfReleaseTime = func(_ context.Context, _ scanner.FixDateOptions, mod, ver string) (time.Time, bool) {
+		if mod != "example.com/app" || ver != "v1.0.0" {
+			t.Errorf("asked for %s@%s", mod, ver)
+		}
+		return released, true
+	}
+	rel := lookupSelfRelease(t.Context(), &gradeRun{Opts: Options{SelfVersion: "v1.0.0"}, GoMod: &parser.GoMod{ModulePath: "example.com/app"}})
+	if rel == nil || !rel.Equal(released) {
+		t.Fatalf("lookupSelfRelease = %v", rel)
+	}
+	if lookupSelfRelease(t.Context(), &gradeRun{GoMod: &parser.GoMod{ModulePath: "example.com/app"}}) != nil {
+		t.Error("no module version: no lookup")
+	}
+	in := gradeInputs{Now: scanStart, SelfReleasedAt: rel,
+		Graph: &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/a": {Module: parser.Module{Path: "example.com/a", Version: "v1.0.0"}, Direct: true, InBuild: tp(true)}}},
+		Vulns: map[string][]scanner.Vulnerability{"example.com/a": {{ID: "GO-1", Severity: "HIGH", Reachability: "called", FixedVersion: "v1.1.0", FixReleasedAt: &fixed, FixDateSource: scanner.FixDateModuleProxy}}},
+	}
+	gi := buildGradeInput(&in)
+	res := grade.Grade(&gi)
+	var got grade.Response
+	for _, r := range res.Rows {
+		if r.Module == "example.com/a" && len(r.Findings) > 0 {
+			got = r.Findings[0].Response
+		}
+	}
+	if got.FixAgeAtReleaseDays != 87 {
+		t.Errorf("%+v", got)
+	}
+}
+
+// The toolchain sentence is the Pending reason of the vulnerability scan.
+func TestGradeAll_ToolchainMismatchIsThePendingReason(t *testing.T) {
+	err := vulnScanFailure(errors.New("this unisupply was built with go1.26.9 and cannot scan code that needs go1.27.2; rebuild unisupply with go1.27.2 or newer"), false, nil)
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/a": {Module: parser.Module{Path: "example.com/a", Version: "v1.0.0"}, Direct: true}}}
+	res := gradeAll(t.Context(), &gradeRun{
+		GoMod: &parser.GoMod{ModulePath: "example.com/app"}, Graph: g, Integrity: &scanner.IntegrityReport{}, ScanStart: time.Now(),
+		Maintenance:    map[string]*scanner.MaintenanceInfo{"example.com/a": {LastRelease: time.Now()}},
+		VulnScanReason: errString(err),
+	})
+	if res.Pending == nil || res.Pending.Check != "vulnerability_scan" || !strings.Contains(res.Pending.Reason, "rebuild unisupply with go1.27.2 or newer") {
+		t.Fatalf("%+v", res.Pending)
 	}
 }
