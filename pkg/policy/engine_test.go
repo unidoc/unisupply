@@ -1601,3 +1601,39 @@ func TestEvaluate_GradeOnlyInput(t *testing.T) {
 		t.Error("an F passed the moderate preset")
 	}
 }
+
+// F30 / G9: a letter given without some archived flags is not a silent pass. At the maximum itself (max_grade A on an A
+// that one unread flag could turn into B) it fails; with room to spare it passes with a warning that names the count and
+// says to set GITHUB_TOKEN.
+func TestEvaluate_MaxGrade_ArchivedUnread(t *testing.T) {
+	unread := &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA, ArchivedUnread: []string{"example.com/a", "example.com/b"}}
+	input := makeEvalInput(nil, 0)
+	input.Grade = unread
+
+	result := (&policy.Policy{MaxGrade: "A"}).Evaluate(input)
+	if result.Pass || len(result.Violations) != 1 || result.Violations[0].Severity != "error" {
+		t.Fatalf("max_grade A on a letter with unread archived flags must fail: %+v", result)
+	}
+	for _, want := range []string{"2 archived flags", "GITHUB_TOKEN"} {
+		if !strings.Contains(result.Violations[0].Detail, want) {
+			t.Errorf("detail %q lacks %q", result.Violations[0].Detail, want)
+		}
+	}
+
+	result = (&policy.Policy{MaxGrade: "B"}).Evaluate(input)
+	if !result.Pass || len(result.Violations) != 1 || result.Violations[0].Severity != "warning" {
+		t.Fatalf("max_grade B: a pass with one warning: %+v", result)
+	}
+	text := result.FormatText(true)
+	for _, want := range []string{"PASS (1 warning)", "[max_grade]", "2 unread archived flags", "GITHUB_TOKEN"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+
+	// nothing unread: silent pass as before
+	input.Grade = &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA}
+	if r := (&policy.Policy{MaxGrade: "A"}).Evaluate(input); !r.Pass || len(r.Violations) != 0 {
+		t.Errorf("no unread flags must pass silently: %+v", r)
+	}
+}

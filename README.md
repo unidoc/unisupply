@@ -289,6 +289,8 @@ Notable fields:
 - `max_grade` — the worst letter allowed, `"A"` to `"F"` (`"C"` fails D and F).
   A grade that is Pending (a check it needs did not run) or missing **fails**
   this rule: a gate must not pass on "no result".
+  A letter given without archived flags that could change it (`grade.archived_unread` not empty, no `GITHUB_TOKEN`) fails
+  `"A"` and warns (`PASS (1 warning)`) with a looser maximum: set `GITHUB_TOKEN`.
 - `allow_pending` — let a Pending grade pass `max_grade`. It is then printed as a
   warning (`PASS (1 warning): ...`) instead of failing.
 - `no_known_vulns` / `no_critical_vulns` — fail on any vuln, or only on

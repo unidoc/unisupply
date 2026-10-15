@@ -157,6 +157,9 @@ type Result struct {
 	Typosquats  map[string]*scanner.TyposquatResult
 }
 
+// scanVulns is the vulnerability scan; tests replace it.
+var scanVulns = scanner.ScanVulnsWithOptions
+
 // Run executes unisupply's full scan-and-score pipeline: parse go.mod,
 // resolve the dependency graph, run every applicable scanner, and compute
 // the project's risk score. Returns a Result with an empty
@@ -236,44 +239,46 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	githubToken := tokenStatus.token
 
 	if len(graph.Dependencies) == 0 {
-		// No dependency means no per-dependency scanner has anything to do. The standard library is part of every build,
-		// but it decides the letter only when the caller grades it (Options.GradeStdlib); then govulncheck still runs, so a
-		// module with no dependencies does not get a letter that never saw its one possible finding. Otherwise nothing a
-		// scan could find would change the grade, and none is run (as before).
-		var stdlibVulns []scanner.Vulnerability
-		var emptyVulnErr error
+		// No dependency means no per-dependency scanner has anything to do, but the standard library is part of every
+		// build: govulncheck still runs, and its standard-library advisories are listed (with the Go release they were
+		// matched against and the scan block). They decide the letter only when the caller grades the standard library
+		// (Options.GradeStdlib). A scan that failed is Pending only then; otherwise it is a warning and the letter is the
+		// module's own row.
+		rep.Stage("Scanning vulnerabilities (govulncheck)")
 		var scanInfo scanner.ScanInfo
-		vulnScanned := !opts.GradeStdlib // "nothing to scan" is not a failed scan
-		if opts.GradeStdlib {
-			rep.Stage("Scanning vulnerabilities (govulncheck)")
-			var vulns map[string][]scanner.Vulnerability
-			var vulnWarnings []string
-			var verr error
-			vulns, vulnWarnings, vulnScanned, verr = scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
-			if verr != nil {
-				rep.Warn("Vulnerability scan failed: %v", verr)
-			}
-			emptyVulnErr = vulnScanFailure(verr, vulnScanned, vulnWarnings)
-			for _, w := range vulnWarnings {
-				rep.Warn("%s", w)
-			}
-			rep.Done("%d standard library advisories", len(vulns["stdlib"]))
-			resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
-			stdlibVulns = takeStdlibVulns(vulns)
+		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
+		if verr != nil {
+			rep.Warn("Vulnerability scan failed: %v", verr)
 		}
+		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
+		for _, w := range vulnWarnings {
+			rep.Warn("%s", w)
+		}
+		rep.Done("%d standard library advisories", len(vulns["stdlib"]))
+		resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
+		stdlibVulns := takeStdlibVulns(vulns)
 
 		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
 		// real empty-graph score looks like.
 		projectScore := scorer.ScoreAll(scorer.ScoreInput{
 			Graph:               graph,
 			Now:                 scanStart,
-			VulnScanUnavailable: !vulnScanned,
+			VulnScanUnavailable: opts.GradeStdlib && emptyVulnErr != nil,
 		})
+		if emptyVulnErr != nil {
+			// not graded (no --grade-stdlib): the failed scan is said, but the letter is the module's own row
+			projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
+		}
+		// a failed scan is a missing check only when its result takes part in the grade
+		scanMissing := emptyVulnErr
+		if !opts.GradeStdlib {
+			scanMissing = nil
+		}
 		g := gradeAll(ctx, &gradeRun{
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 			Timeout: timeout, ScanStart: scanStart, ProjectDir: projectDir,
 			Stdlib:      gradedStdlib(&opts, stdlibVulns),
-			VulnScanned: emptyVulnErr == nil, VulnScanReason: errString(emptyVulnErr), StdlibScanned: opts.GradeStdlib,
+			VulnScanned: scanMissing == nil, VulnScanReason: errString(scanMissing), StdlibScanned: emptyVulnErr == nil,
 			KEVStaleSince: kevStaleSince(&scanInfo),
 		})
 		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
@@ -293,7 +298,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	var scanInfo scanner.ScanInfo
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulnsWithOptions(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
+	vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
 	// The scanner reports availability directly: govulncheck failures come back
 	// as a warning with a nil error, so err alone reads a failed scan as clean.
 	vulnScanUnavailable := !vulnScanned
@@ -463,7 +468,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		ProjectDir: projectDir,
 		Vulns:      vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
-		StdlibScanned: true, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
+		StdlibScanned: vulnScanErr == nil, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
 	})
 
 	return &Result{

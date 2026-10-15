@@ -49,7 +49,16 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   mismatch from `go mod verify`).
 - **Pending**: when a check the letter needs did not run (vulnerability scan, scan did not finish, the module's own
   status, a dependency's maintenance data), there is **no letter**. `grade.pending` names the check. A row whose upkeep
-  could not be read has an empty letter (`-`). A gate must treat Pending as "no result", never as a pass.
+  could not be read has an empty letter (`-`). A gate must treat Pending as "no result", never as a pass. A cached KEV
+  catalog older than 30 days (`scanner.KEVMaxStaleAge`) is no catalog (Pending `known_exploited`); up to 30 days it is used
+  and the note states its age. On Pending the deprecated JSON scores (`overall_risk_score`, `headline.score`, a
+  dependency's `risk_score`) are omitted, never 0.
+- **`archived_unread`**: an unread archived flag adds at most 20 to a row, so `grade.archived_unread` and its note list
+  only the modules whose flag could raise the letter (computed in `pkg/grade`); empty on C, D and F.
+- **Zero-dependency modules** still run the vulnerability scan and list stdlib findings (not graded without
+  `--grade-stdlib`; a failed scan is Pending only with it). `StdlibScanned` follows the scan outcome. The scan runs through
+  the `scanVulns` seam in `pkg/runner` (tests stub it). `scan.govulncheck_version` is `golang.org/x/vuln`'s version from the
+  build info, never unisupply's own.
 - **Estimated**: a letter that an unpublished severity (scored as medium) could change is shown with `*` (`C*`): the grade is recomputed with every such severity as low and as critical.
 - The 0-100 numbers in the rows (and `grade.score`) are policy values that pick a band. They are shown beside the
   letter for traceability; they are not a measurement and not a risk score.
@@ -189,7 +198,8 @@ See `pkg/policy/engine.go` for the full schema and `examples/policy-custom.json`
 for an example reference.
 
 `max_grade` is the worst letter allowed (`"C"` fails D and F). It also fails when there is no grade or the grade is
-Pending, unless `allow_pending` is true (then it is a printed warning). Exit code 2 on policy violation — designed for
+Pending, unless `allow_pending` is true (then it is a printed warning). With `grade.archived_unread` not empty (an unread
+archived flag could raise the letter) it fails when the letter equals the maximum (`"A"`), else warns. Exit code 2 on policy violation — designed for
 CI/CD fail-fast. Without `--policy` or `--policy-preset` the exit code ignores the grade.
 
 ## Building

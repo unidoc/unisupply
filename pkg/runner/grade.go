@@ -236,7 +236,7 @@ func errString(err error) string {
 // gradeAll builds the grade: the module's own row (status and advisories), every dependency's row, and the checks the
 // grade depends on. It never fails: a lookup that did not work is recorded in Checks, and the grade says Pending.
 func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
-	local := localReplaced(r.GoMod)
+	local := localReplaced(r.GoMod, r.Graph)
 	in := gradeInputs{
 		LocalReplaced:  local,
 		ProjectGo:      goDirective(r.GoMod),
@@ -417,20 +417,29 @@ func scanToolchainVersion(ctx context.Context, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// localReplaced is the set of modules a replace directive points at a local directory (./lib, ../lib, /abs/lib).
-func localReplaced(gm *parser.GoMod) map[string]bool {
+// localReplaced is the set of dependencies of the graph that a replace directive points at a local directory (./lib,
+// ../lib, /abs/lib), under go.mod's own rule (GoMod.ReplacementFor): a replace scoped to one version applies only when the
+// graph selected that version. For any other version the module comes from the proxy and is not local.
+func localReplaced(gm *parser.GoMod, g *resolver.Graph) map[string]bool {
 	out := map[string]bool{}
-	if gm == nil {
+	if gm == nil || g == nil {
 		return out
 	}
-	for path, rep := range gm.Replaces {
-		p := rep.New.Path
-		if p == "." || p == ".." || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") ||
-			strings.HasPrefix(p, `.\`) || strings.HasPrefix(p, `..\`) || (len(p) > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) {
+	for path, d := range g.Dependencies {
+		version := ""
+		if d != nil {
+			version = d.Module.Version
+		}
+		if rep, ok := gm.ReplacementFor(path, version); ok && isLocalPath(rep.New.Path) {
 			out[path] = true
 		}
 	}
 	return out
+}
+
+func isLocalPath(p string) bool {
+	return p == "." || p == ".." || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") ||
+		strings.HasPrefix(p, `.\`) || strings.HasPrefix(p, `..\`) || (len(p) > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/'))
 }
 
 // countChecksummed is the number of modules of the graph that have a go.sum entry to verify (not locally replaced).

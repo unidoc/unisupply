@@ -240,3 +240,23 @@ func TestGradePDF_DrawManyRows(t *testing.T) {
 		t.Errorf("rows table spilled over %d pages", n)
 	}
 }
+
+// F34: the Pending paragraph lists every check that can make a grade Pending and says what a missing archived flag does by
+// default, as docs/grading.md does.
+func TestMethodologySections_PendingParagraphListsEveryCheck(t *testing.T) {
+	var body string
+	for _, s := range methodologySections() {
+		if s.title == "Pending" {
+			body = s.body
+		}
+	}
+	for _, want := range []string{
+		"scan_incomplete", "module_status", "module_advisories", "dependency_maintenance",
+		"checksum", "known_exploited", "severity_lookup",
+		"the letter is given with a note", "only with --strict-archived", "older than 30 days",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("Pending paragraph missing %q: %q", want, body)
+		}
+	}
+}

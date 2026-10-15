@@ -28,7 +28,7 @@ type JSONReport struct {
 
 	// Deprecated: kept for one release, derived from Grade (see json_deprecated.go). OverallRisk is the worst row's policy
 	// value, OverallLevel the coarse band of the letter (UNKNOWN without one) and Headline the deciding row in the old shape.
-	OverallRisk      int          `json:"overall_risk_score"`
+	OverallRisk      *int         `json:"overall_risk_score,omitempty"`
 	OverallLevel     string       `json:"overall_risk_level"`
 	Headline         JSONHeadline `json:"headline"`
 	DeprecatedFields []string     `json:"deprecated_fields"`
@@ -110,7 +110,7 @@ type JSONDependency struct {
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
 	// Deprecated: the row's policy value and its coarse level, derived from the grade (see json_deprecated.go).
-	RiskScore int    `json:"risk_score"`
+	RiskScore *int   `json:"risk_score,omitempty"`
 	RiskLevel string `json:"risk_level"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
 	// failed or was not run). When present it reflects the main module's own
@@ -414,6 +414,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	transitiveCount := graph.TransitiveCount()
 
 	crit, high, med, low := deprecatedCounts(opts.Grade)
+	headline := deprecatedHeadline(opts.Grade)
 	report := JSONReport{
 		Tool:        "unisupply",
 		Version:     version.Version,
@@ -427,8 +428,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		},
 		Grade:            opts.Grade,
 		OverallRisk:      gradeScore(opts.Grade),
-		OverallLevel:     deprecatedHeadline(opts.Grade).Level,
-		Headline:         deprecatedHeadline(opts.Grade),
+		OverallLevel:     headline.Level,
+		Headline:         headline,
 		DeprecatedFields: deprecatedFields,
 		Scan:             opts.Scan,
 		Warnings:         publishedWarnings(ps.Warnings),
@@ -448,7 +449,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			Module:         ds.Module,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
-			RiskScore:      rows[ds.Module].Score,
+			RiskScore:      rowScore(opts.Grade, rows[ds.Module], hasRow(rows, ds.Module)),
 			RiskLevel:      deprecatedLevel(rows[ds.Module].Letter),
 			TestOnly:       ds.IsTestOnly,
 			InBuild:        ds.InBuild,

@@ -94,7 +94,9 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 4. a dependency's maintenance data is missing and could still beat the worst row;
 5. `go mod verify` could not complete, so a checksum mismatch (F) cannot be ruled out;
 6. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
-   already F: one on that list would grade F;
+   already F: one on that list would grade F. When the catalog cannot be refreshed, a cached copy up to 30 days old is used and
+   `grade.notes` states its date and age ("the copy from 2026-09-26 (14 days old)"); a copy older than 30 days is not a usable
+   catalog, so the check counts as not run, as when there is no catalog at all;
 7. `severity_lookup`: the severity of a reached finding could not be looked up (OSV, NVD and GitHub did not answer, usually
    NVD's rate limit without an API key) and a different severity would change the letter. A lookup that failed is a check that
    did not run, not an unpublished severity: it is retried (paced, with backoff) and, if it still fails, the grade is Pending.
@@ -105,8 +107,11 @@ A Pending result publishes no letter, no deciding row and no score; `pending.kno
 **The standard library** is listed, not graded, by default (`--grade-stdlib` grades it as a row named `stdlib`): its advisories
 follow the Go toolchain that runs the scan, which is not necessarily the one the project is built with, so the same project could
 grade differently on another machine. The Go release it was matched against is always named in `grade.notes`, whether or not it
-had findings. When it is graded, a module with no dependencies runs the vulnerability scan too (so it never gets a letter from a
-scan that did not look), and a module with no Go package at all, which govulncheck cannot analyse, is Pending.
+had findings. A module with no dependencies runs the vulnerability scan too, and lists its standard-library findings with the scan
+block and the Go release note. They are not graded unless `--grade-stdlib` is set, and a scan that failed is then only a
+warning (and no scan is claimed in the notes); under `--grade-stdlib` a failed scan is Pending (a letter must not come from a scan
+that did not look), and so is a module with no Go package at all, which govulncheck cannot analyse. The note about the Go release
+is written only when the scan ran.
 
 **A fix that needs a newer Go.** Many fixes only exist in versions that need a newer Go than the graded module supports: the x/*
 modules raise their minimum to the previous Go release soon after each Go release (Go 1.27 on 18 August, and x/image v0.46.0 and
@@ -130,8 +135,13 @@ Pending; a project that has only such dependencies has no `go.sum`, and that is 
 
 **Archived flags need a GitHub token** for any project with more than a few GitHub-hosted modules: unauthenticated, GitHub allows
 60 requests an hour. By default a grade is still given when the only gap is a dependency's archived flag: an archived dependency
-adds at most 20 to its row, so the letter may be one band better than it would be with the flag. The row is graded on what is known,
-the module is listed in `grade.archived_unread`, and a note says so and says to set `GITHUB_TOKEN`. With `--strict-archived`
+adds at most 20 to its row (10 when test-only or not compiled in), so the letter may be one band better than it would be with the
+flag. The row is graded on what is known. The module is listed in `grade.archived_unread`, and a note says so and says to set
+`GITHUB_TOKEN`, only when the flag could change the letter: the row graded as archived must land in a worse band than the letter
+(in practice an A that one archived dependency would make a B). On a C, D or F, or when the row already scores 20 or more, an unread
+flag cannot change anything, and there is neither a list nor a note. A policy with `max_grade` treats a non-empty
+`archived_unread` as not firm: it fails when the letter equals the maximum (`max_grade: "A"`), and otherwise passes with a
+warning that names how many flags were unread and says to set `GITHUB_TOKEN`. With `--strict-archived`
 (`StrictArchivedStatus`, used by services that publish letters) the same gap makes the grade Pending instead. The module's own
 archived flag (a C) is always required.
 
@@ -170,7 +180,9 @@ EPSS and KEV facts remain on each vulnerability as data.
 
 For ONE release the JSON still carries `overall_risk_score`, `overall_risk_level`, `headline`, the `*_risk_count` summary fields and
 the per-dependency `risk_score` / `risk_level`, derived from the grade (the score is the worst row's policy value, the level the
-coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN without a letter) so consumers can move to the
+coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN without a letter). On a Pending result the
+deprecated scores (`overall_risk_score`, `headline.score`, and a dependency's `risk_score`, also when its row has no letter) are
+left out, never 0: a v1 gate such as "overall_risk_score <= 60" must not pass a scan whose check did not run so consumers can move to the
 `grade` object in steps. They are deprecated, listed in `deprecated_fields`, and removed in the next release.
 
 The CI/CD audit (`--scan-ci`, `--scan-workflows`) is not part of the grade. It keeps its own 0 to 100 score, which is
@@ -199,7 +211,9 @@ The `grade` object of `--format json`:
 `max_grade` in a policy file is the worst letter allowed (`"C"` fails D and F). An enabled `max_grade` also fails when
 no grade is available (grading was not run), and it fails on Pending unless `allow_pending` is `true`. With
 `allow_pending`, a Pending grade passes the gate but is printed as a warning (`PASS (1 warning): ...`), so a gate that
-passed on "no result" is never silent. The old `max_risk_score` and `max_overall_score` are gone, and a policy file that
+passed on "no result" is never silent. A letter that was given without archived flags that could change it
+(`grade.archived_unread` is not empty) is not a silent pass either: with `max_grade: "A"` it fails (the letter could be one band
+worse), and with a looser maximum it passes with a warning naming the number of unread flags and saying to set `GITHUB_TOKEN`. The old `max_risk_score` and `max_overall_score` are gone, and a policy file that
 still contains them is rejected. See [examples/policy-custom.md](../examples/policy-custom.md) for every policy field.
 
 The exit code reflects the grade only when a policy is given (`--policy` or `--policy-preset`): without one, a grade of

@@ -39,6 +39,10 @@ the letter. A letter marked estimated (`C*`) is checked as its letter.
 When `max_grade` is enabled it also **fails when there is no grade**:
 grading did not run, or the grade is Pending (a check the grade needs
 did not run, so there is no letter). A gate must not pass on "no result".
+A letter given without some archived flags that could change it
+(`grade.archived_unread` is not empty: no `GITHUB_TOKEN`) is not a firm pass: it
+fails with `"A"`, and with a looser maximum it passes with a warning that names
+how many flags were unread and says to set `GITHUB_TOKEN`.
 **Strict preset:** `"B"`. **Moderate preset:** `"C"`.
 
 #### `.allow_pending` *(bool)*

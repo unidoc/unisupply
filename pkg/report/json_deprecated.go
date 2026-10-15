@@ -19,8 +19,9 @@ var deprecatedFields = []string{
 // JSONHeadline is the deprecated headline object, derived from the grade's deciding row.
 type JSONHeadline struct {
 	// Deprecated: read grade.letter and grade.deciding.
-	Score float64 `json:"score"`
-	Level string  `json:"level"`
+	// It is omitted on a Pending result (and without a grade): a 0 would read as the cleanest result.
+	Score *float64 `json:"score,omitempty"`
+	Level string   `json:"level"`
 	// Driver is "grade_row" when a row decides the letter, or the whole-tree rule that does.
 	Driver      string `json:"driver,omitempty"`
 	DrivingItem string `json:"driving_item,omitempty"`
@@ -50,7 +51,11 @@ func deprecatedHeadline(g *grade.Result) JSONHeadline {
 	if g == nil {
 		return h
 	}
-	h.Score, h.Level = float64(g.Score), deprecatedLevel(g.Letter)
+	h.Level = deprecatedLevel(g.Letter)
+	if score := gradeScore(g); score != nil {
+		v := float64(*score)
+		h.Score = &v
+	}
 	if g.Deciding != nil {
 		h.Driver, h.DrivingItem, h.Reason = "grade_row", g.Deciding.Module, g.Deciding.Reason
 		if g.Deciding.Tree != "" {
@@ -74,12 +79,24 @@ func deprecatedRows(g *grade.Result) map[string]grade.RowResult {
 	return rows
 }
 
-// gradeScore is the worst row's policy value, or 0 without a grade (or when it is Pending).
-func gradeScore(g *grade.Result) int {
-	if g == nil {
-		return 0
+// gradeScore is the worst row's policy value, or nil without a grade or when it is Pending: no check, no number (a
+// published 0 reads as the cleanest result, and a v1 gate such as "overall_risk_score <= 60" would pass).
+func gradeScore(g *grade.Result) *int {
+	if g == nil || g.Pending != nil {
+		return nil
 	}
-	return g.Score
+	v := g.Score
+	return &v
+}
+
+// rowScore is a dependency row's policy value, or nil when the grade is Pending or the row has no letter (its upkeep
+// could not be read, so the number is partial) or no row exists.
+func rowScore(g *grade.Result, r grade.RowResult, found bool) *int {
+	if g == nil || g.Pending != nil || !found || r.Letter == "" {
+		return nil
+	}
+	v := r.Score
+	return &v
 }
 
 // deprecatedCounts counts the dependency rows by coarse level, for the deprecated summary fields.
@@ -97,4 +114,9 @@ func deprecatedCounts(g *grade.Result) (critical, high, medium, low int) {
 		}
 	}
 	return
+}
+
+func hasRow(rows map[string]grade.RowResult, module string) bool {
+	_, ok := rows[module]
+	return ok
 }

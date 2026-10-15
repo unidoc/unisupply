@@ -273,7 +273,11 @@ func TestLocalReplaced(t *testing.T) {
 		"e/lib": {New: parser.Module{Path: "example.com/e"}},
 		"f/lib": {New: parser.Module{Path: ".."}},
 	}}
-	got := localReplaced(gm)
+	g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{}}
+	for p := range gm.Replaces {
+		g.Dependencies[p] = &resolver.Dependency{Module: parser.Module{Path: p, Version: "v1.2.3"}}
+	}
+	got := localReplaced(gm, g)
 	for _, p := range []string{"a/lib", "b/lib", "c/lib", "f/lib"} {
 		if !got[p] {
 			t.Errorf("%s is a local replacement", p)
@@ -284,8 +288,25 @@ func TestLocalReplaced(t *testing.T) {
 			t.Errorf("%s is a published replacement, not a local one", p)
 		}
 	}
-	if len(localReplaced(nil)) != 0 {
-		t.Error("nil go.mod")
+	if len(localReplaced(nil, g)) != 0 || len(localReplaced(gm, nil)) != 0 {
+		t.Error("nil go.mod or graph")
+	}
+}
+
+// F33: a replace scoped to one version (example.com/lib v1.0.0 => ../lib) applies only when that version is the selected
+// one. Another version comes from the proxy and is not local, so its archived and deprecated status is not skipped.
+func TestLocalReplaced_VersionScoped(t *testing.T) {
+	gm := &parser.GoMod{Replaces: map[string]parser.Replace{
+		"example.com/lib": {OldVersion: "v1.0.0", New: parser.Module{Path: "../lib"}},
+	}}
+	graphAt := func(v string) *resolver.Graph {
+		return &resolver.Graph{Dependencies: map[string]*resolver.Dependency{"example.com/lib": {Module: parser.Module{Path: "example.com/lib", Version: v}}}}
+	}
+	if !localReplaced(gm, graphAt("v1.0.0"))["example.com/lib"] {
+		t.Error("the selected version matches the replace: local")
+	}
+	if localReplaced(gm, graphAt("v1.1.0"))["example.com/lib"] {
+		t.Error("the replace is for v1.0.0 only; v1.1.0 comes from the proxy and is not local")
 	}
 }
 

@@ -635,7 +635,7 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
 	}
 	if opts.Info != nil {
-		*opts.Info = ScanInfo{Platform: scanPlatform()}
+		*opts.Info = ScanInfo{Platform: scanPlatform(), GovulncheckVersion: govulncheckVersion(readBuildInfo)}
 		parseOpts.info = opts.Info
 	}
 
@@ -762,7 +762,7 @@ func enrichThreatIntelStale(ctx context.Context, ti *ThreatIntelClient, results 
 	kev := kevCat.Entries
 	if kevCat.Stale {
 		kevStaleSince = kevCat.StaleSince
-		warnings = append(warnings, kevStaleWarning(kevCat.StaleSince))
+		warnings = append(warnings, kevStaleWarning(kevCat.StaleSince, ti.now()))
 	}
 	if kevErr != nil {
 		warnings = append(warnings, fmt.Sprintf(

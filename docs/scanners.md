@@ -396,19 +396,24 @@ the KEV catalog (single ~1.5 MB bulk fetch per scan) under
 recomputed daily; KEV updates weekly at most). Both lookups are best-effort:
 on failure the scan completes with a warning and the fields absent —
 threat-intel unavailability never fails a scan. When the KEV catalog cannot be
-refreshed after its 24-hour cache has expired, the older cached copy (of any age)
-is used instead: findings count as checked (`kev_checked: true`) against that
-list, each carries `kev_catalog_stale_since`, and a warning says "CISA KEV catalog
-could not be refreshed; using the copy from <date>". Only when no catalog was
-ever cached is KEV "not available" and `kev_checked` absent.
+refreshed after its 24-hour cache has expired, the older cached copy is used
+instead if it is at most 30 days old: findings count as checked
+(`kev_checked: true`) against that list, each carries `kev_catalog_stale_since`,
+and a warning says "CISA KEV catalog could not be refreshed; using the copy from
+<date> (N days old)". Only when no catalog was ever cached, or the cached copy is
+older than 30 days, is KEV "not available" and `kev_checked` absent (the grade is
+then Pending `known_exploited` if a reached finding with a CVE could be on the list).
 
 ### Scan details
 
 The vulnerability scan records what it ran with (`scanner.ScanInfo`, `Result.ScanInfo`):
 the platform (`goos/goarch`, from `GOOS`/`GOARCH` or the running binary), the Go
 version, the govulncheck version and the vulnerability database with its
-last-modified time, read from govulncheck's leading `config` message. Output
-without that message leaves the tool and database fields empty.
+last-modified time. The govulncheck version is that of `golang.org/x/vuln` in the
+binary's build info (govulncheck runs in-process, so its own `scanner_version`
+would be unisupply's version); it is left out when the build info does not list it.
+The database fields come from govulncheck's leading `config` message; output
+without that message leaves them empty.
 
 > **Coverage caveat:** EPSS and KEV apply per-CVE; they do not change which
 > CVEs are detected. Coverage is bounded by govulncheck + OSV enrichment, and

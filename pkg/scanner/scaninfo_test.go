@@ -3,6 +3,7 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ func TestParseGovulncheck_ReadsConfigMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.GovulncheckVersion != "v1.1.4" || info.GoVersion != "go1.26.9" ||
+	if info.GovulncheckVersion != "" || info.GoVersion != "go1.26.9" ||
 		info.VulnDB != "https://vuln.go.dev" || info.VulnDBLastModified != "2026-10-01T15:04:05Z" {
 		t.Errorf("info = %+v", info)
 	}
@@ -86,5 +87,38 @@ func TestParseGovulncheck_NoFixNoFixPublishedAt(t *testing.T) {
 	v := res["example.com/m"][0]
 	if v.FixPublishedAt != nil || v.PublishedAt == nil {
 		t.Errorf("FixPublishedAt=%v PublishedAt=%v, want no fix date but a disclosure date", v.FixPublishedAt, v.PublishedAt)
+	}
+}
+
+// F28: govulncheck_version is the version of golang.org/x/vuln from the build info, never unisupply's own (Main) version
+// and never the config message's scanner_version (which is the embedding binary's, i.e. unisupply's).
+func TestGovulncheckVersion_FromDeps(t *testing.T) {
+	read := func(bi *debug.BuildInfo, ok bool) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) { return bi, ok }
+	}
+	main := debug.Module{Path: "github.com/unidoc/unisupply", Version: "v0.7.0"}
+	for _, tc := range []struct {
+		name string
+		read func() (*debug.BuildInfo, bool)
+		want string
+	}{
+		{"listed", read(&debug.BuildInfo{Main: main, Deps: []*debug.Module{{Path: "github.com/spf13/pflag", Version: "v1.0.5"}, {Path: "golang.org/x/vuln", Version: "v1.8.0"}}}, true), "v1.8.0"},
+		{"replaced by a version", read(&debug.BuildInfo{Main: main, Deps: []*debug.Module{{Path: "golang.org/x/vuln", Version: "v1.8.0", Replace: &debug.Module{Path: "example.com/fork", Version: "v1.9.0"}}}}, true), "v1.9.0"},
+		{"replaced by a directory", read(&debug.BuildInfo{Main: main, Deps: []*debug.Module{{Path: "golang.org/x/vuln", Version: "v1.8.0", Replace: &debug.Module{Path: "../vuln"}}}}, true), ""},
+		{"not among the deps: not unisupply's version", read(&debug.BuildInfo{Main: main}, true), ""},
+		{"no build info", read(nil, false), ""},
+	} {
+		if got := govulncheckVersion(tc.read); got != tc.want {
+			t.Errorf("%s: govulncheckVersion = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The config message's scanner_version (unisupply's own version when govulncheck runs in-process) must not reach the info.
+func TestGovulncheckVersion_ConfigScannerVersionIgnored(t *testing.T) {
+	var info ScanInfo
+	info.apply([]byte(`{"scanner_version":"v0.7.0-unisupply","go_version":"go1.26.9"}`))
+	if info.GovulncheckVersion != "" {
+		t.Errorf("apply copied scanner_version %q into govulncheck_version", info.GovulncheckVersion)
 	}
 }

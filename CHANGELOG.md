@@ -147,8 +147,10 @@ breaks consumers that read the old fields.**
   value), `overall_risk_level` (the coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN
   without a letter), `headline` (the deciding row in the old shape, with an empty `candidates`), the `*_risk_count`
   summary fields (dependency rows by level) and the per-dependency `risk_score` / `risk_level`. They no longer carry their
-  old meaning (a weighted risk score); `deprecated_fields` in the report lists them. Read `grade` instead: they are removed
-  in the next release.
+  old meaning (a weighted risk score); `deprecated_fields` in the report lists them. On a Pending result
+  `overall_risk_score`, `headline.score` and the per-dependency `risk_score` are omitted (not 0, which a v1 gate would
+  read as the cleanest result); `overall_risk_level` stays `UNKNOWN`. Read `grade` instead: they are removed in the next
+  release.
 - **Removed from every output (no equivalent in the grade):** `headline_driver`, `mean_dep_risk_score`,
   `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`, `headline_unscored_reason`, the
   per-dependency `score_breakdown` and `risk_factors`, `severity_scored`, `takeover_candidates` (and
@@ -202,7 +204,22 @@ breaks consumers that read the old fields.**
   - `runner.Options.GradeStdlib` is new (`--grade-stdlib` on the CLI, default off): the Go standard library's advisories
     are always listed (`runner.Result.StdlibVulns`, with the Go release they were matched against in `grade.notes`), but
     they decide the letter only when it is set, as in the agreed rules. A module with no dependencies runs the
-    vulnerability scan only then.
+    vulnerability scan too and lists them (with the scan block); a failed scan is Pending only under `--grade-stdlib`,
+    otherwise a warning. The "scanned at go1.x" note is written only when the scan ran (also on the multi-dependency
+    path, where it said so after an offline or failed scan).
+  - `archived_unread` and its note appear only when an unread archived flag could change the letter (an unread flag adds
+    at most 20 to a row, so only an A can move); on C, D and F, or when the row already scores 20 or more, the list is
+    empty and there is no note. A policy `max_grade` now fails when the letter equals the maximum and
+    `archived_unread` is not empty (`max_grade: "A"`), and otherwise passes with a warning naming how many flags were
+    unread and saying to set `GITHUB_TOKEN`.
+  - The CISA KEV catalog fallback has an age cap of 30 days (`scanner.KEVMaxStaleAge`): a cached copy older than that is
+    not a catalog, so known-exploited status is unchecked (Pending `known_exploited`, as with no catalog); within it,
+    the note and warning state the copy's date and age.
+  - `scan.govulncheck_version` is the version of `golang.org/x/vuln` linked into the binary (from the build info), not
+    govulncheck's `scanner_version`, which in-process is unisupply's own version. It is omitted when the build info does
+    not list it.
+  - A locally replaced dependency is detected with go.mod's own rule (`GoMod.ReplacementFor`): a replace scoped to one
+    version (`example.com/lib v1.0.0 => ../lib`) does not make another selected version local.
   - `grade.Result` gains `ChecksumMismatch` and `ChecksumDetail` (`checksum_mismatch`, `checksum_detail` in JSON), and
     a `grade.RowResult` may have an empty `Letter` (the key is present and `""`, not omitted): its upkeep could not be
     read (the text and PDF reports show `-`).

@@ -446,6 +446,7 @@ func gradeOnce(input *Input) Result {
 		res.Deciding = &Deciding{Module: worst.Module, Self: worst.Self, Reason: worst.Reason, Score: worst.Score}
 	}
 	res.Letter = bandOf(res.Score)
+	letterScore := res.Score
 
 	if p := pendingFor(&in, rows, res.Score); p != nil {
 		// No letter means no deciding row either: what is known is in Pending.Known.
@@ -473,10 +474,8 @@ func gradeOnce(input *Input) Result {
 	if n := res.FixesNeedNewerGo; n > 0 {
 		res.Notes = append(res.Notes, fmt.Sprintf("%d reached finding%s fixed only in versions that need a newer Go than this module supports (go %s): taking the fix raises the module's minimum Go version. The grade does not change for that.", n, plural(n, " is", "s are"), strings.TrimSpace(in.ProjectGo)))
 	}
-	for i := range in.Deps {
-		if in.Deps[i].Upkeep.ArchivedUnread {
-			res.ArchivedUnread = append(res.ArchivedUnread, in.Deps[i].Module)
-		}
+	if res.Pending == nil {
+		res.ArchivedUnread = archivedUnreadThatMatters(&in, letterScore)
 	}
 	if n := len(res.ArchivedUnread); n > 0 {
 		sort.Strings(res.ArchivedUnread)
@@ -487,7 +486,7 @@ func gradeOnce(input *Input) Result {
 		res.Notes = append(res.Notes, note)
 	}
 	if t := in.Checks.KEVStaleSince; !t.IsZero() {
-		res.Notes = append(res.Notes, "The known-exploited catalog (CISA) could not be refreshed: the copy from "+t.UTC().Format("2006-01-02")+" was used.")
+		res.Notes = append(res.Notes, fmt.Sprintf("The known-exploited catalog (CISA) could not be refreshed: the copy from %s (%d days old) was used.", t.UTC().Format("2006-01-02"), max(0, int(in.Now.Sub(t).Hours()/24))))
 	}
 	if v := strings.TrimSpace(in.Checks.StdlibVersion); v != "" {
 		// said whether or not it had findings: a clean result holds for this Go release only
@@ -520,6 +519,26 @@ func archiveUncheckedNote(modules []string) string {
 		list += fmt.Sprintf(" and %d more", more)
 	}
 	return fmt.Sprintf("Archived status was not checked for %d module(s) (their repository is not on GitHub or could not be found): %s.", len(sorted), list)
+}
+
+// archivedUnreadThatMatters lists, sorted, the dependencies whose archived flag was not read AND whose flag could change
+// the letter: a dependency that is archived adds at most 20 to its row (10 when it is test-only or not compiled in), so the
+// flag matters only when the row, graded as archived, would land in a worse band than the letter. A letter of C, D or F
+// (or a row that already scores 20 or more from its findings) cannot move for it, and the list is then empty.
+func archivedUnreadThatMatters(in *Input, letterScore int) []string {
+	var out []string
+	for i := range in.Deps {
+		d := in.Deps[i]
+		if !d.Upkeep.ArchivedUnread {
+			continue
+		}
+		d.Upkeep.ArchivedUnread, d.Upkeep.Archived = false, true
+		if bandOf(gradeRow(d, in).Score) > bandOf(letterScore) {
+			out = append(out, d.Module)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isArchivedOrDeprecated(r Row) bool {

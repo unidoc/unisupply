@@ -467,5 +467,20 @@ func (p *Policy) evalGrade(g *grade.Result, result *Result) {
 			module = g.Deciding.Module
 		}
 		result.addError("max_grade", module, detail)
+		return
+	}
+	// The letter was given without some archived flags that could change it (grade.archived_unread lists only those): a
+	// pass on that letter is not a firm pass. At the maximum itself, one band worse would fail, so it fails; further from
+	// the maximum it is a warning (like the Pending case), never silence.
+	if n := len(g.ArchivedUnread); n > 0 {
+		s := ""
+		if n != 1 {
+			s = "s"
+		}
+		if g.Letter == worst {
+			result.addError("max_grade", "", fmt.Sprintf("grade %s is the maximum %s, but it rests on %d archived flag%s that could not be read (a dependency that is archived would make it one band worse); set GITHUB_TOKEN to read them", g.Letter, worst, n, s))
+		} else {
+			result.addWarning("max_grade", "", fmt.Sprintf("grade %s was given without %d unread archived flag%s (a dependency that is archived could make it one band worse); set GITHUB_TOKEN to read them", g.Letter, n, s))
+		}
 	}
 }

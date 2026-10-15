@@ -364,6 +364,38 @@ func TestLoadKEVCatalog_ExpiredCacheAndFailureUsesStaleCopy(t *testing.T) {
 	}
 }
 
+// A cached catalog older than 30 days is not usable when the refresh fails: there is no catalog (nil entries, an error), so
+// known-exploited status is unchecked rather than checked against a list that may be months old.
+func TestLoadKEVCatalog_StaleCopyOlderThan30DaysIsNotUsed(t *testing.T) {
+	dir := t.TempDir()
+	t0 := fixedClock()
+	if _, err := kevAt(t, dir, t0, &staticTransport{statusCode: 200, body: kevTestCatalog}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := kevAt(t, dir, t0.Add(30*24*time.Hour), &staticTransport{statusCode: 503})
+	if err != nil || !c.Stale {
+		t.Errorf("exactly 30 days old is still usable: err=%v stale=%v", err, c.Stale)
+	}
+	c, err = kevAt(t, dir, t0.Add(31*24*time.Hour), &staticTransport{statusCode: 503})
+	if err == nil || c.Entries != nil || c.Stale {
+		t.Fatalf("31 days old: err=%v entries=%v stale=%v, want no usable catalog", err, c.Entries, c.Stale)
+	}
+	if !strings.Contains(err.Error(), "31 days old") {
+		t.Errorf("the error must say why: %v", err)
+	}
+	// through the enrichment: findings are left unchecked (KEVChecked false) and the warning says so
+	ti := NewThreatIntelClient(ThreatIntelOptions{CacheDir: dir, clockFn: func() time.Time { return t0.Add(31 * 24 * time.Hour) }})
+	ti.client.Transport = &routingTransport{epssBody: `{"data":[]}`, kevBody: "down", kevStatus: 503}
+	results := map[string][]Vulnerability{"m": {{ID: "GO-1", Aliases: []string{"CVE-2024-0001"}, Severity: "HIGH"}}}
+	warnings, since := enrichThreatIntelStale(context.Background(), ti, results)
+	if results["m"][0].KEVChecked || !since.IsZero() {
+		t.Errorf("a too-old catalog counted as checked: %+v since=%v", results["m"][0], since)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "known-exploited status unchecked") {
+		t.Errorf("warnings = %v", warnings)
+	}
+}
+
 func TestLoadKEVCatalog_NoCacheAndFailureIsNotAvailable(t *testing.T) {
 	c, err := kevAt(t, t.TempDir(), fixedClock(), &staticTransport{statusCode: 503})
 	if err == nil || c.Entries != nil || c.Stale {
@@ -387,7 +419,7 @@ func TestEnrichThreatIntel_StaleCatalogChecksAndWarns(t *testing.T) {
 	if !v.KEVChecked || !v.InKEV || v.KEVCatalogStaleSince == nil || !v.KEVCatalogStaleSince.Equal(t0) || !since.Equal(t0) {
 		t.Errorf("KEVChecked=%v InKEV=%v stale=%v since=%v", v.KEVChecked, v.InKEV, v.KEVCatalogStaleSince, since)
 	}
-	want := "CISA KEV catalog could not be refreshed; using the copy from " + t0.Format("2006-01-02")
+	want := "CISA KEV catalog could not be refreshed; using the copy from " + t0.Format("2006-01-02") + " (5 days old)"
 	found := false
 	for _, w := range warnings {
 		if w == want {

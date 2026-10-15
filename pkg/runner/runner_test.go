@@ -31,6 +31,7 @@ func TestRun_NoDependencies(t *testing.T) {
 	}
 
 	stubGitHub(t, http.StatusOK) // hermetic: every request but a token probe is refused
+	stubScan(t, nil, nil, true, nil)
 	result, err := Run(context.Background(), Options{
 		Path: tmpDir,
 		Now:  time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -59,16 +60,22 @@ func TestRun_NoDependencies(t *testing.T) {
 	if result.CIReport != nil {
 		t.Errorf("result.CIReport = %+v, want nil (ScanWorkflows/ScanCI were not requested)", result.CIReport)
 	}
-	// The standard library is listed, not graded, by default, so a module with no dependencies has nothing a scan could
-	// find that would change the grade: none is run, and the grade is the module's own row (an A, "not assessed").
+	// The standard library is listed, not graded, by default: the scan runs anyway (F31), and with nothing found the grade
+	// is the module's own row (an A, "not assessed").
+	stubScan(t, nil, nil, true, nil)
+	result, err = Run(context.Background(), Options{Path: tmpDir, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 	if result.Grade == nil || result.Grade.Letter != "A" || result.Grade.Pending != nil || result.VulnScanErr != nil {
-		t.Errorf("result.Grade = %+v, VulnScanErr = %v, want a graded A with no scan", result.Grade, result.VulnScanErr)
+		t.Errorf("result.Grade = %+v, VulnScanErr = %v, want a graded A", result.Grade, result.VulnScanErr)
 	}
 	if result.Grade != nil && len(result.Grade.Rows) == 1 && result.Grade.Rows[0].UpkeepState != "not_assessed" {
 		t.Errorf("the module itself was not assessed: %+v", result.Grade.Rows[0])
 	}
 
-	// When the caller grades the standard library the scan runs, and with the network refused it did not look: Pending.
+	// When the caller grades the standard library and the scan did not run, the grade is Pending.
+	stubScan(t, nil, []string{"govulncheck: network refused"}, false, nil)
 	graded, err := Run(context.Background(), Options{Path: tmpDir, GradeStdlib: true, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -80,8 +87,112 @@ func TestRun_NoDependencies(t *testing.T) {
 	if graded.ScanInfo == nil || !strings.Contains(graded.ScanInfo.Platform, "/") {
 		t.Errorf("graded.ScanInfo = %+v, want a platform for the scan that was attempted", graded.ScanInfo)
 	}
-	if result.ScanInfo != nil {
-		t.Errorf("no scan ran by default, so there is nothing to say about one: %+v", result.ScanInfo)
+	if result.ScanInfo == nil || !strings.Contains(result.ScanInfo.Platform, "/") {
+		t.Errorf("the scan ran by default, so it states its platform: %+v", result.ScanInfo)
+	}
+}
+
+// stubScan replaces the vulnerability scanner for one test: it returns the given findings (a copy, so a test may reuse
+// them) and records its platform like the real scanner does.
+func stubScan(t *testing.T, vulns map[string][]scanner.Vulnerability, warnings []string, scanned bool, err error) {
+	t.Helper()
+	prev := scanVulns
+	t.Cleanup(func() { scanVulns = prev })
+	scanVulns = func(_ context.Context, _ string, opts scanner.VulnScanOptions) (map[string][]scanner.Vulnerability, []string, bool, error) {
+		if opts.Info != nil {
+			*opts.Info = scanner.ScanInfo{Platform: "linux/amd64", GoVersion: "go1.26.0"}
+		}
+		out := map[string][]scanner.Vulnerability{}
+		for k, v := range vulns {
+			out[k] = append([]scanner.Vulnerability(nil), v...)
+		}
+		return out, warnings, scanned, err
+	}
+}
+
+func writeEmptyModule(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/example/empty\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// F31: a module with no dependencies still runs the vulnerability scan and lists its standard-library findings (with the
+// Go release note and the scan block); they are not graded without --grade-stdlib, and then a failed scan is a warning, not
+// Pending. F32: a scan that did not run does not claim a standard-library scan at some Go release.
+func TestRun_NoDependencies_ListsStdlibFindings(t *testing.T) {
+	dir := writeEmptyModule(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	stubGitHub(t, http.StatusOK)
+	stubScan(t, map[string][]scanner.Vulnerability{"stdlib": {
+		{ID: "GO-2026-0002", Severity: "HIGH", Reachability: "called"},
+		{ID: "GO-2026-0001", Severity: "HIGH", Reachability: "called"},
+	}}, nil, true, nil)
+
+	res, err := Run(context.Background(), Options{Path: dir, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.StdlibVulns) != 2 || res.StdlibVulns[0].ID != "GO-2026-0001" {
+		t.Errorf("StdlibVulns = %+v, want the two findings listed (sorted)", res.StdlibVulns)
+	}
+	if res.Grade == nil || res.Grade.Letter != "A" || res.Grade.Pending != nil {
+		t.Errorf("not graded by default: %+v", res.Grade)
+	}
+	if res.ScanInfo == nil {
+		t.Error("the scan block is missing")
+	}
+	var noted bool
+	for _, n := range res.Grade.Notes {
+		if strings.Contains(n, "was scanned at") && strings.Contains(n, "listed, not graded") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Errorf("no note naming the Go release the standard library was scanned at: %v", res.Grade.Notes)
+	}
+
+	graded, err := Run(context.Background(), Options{Path: dir, Now: now, GradeStdlib: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if graded.Grade.Letter == "A" || graded.Grade.Letter == "" {
+		t.Errorf("--grade-stdlib grades the called highs: %+v", graded.Grade)
+	}
+
+	// the scan did not run
+	stubScan(t, nil, []string{"govulncheck: no network"}, false, nil)
+	failed, err := Run(context.Background(), Options{Path: dir, Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Grade.Pending != nil || failed.Grade.Letter != "A" {
+		t.Errorf("a failed scan is Pending only under --grade-stdlib: %+v", failed.Grade)
+	}
+	if failed.VulnScanErr == nil {
+		t.Error("the failure must still be reported in VulnScanErr")
+	}
+	if !strings.Contains(strings.Join(failed.ProjectScore.Warnings, "\n"), "govulncheck: no network") {
+		t.Errorf("a failed scan must be a warning: %v", failed.ProjectScore.Warnings)
+	}
+	for _, n := range failed.Grade.Notes {
+		if strings.Contains(n, "was scanned at") || strings.Contains(n, "is graded at") {
+			t.Errorf("F32: a scan that did not run must not claim a standard-library scan: %q", n)
+		}
+	}
+	failedGraded, err := Run(context.Background(), Options{Path: dir, Now: now, GradeStdlib: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedGraded.Grade.Pending == nil || failedGraded.Grade.Pending.Check != "vulnerability_scan" {
+		t.Errorf("--grade-stdlib with a failed scan is Pending: %+v", failedGraded.Grade)
+	}
+	for _, n := range failedGraded.Grade.Notes {
+		if strings.Contains(n, "was scanned at") || strings.Contains(n, "is graded at") {
+			t.Errorf("F32: Pending result claims a scan: %q", n)
+		}
 	}
 }
 

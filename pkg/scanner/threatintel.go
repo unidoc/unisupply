@@ -224,6 +224,10 @@ type KEVCatalog struct {
 	StaleSince time.Time
 }
 
+// KEVMaxStaleAge is the oldest a cached KEV catalog may be and still be used when the catalog could not be refreshed.
+// Beyond it there is no usable catalog: known-exploited status is unchecked, as when no catalog exists at all.
+const KEVMaxStaleAge = 30 * 24 * time.Hour
+
 // LoadKEV is LoadKEVCatalog reduced to the entry map, for callers that do not
 // need to know whether the catalog is stale. A stale copy is returned with a
 // nil error; use LoadKEVCatalog to see that it is stale.
@@ -235,8 +239,8 @@ func (t *ThreatIntelClient) LoadKEV(ctx context.Context) (map[string]KEVEntry, e
 // LoadKEVCatalog fetches the CISA Known Exploited Vulnerabilities catalog (one
 // bulk JSON, cached 24h).
 //
-// When the fetch fails and any earlier catalog is on disk, even one past the
-// 24 h lifetime, that copy is returned with Stale and StaleSince set and a nil
+// When the fetch fails and an earlier catalog is on disk, past the 24 h lifetime but
+// no older than KEVMaxStaleAge (30 days), that copy is returned with Stale and StaleSince set and a nil
 // error: findings were checked, against an older list. Only when there is no
 // catalog at all does it return nil Entries and a non-nil error the caller
 // should surface as a warning. A nil map means "KEV status unknown" - callers
@@ -249,6 +253,10 @@ func (t *ThreatIntelClient) LoadKEVCatalog(ctx context.Context) (KEVCatalog, err
 	entries, err := t.fetchKEV(ctx)
 	if err != nil {
 		if stale, since, ok := t.loadStaleKEVCache(); ok {
+			if age := t.now().Sub(since); age > KEVMaxStaleAge {
+				return KEVCatalog{}, fmt.Errorf("%w; the cached copy from %s is %d days old, older than the %d days allowed", err,
+					since.UTC().Format("2006-01-02"), int(age.Hours()/24), int(KEVMaxStaleAge.Hours()/24))
+			}
 			return KEVCatalog{Entries: stale, Stale: true, StaleSince: since}, nil
 		}
 		return KEVCatalog{}, err
@@ -288,8 +296,8 @@ func (t *ThreatIntelClient) fetchKEV(ctx context.Context) (map[string]KEVEntry, 
 }
 
 // kevStaleWarning is the warning for a catalog that could not be refreshed.
-func kevStaleWarning(since time.Time) string {
-	return fmt.Sprintf("CISA KEV catalog could not be refreshed; using the copy from %s", since.UTC().Format("2006-01-02"))
+func kevStaleWarning(since, now time.Time) string {
+	return fmt.Sprintf("CISA KEV catalog could not be refreshed; using the copy from %s (%d days old)", since.UTC().Format("2006-01-02"), int(now.Sub(since).Hours()/24))
 }
 
 // --- On-disk 24h caches (same pattern as vulnenrich.go) ---
