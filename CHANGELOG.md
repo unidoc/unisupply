@@ -3,9 +3,16 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-10-16
 
-<!-- Add new entries here as they land on `development`. -->
+Grading release. The published result is now one letter, A to F, with the row
+that decides it and the evidence behind it, in place of the 0-100 risk score.
+This is a breaking change to the JSON, text, PDF and SBOM output and to the
+policy file (see "Breaking: Grading v2" under Improvements). The scan pipeline
+is now an importable package, `pkg/runner`. The grade's inputs are more
+precise: how each reachable vulnerability is reached, severity from OSV alias
+records, which modules are in the build, maintenance from the default branch's
+last commit, go.mod deprecation notices, and standard-library vulnerabilities.
 
 ### New Features
 
@@ -427,6 +434,8 @@ breaks consumers that read the old fields.**
   minor version (go1.27.1 to go1.27.2) loads fine and is scanned.
   A scan that failed (including this refusal) is also named in the report `warnings`, for a module with no dependencies
   too, not only on stderr.
+  The v0.7.0 release binaries are built with Go 1.26.9. To scan code that needs go1.27, install unisupply with Go 1.27
+  or newer (`go install github.com/unidoc/unisupply/cmd/unisupply@v0.7.0`).
 - **The module's own advisories count toward the known-exploited check.** With no CISA catalog (not even a copy under 30
   days old), a called advisory on the module itself with a CVE is now Pending `known_exploited`, like a dependency's, instead
   of a D.
@@ -1041,7 +1050,8 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/unidoc/unisupply/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/unidoc/unisupply/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/unidoc/unisupply/releases/tag/v0.4.0
