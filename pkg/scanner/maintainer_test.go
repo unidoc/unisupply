@@ -1281,6 +1281,49 @@ func TestMaintainerScanner_ScanAll_TransitiveDeps(t *testing.T) {
 	}
 }
 
+// TestMaintainerScanner_ScanAll_SharedRepoPerModuleFields verifies that modules
+// from one GitHub repository each keep their own SubDependencies. analyzeRepo
+// caches one *MaintainerInfo per owner/repo; writing per-module fields into
+// that shared value made every module report whichever count was written last,
+// and raced under -race. More modules than ScanAll's concurrency limit (5)
+// ensures later goroutines hit the cache.
+func TestMaintainerScanner_ScanAll_SharedRepoPerModuleFields(t *testing.T) {
+	server := newMockGitHub()
+	defer server.Close()
+
+	g := &resolver.Graph{
+		Root:         "test/module",
+		Dependencies: make(map[string]*resolver.Dependency),
+	}
+	for i := 1; i <= 12; i++ {
+		path := fmt.Sprintf("github.com/golang/go/mod%02d", i)
+		g.Dependencies[path] = &resolver.Dependency{
+			Module:         parser.Module{Path: path, Version: "v1.0.0"},
+			TransitiveDeps: i,
+		}
+	}
+
+	ms := NewMaintainerScanner(5*time.Second, "test-token")
+	ms.client.Transport = &testTransport{baseURL: server.URL}
+
+	results := ms.ScanAll(context.Background(), g)
+
+	seen := make(map[*MaintainerInfo]string)
+	for path, dep := range g.Dependencies {
+		mi := results[path]
+		if mi == nil {
+			t.Fatalf("no result for %s", path)
+		}
+		if mi.SubDependencies != dep.TransitiveDeps {
+			t.Errorf("%s: SubDependencies = %d, want %d", path, mi.SubDependencies, dep.TransitiveDeps)
+		}
+		if other, dup := seen[mi]; dup {
+			t.Errorf("%s and %s share one *MaintainerInfo", path, other)
+		}
+		seen[mi] = path
+	}
+}
+
 // TestMaintainerScanner_TopContributors verifies top 5 contributors are extracted.
 func TestMaintainerScanner_TopContributors(t *testing.T) {
 	server := newMockGitHub()
@@ -1562,6 +1605,55 @@ func TestGitHubRateLimit_SetsUnavailableReason(t *testing.T) {
 	}
 }
 
+// TestGitHubRateLimit_StatusAndHeader pins which responses count as a rate
+// limit. GitHub answers some 429s (secondary limits) without
+// X-RateLimit-Remaining; those were reported as an API error and the
+// GITHUB_TOKEN hint never showed. A 403 without the header stays an API error:
+// it is a permission failure, not a limit.
+func TestGitHubRateLimit_StatusAndHeader(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		remaining  string
+		wantReason string
+		wantHints  int64
+	}{
+		{name: "429 without header", status: http.StatusTooManyRequests, wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "429 with remaining 0", status: http.StatusTooManyRequests, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "429 with remaining left", status: http.StatusTooManyRequests, remaining: "12", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "403 with remaining 0", status: http.StatusForbidden, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "403 without header", status: http.StatusForbidden, wantReason: UnavailableAPIError},
+		{name: "403 with remaining left", status: http.StatusForbidden, remaining: "12", wantReason: UnavailableAPIError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.remaining != "" {
+					w.Header().Set("X-RateLimit-Remaining", tc.remaining)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			var hints int64
+			ctx := progress.WithReporter(context.Background(), &countingReporter{match: "set GITHUB_TOKEN", count: &hints})
+
+			ms := newTestMaintainerScanner(srv.URL)
+			info := ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+			if info.DataAvailable {
+				t.Fatal("expected DataAvailable=false")
+			}
+			if info.UnavailableReason != tc.wantReason {
+				t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, tc.wantReason)
+			}
+			if hints != tc.wantHints {
+				t.Errorf("GITHUB_TOKEN hints = %d, want %d", hints, tc.wantHints)
+			}
+		})
+	}
+}
+
 func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 	resetAt := time.Now().Add(5 * time.Minute).Unix()
 
@@ -1589,6 +1681,69 @@ func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 
 	if warnCount != 1 {
 		t.Errorf("expected rate-limit warning exactly once, got %d", warnCount)
+	}
+}
+
+// TestGitHubRateLimit_HintMatchesTokenState verifies that the rate-limit
+// warning tells the user to set GITHUB_TOKEN only when no token was used: not
+// when GitHub rejected the token (the scan then ran unauthenticated), and not
+// when the token was used (its quota or a secondary limit was hit, typically a
+// 429 without X-RateLimit-Remaining).
+func TestGitHubRateLimit_HintMatchesTokenState(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		token         string
+		tokenRejected bool
+		want          string
+		notWant       string
+	}{
+		{name: "no token", status: http.StatusForbidden, want: "set GITHUB_TOKEN", notWant: "rejected"},
+		{name: "rejected token", status: http.StatusForbidden, tokenRejected: true, want: "token was rejected (401)", notWant: "set GITHUB_TOKEN"},
+		{name: "token in use, 403", status: http.StatusForbidden, token: "t", want: "requests were authenticated", notWant: "set GITHUB_TOKEN"},
+		{name: "token in use, 429", status: http.StatusTooManyRequests, token: "t", want: "secondary rate limit", notWant: "set GITHUB_TOKEN"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.status == http.StatusForbidden {
+					w.Header().Set("X-RateLimit-Remaining", "0")
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			var wantCount, notWantCount int64
+			ctx := progress.WithReporter(context.Background(), multiReporter{
+				&countingReporter{match: tc.want, count: &wantCount},
+				&countingReporter{match: tc.notWant, count: &notWantCount},
+			})
+
+			ms := newTestMaintainerScanner(srv.URL)
+			ms.token = tc.token
+			ms.TokenRejected = tc.tokenRejected
+			ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+			if wantCount != 1 {
+				t.Errorf("warnings containing %q = %d, want 1", tc.want, wantCount)
+			}
+			if notWantCount != 0 {
+				t.Errorf("warnings containing %q = %d, want 0", tc.notWant, notWantCount)
+			}
+		})
+	}
+}
+
+// multiReporter fans each Warn out to several reporters.
+type multiReporter []*countingReporter
+
+func (m multiReporter) Stage(string)        {}
+func (m multiReporter) Step(string, ...any) {}
+func (m multiReporter) Progress(int, int)   {}
+func (m multiReporter) Done(string, ...any) {}
+func (m multiReporter) Warn(f string, a ...any) {
+	for _, r := range m {
+		r.Warn(f, a...)
 	}
 }
 
@@ -1728,4 +1883,76 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	client := &http.Client{}
 	return client.Do(newReq)
+}
+
+// TestTakeoverCandidates_SortedByModulePath verifies that only takeover
+// candidates are returned and that they come back in module-path order on
+// every call, regardless of map iteration order.
+func TestTakeoverCandidates_SortedByRepo(t *testing.T) {
+	maintainers := map[string]*MaintainerInfo{
+		"github.com/pmezard/go-difflib": {Owner: "pmezard", Repo: "go-difflib", TakeoverCandidate: true},
+		"github.com/spf13/pflag":        {Owner: "spf13", Repo: "pflag"},
+		"github.com/unidoc/garabic":     {Owner: "unidoc", Repo: "garabic", TakeoverCandidate: true},
+		"github.com/davecgh/go-spew":    {Owner: "davecgh", Repo: "go-spew", TakeoverCandidate: true},
+		"golang.org/x/mod":              {Owner: "golang", Repo: "mod"},
+		"github.com/google/go-cmdtest":  {Owner: "google", Repo: "go-cmdtest", TakeoverCandidate: true},
+		"gopkg.in/yaml.v3":              {Owner: "go-yaml", Repo: "yaml"},
+	}
+	want := []string{
+		"davecgh/go-spew",
+		"google/go-cmdtest",
+		"pmezard/go-difflib",
+		"unidoc/garabic",
+	}
+
+	for i := 0; i < 20; i++ {
+		got := TakeoverCandidates(maintainers)
+		if len(got) != len(want) {
+			t.Fatalf("run %d: got %d candidates, want %d", i+1, len(got), len(want))
+		}
+		for j, mi := range got {
+			if !mi.TakeoverCandidate {
+				t.Errorf("run %d: %s/%s is not a takeover candidate", i+1, mi.Owner, mi.Repo)
+			}
+			if repo := mi.Owner + "/" + mi.Repo; repo != want[j] {
+				t.Fatalf("run %d: candidate %d is %s, want %s", i+1, j, repo, want[j])
+			}
+		}
+	}
+}
+
+// TestTakeoverCandidates_OneEntryPerRepo verifies that modules from the same
+// repository (foo/bar and foo/bar/v2) produce one takeover entry, since the
+// reports print only repository-level fields.
+func TestTakeoverCandidates_OneEntryPerRepo(t *testing.T) {
+	maintainers := map[string]*MaintainerInfo{
+		"github.com/foo/bar":         {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/foo/bar/v2":      {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/foo/bar/v3/sub":  {Owner: "foo", Repo: "bar", TakeoverCandidate: true},
+		"github.com/acme/widget":     {Owner: "acme", Repo: "widget", TakeoverCandidate: true},
+		"github.com/acme/widget/cmd": {Owner: "acme", Repo: "widget", TakeoverCandidate: true},
+	}
+
+	got := TakeoverCandidates(maintainers)
+
+	var repos []string
+	for _, mi := range got {
+		repos = append(repos, mi.Owner+"/"+mi.Repo)
+	}
+	want := []string{"acme/widget", "foo/bar"}
+	if strings.Join(repos, ",") != strings.Join(want, ",") {
+		t.Errorf("TakeoverCandidates repos = %v, want %v", repos, want)
+	}
+}
+
+// TestTakeoverCandidates_Empty verifies that no candidates yields an empty
+// result rather than a panic.
+func TestTakeoverCandidates_Empty(t *testing.T) {
+	if got := TakeoverCandidates(nil); len(got) != 0 {
+		t.Errorf("TakeoverCandidates(nil) = %d entries, want 0", len(got))
+	}
+	none := map[string]*MaintainerInfo{"example.com/a": {}}
+	if got := TakeoverCandidates(none); len(got) != 0 {
+		t.Errorf("TakeoverCandidates(no candidates) = %d entries, want 0", len(got))
+	}
 }

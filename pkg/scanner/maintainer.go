@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,43 +21,77 @@ import (
 )
 
 // errRateLimited is returned by githubGet when the GitHub API rate limit is
-// exhausted (X-RateLimit-Remaining: 0 on a 403 or 429 response).
+// exhausted: any 429 response, or a 403 with X-RateLimit-Remaining: 0.
 var errRateLimited = errors.New("github rate limit exceeded")
+
+// Values of MaintainerInfo.UnavailableReason.
+const (
+	// UnavailableRateLimited means GitHub rejected the request for exceeding
+	// the API rate limit.
+	UnavailableRateLimited = "rate_limited"
+
+	// UnavailableAPIError means the repository request failed for any other
+	// reason: a network error, a non-200 status, or an unusable response.
+	UnavailableAPIError = "github_api_error"
+
+	// UnavailableNotFound means GitHub answered 404 for the repository: it
+	// was deleted, made private, or renamed away without a redirect. It is a
+	// definitive answer, not a failure: it is cached and not retried.
+	UnavailableNotFound = "repo_not_found"
+)
+
+// ErrRepositoryNotFound is returned by the GitHub lookups when GitHub answers
+// 404 for a repository (or a repository endpoint). Callers treat it as the
+// answer "the repository is gone", never as a rate limit or an API failure.
+var ErrRepositoryNotFound = errors.New("GitHub repository not found (404)")
 
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
 	// DataAvailable is false when the GitHub API was unreachable, returned a
-	// non-200 status (e.g. 403 rate-limit or 404), or when the token was
+	// non-200 status (e.g. 403 rate-limit, or 404, which sets UnavailableReason
+	// to UnavailableNotFound), or when the token was
 	// missing for an authenticated-only endpoint. When false, all numeric
 	// fields (Stars, BusFactor, etc.) are zero-valued and MUST NOT be
 	// interpreted as real measurements.
 	DataAvailable     bool   `json:"data_available"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 
-	Owner            string    `json:"owner"`
-	Repo             string    `json:"repo"`
-	OwnerName        string    `json:"owner_name"`     // display name of owner
-	OwnerLocation    string    `json:"owner_location"` // country/city
-	OwnerCompany     string    `json:"owner_company"`  // company affiliation
-	OwnerBio         string    `json:"owner_bio"`      // bio/description
-	OwnerURL         string    `json:"owner_url"`      // website/blog
-	IsOrg            bool      `json:"is_org"`         // org vs personal
-	OwnerVerified    bool      `json:"owner_verified"`
-	BusinessModel    string    `json:"business_model"` // "open_source", "company_backed", "foundation", "unknown"
-	License          string    `json:"license"`        // SPDX license identifier
-	Description      string    `json:"description"`    // repo description
-	ContributorCount int       `json:"contributor_count"`
-	TopContributors  []string  `json:"top_contributors"` // top 5 contributor logins
-	BusFactor        int       `json:"bus_factor"`
-	IsArchived       bool      `json:"is_archived"`
-	IsFork           bool      `json:"is_fork"`
-	ActivityPattern  string    `json:"activity_pattern"` // "active", "sporadic", "inactive"
-	LastCommitDate   time.Time `json:"last_commit_date"`
-	CreatedAt        time.Time `json:"created_at"`
-	Stars            int       `json:"stars"`
-	Forks            int       `json:"forks"`
-	OpenIssues       int       `json:"open_issues"`
-	SubDependencies  int       `json:"sub_dependencies"` // how many deps this dep pulls in
+	// Owner and Repo are the repository's canonical GitHub name as reported by
+	// the API, which differs from the name in the module path when the
+	// repository was renamed or transferred. They are the requested name when
+	// the repository could not be fetched.
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+
+	OwnerName        string   `json:"owner_name"`     // display name of owner
+	OwnerLocation    string   `json:"owner_location"` // country/city
+	OwnerCompany     string   `json:"owner_company"`  // company affiliation
+	OwnerBio         string   `json:"owner_bio"`      // bio/description
+	OwnerURL         string   `json:"owner_url"`      // website/blog
+	IsOrg            bool     `json:"is_org"`         // org vs personal
+	OwnerVerified    bool     `json:"owner_verified"`
+	BusinessModel    string   `json:"business_model"` // "open_source", "company_backed", "foundation", "unknown"
+	License          string   `json:"license"`        // SPDX license identifier
+	Description      string   `json:"description"`    // repo description
+	ContributorCount int      `json:"contributor_count"`
+	TopContributors  []string `json:"top_contributors"` // top 5 contributor logins
+	BusFactor        int      `json:"bus_factor"`
+	IsArchived       bool     `json:"is_archived"`
+	IsFork           bool     `json:"is_fork"`
+	ActivityPattern  string   `json:"activity_pattern"` // "active", "sporadic", "inactive"
+	// LastCommitDate is GitHub's pushed_at: the last push to any branch of the
+	// repository, bot and Dependabot branches included. It is kept as
+	// evidence and drives ActivityPattern, but the maintenance score does not
+	// use it; see MaintenanceInfo.LastActivity.
+	LastCommitDate time.Time `json:"last_commit_date"`
+	// DefaultBranch is the repository's default branch, which the activity
+	// lookup (MaintenanceScanner.ScanActivity) queries.
+	DefaultBranch   string    `json:"default_branch,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	Stars           int       `json:"stars"`
+	Forks           int       `json:"forks"`
+	OpenIssues      int       `json:"open_issues"`
+	SubDependencies int       `json:"sub_dependencies"` // how many deps this dep pulls in
 	// Takeover analysis.
 	TakeoverCandidate bool   `json:"takeover_candidate"`
 	TakeoverReason    string `json:"takeover_reason,omitempty"`
@@ -76,6 +114,32 @@ func EnrichMaintainersFromTrustIndex(maintainers map[string]*MaintainerInfo, tru
 	}
 }
 
+// TakeoverCandidates returns one entry per repository flagged as a takeover
+// candidate, sorted by owner/repo. maintainers is keyed by module path, so
+// ranging it directly would reorder the report's takeover list on every run,
+// and several modules can come from one repository (foo/bar and foo/bar/v2).
+// The reports print only repository-level fields, so one entry per repository
+// is kept.
+func TakeoverCandidates(maintainers map[string]*MaintainerInfo) []*MaintainerInfo {
+	byRepo := make(map[string]*MaintainerInfo)
+	for _, mod := range slices.Sorted(maps.Keys(maintainers)) {
+		mi := maintainers[mod]
+		if !mi.TakeoverCandidate {
+			continue
+		}
+		key := mi.Owner + "/" + mi.Repo
+		if _, seen := byRepo[key]; !seen {
+			byRepo[key] = mi
+		}
+	}
+
+	var candidates []*MaintainerInfo
+	for _, key := range slices.Sorted(maps.Keys(byRepo)) {
+		candidates = append(candidates, byRepo[key])
+	}
+	return candidates
+}
+
 // MaintainerScanner analyzes module maintainership via the GitHub API.
 type MaintainerScanner struct {
 	client    *Client
@@ -85,12 +149,29 @@ type MaintainerScanner struct {
 	diskCache *maintainerCache
 	mu        sync.Mutex
 
+	// repos, users and commits hold every per-repository (per-owner) GitHub
+	// answer for the life of the scanner, errors included: modules from one
+	// repository (golang.org/x/*, k8s.io/*, a monorepo's submodules) share one
+	// request, and a 404 or a rate limit is asked about once, not once per
+	// module. They are zero-value usable.
+	repos   onceCache[*githubRepo]
+	users   onceCache[*githubUser]
+	commits onceCache[time.Time]
+
+	// repoLocks holds one mutex per owner/repo, guarded by mu.
+	repoLocks map[string]*sync.Mutex
+
 	// ScanStart is the reference time used for all age/activity classifications.
 	// It is truncated to the start of a UTC day so that two scans on the same
 	// calendar day produce identical band results for the same lastCommit.
 	// Defaults to time.Now().UTC().Truncate(24*time.Hour) when the scanner is
 	// constructed. Override in tests or from the CLI entry point.
 	ScanStart time.Time
+
+	// TokenRejected records that GitHub rejected the caller's token (401) and
+	// the scanner was given an empty token in its place, so the rate-limit
+	// warning does not tell the user to set a token they did set.
+	TokenRejected bool
 
 	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
 	// per scanner instance, even when many goroutines hit the limit simultaneously.
@@ -128,17 +209,19 @@ func NewMaintainerScanner(timeout time.Duration, githubToken string) *Maintainer
 
 // githubRepo represents relevant fields from the GitHub repos API.
 type githubRepo struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Archived    bool   `json:"archived"`
-	Disabled    bool   `json:"disabled"`
-	Fork        bool   `json:"fork"`
-	Stars       int    `json:"stargazers_count"`
-	Forks       int    `json:"forks_count"`
-	OpenIssues  int    `json:"open_issues_count"`
-	PushedAt    string `json:"pushed_at"`
-	CreatedAt   string `json:"created_at"`
-	License     *struct {
+	Name          string `json:"name"`
+	FullName      string `json:"full_name"`
+	Description   string `json:"description"`
+	Archived      bool   `json:"archived"`
+	Disabled      bool   `json:"disabled"`
+	Fork          bool   `json:"fork"`
+	Stars         int    `json:"stargazers_count"`
+	Forks         int    `json:"forks_count"`
+	OpenIssues    int    `json:"open_issues_count"`
+	PushedAt      string `json:"pushed_at"`
+	CreatedAt     string `json:"created_at"`
+	DefaultBranch string `json:"default_branch"`
+	License       *struct {
 		SPDXID string `json:"spdx_id"`
 		Name   string `json:"name"`
 	} `json:"license"`
@@ -204,9 +287,14 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 			n := atomic.AddInt64(&done, 1)
 			rep.Progress(int(n), total)
 			if info != nil {
-				info.SubDependencies = d.TransitiveDeps
+				// analyzeRepo caches one *MaintainerInfo per owner/repo, shared
+				// by every module from that repo. Copy it before setting
+				// per-module fields, or those modules race on the shared value
+				// and all report whichever one wrote last.
+				mi := *info
+				mi.SubDependencies = d.TransitiveDeps
 				mu.Lock()
-				results[d.Module.Path] = info
+				results[d.Module.Path] = &mi
 				mu.Unlock()
 			}
 		}(dep, or.owner, or.repo)
@@ -223,6 +311,28 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 		ms.mu.Unlock()
 		return cached
 	}
+	// Serialize lookups of one repository. Modules from the same repository
+	// (foo/bar and foo/bar/v2) are scanned
+	// concurrently, and checking the cache alone lets each of them miss and
+	// fetch the repository again, spending the API quota several times over.
+	if ms.repoLocks == nil {
+		ms.repoLocks = make(map[string]*sync.Mutex)
+	}
+	lock, ok := ms.repoLocks[cacheKey]
+	if !ok {
+		lock = new(sync.Mutex)
+		ms.repoLocks[cacheKey] = lock
+	}
+	ms.mu.Unlock()
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	ms.mu.Lock()
+	if cached, ok := ms.cache[cacheKey]; ok {
+		ms.mu.Unlock()
+		return cached
+	}
 	ms.mu.Unlock()
 
 	info := &MaintainerInfo{
@@ -232,16 +342,28 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 
 	// Fetch repo info. On any failure (network error, 403, 404, etc.) we
 	// leave DataAvailable as false so callers know zero-values are not real.
-	repoData, err := ms.fetchRepo(ctx, owner, repo)
+	repoData, err := ms.repoMeta(ctx, owner, repo)
 	if err != nil {
-		if errors.Is(err, errRateLimited) {
-			info.UnavailableReason = "rate_limited"
+		switch {
+		case errors.Is(err, ErrRepositoryNotFound):
+			info.UnavailableReason = UnavailableNotFound
+		case errors.Is(err, errRateLimited):
+			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
+			hint := "set GITHUB_TOKEN for higher limits"
+			switch {
+			case ms.TokenRejected:
+				hint = "the GitHub token was rejected (401), so requests ran unauthenticated"
+			case ms.token != "":
+				// Authenticated requests still hit the token's quota or a
+				// secondary limit (a 429); asking for a token would not help.
+				hint = "requests were authenticated, so the token's quota or a secondary rate limit was reached; wait and re-run"
+			}
 			ms.rateLimitWarnOnce.Do(func() {
-				rep.Warn("GitHub API rate limit hit — %s; set GITHUB_TOKEN for higher limits: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err)
+				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
-		} else {
-			info.UnavailableReason = "github_api_error"
+		default:
+			info.UnavailableReason = UnavailableAPIError
 		}
 		ms.mu.Lock()
 		ms.cache[cacheKey] = info
@@ -251,6 +373,15 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 
 	// The primary API call succeeded: all fields that follow are real data.
 	info.DataAvailable = true
+
+	// Use the repository's canonical name from here on. A renamed or
+	// transferred repository (an old name in go.mod) is
+	// served through a redirect, and the owner and contributors endpoints
+	// built from the old name would redirect or 404 as well.
+	if o, r := canonicalRepoName(repoData.FullName); o != "" {
+		owner, repo = o, r
+		info.Owner, info.Repo = o, r
+	}
 
 	info.Description = repoData.Description
 	info.IsArchived = repoData.Archived
@@ -270,6 +401,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			info.LastCommitDate = t
 		}
 	}
+	info.DefaultBranch = repoData.DefaultBranch
 	if repoData.CreatedAt != "" {
 		if t, err := time.Parse(time.RFC3339, repoData.CreatedAt); err == nil {
 			info.CreatedAt = t
@@ -330,6 +462,159 @@ func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) 
 	return &result, nil
 }
 
+// repoMeta returns the GitHub repository record for owner/repo, asking GitHub
+// once per repository for the life of the scanner. Every caller (the maintainer
+// scan, the archived check) shares that one answer, and so does a failure: a
+// 404 (ErrRepositoryNotFound) or a rate limit is remembered, not retried. A
+// failure caused by the caller's own cancelled context is not remembered. Names
+// are matched case-insensitively, as GitHub does, and a repository reached
+// through a rename redirect is also remembered under its canonical name.
+func (ms *MaintainerScanner) repoMeta(ctx context.Context, owner, repo string) (*githubRepo, error) {
+	key := strings.ToLower(owner + "/" + repo)
+	r, err := ms.repos.do(ctx, key, func() (*githubRepo, error) {
+		return ms.fetchRepo(ctx, owner, repo)
+	})
+	if err == nil {
+		if o, n := canonicalRepoName(r.FullName); o != "" {
+			ms.repos.set(strings.ToLower(o+"/"+n), r)
+		}
+	}
+	return r, err
+}
+
+// RepositoryArchived reports whether the GitHub repository owner/repo is
+// archived, from the same cached repository record the maintainer scan reads,
+// so asking about a repository the scan already fetched costs no request. It
+// returns ErrRepositoryNotFound when GitHub answers 404. It implements
+// ArchiveLookup.
+func (ms *MaintainerScanner) RepositoryArchived(ctx context.Context, owner, repo string) (bool, error) {
+	r, err := ms.repoMeta(ctx, owner, repo)
+	if err != nil {
+		return false, err
+	}
+	return r.Archived, nil
+}
+
+// onceCache runs a lookup once per key and shares the result, error included,
+// with every caller, concurrent or later. The zero value is ready to use.
+type onceCache[T any] struct {
+	mu sync.Mutex
+	m  map[string]*onceEntry[T]
+}
+
+type onceEntry[T any] struct {
+	done chan struct{}
+	val  T
+	err  error
+}
+
+// do returns the cached result for key, running fn when there is none and
+// otherwise waiting for the run in progress. A result produced while ctx was
+// cancelled is returned to the caller but not kept.
+func (c *onceCache[T]) do(ctx context.Context, key string, fn func() (T, error)) (T, error) {
+	c.mu.Lock()
+	if c.m == nil {
+		c.m = make(map[string]*onceEntry[T])
+	}
+	if e, ok := c.m[key]; ok {
+		c.mu.Unlock()
+		<-e.done
+		return e.val, e.err
+	}
+	e := &onceEntry[T]{done: make(chan struct{})}
+	c.m[key] = e
+	c.mu.Unlock()
+
+	e.val, e.err = fn()
+	if e.err != nil && ctx.Err() != nil {
+		c.mu.Lock()
+		delete(c.m, key)
+		c.mu.Unlock()
+	}
+	close(e.done)
+	return e.val, e.err
+}
+
+// peek returns the finished result for key, if there is one; it never waits.
+func (c *onceCache[T]) peek(key string) (val T, err error, ok bool) {
+	c.mu.Lock()
+	e, found := c.m[key]
+	c.mu.Unlock()
+	if !found {
+		return val, nil, false
+	}
+	select {
+	case <-e.done:
+		return e.val, e.err, true
+	default:
+		return val, nil, false
+	}
+}
+
+// set records val under key unless key already has an entry.
+func (c *onceCache[T]) set(key string, val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = make(map[string]*onceEntry[T])
+	}
+	if _, ok := c.m[key]; ok {
+		return
+	}
+	e := &onceEntry[T]{done: make(chan struct{}), val: val}
+	close(e.done)
+	c.m[key] = e
+}
+
+// githubCommit is the subset of a GitHub commits API entry LatestCommit reads.
+type githubCommit struct {
+	Commit struct {
+		Committer struct {
+			Date time.Time `json:"date"`
+		} `json:"committer"`
+	} `json:"commit"`
+}
+
+// LatestCommit returns the committer time of the latest commit on the default
+// branch of the GitHub repository behind modPath, from
+// `GET /repos/{owner}/{repo}/commits?per_page=1` (which lists the default
+// branch). It implements CommitLookup, the fallback MaintenanceScanner uses
+// when the module proxy cannot answer a branch query. It returns an error for
+// a module path that is not on github.com, and without a token, so the
+// fallback never spends the unauthenticated quota the maintainer scan needs.
+func (ms *MaintainerScanner) LatestCommit(ctx context.Context, modPath string) (time.Time, error) {
+	if ms.token == "" {
+		return time.Time{}, errors.New("no GitHub token")
+	}
+	owner, repo := parseGitHubPath(modPath)
+	if owner == "" || repo == "" {
+		return time.Time{}, fmt.Errorf("%s is not a GitHub module path", modPath)
+	}
+	// A repository already known to be gone has no commits to ask for.
+	if _, err, ok := ms.repos.peek(strings.ToLower(owner + "/" + repo)); ok && errors.Is(err, ErrRepositoryNotFound) {
+		return time.Time{}, err
+	}
+	// One answer per repository: a monorepo's modules share the default branch.
+	return ms.commits.do(ctx, strings.ToLower(owner+"/"+repo), func() (time.Time, error) {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?per_page=1", owner, repo)
+		body, err := ms.githubGet(ctx, url, "maintenance:github-commits")
+		if err != nil {
+			return time.Time{}, err
+		}
+		var commits []githubCommit
+		if err := json.Unmarshal(body, &commits); err != nil {
+			return time.Time{}, err
+		}
+		if len(commits) == 0 || commits[0].Commit.Committer.Date.IsZero() {
+			return time.Time{}, errors.New("no commits reported")
+		}
+		return commits[0].Commit.Committer.Date, nil
+	})
+}
+
+// fetchUser returns the profile of login, or nil when it cannot be read. One
+// request per login: owners with several repositories (golang, aws) share it,
+// and a failed lookup is remembered too.
 func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githubUser {
 	ms.mu.Lock()
 	if cached, ok := ms.userCache[login]; ok {
@@ -338,21 +623,27 @@ func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githu
 	}
 	ms.mu.Unlock()
 
-	url := fmt.Sprintf("https://api.github.com/users/%s", login)
-	body, err := ms.githubGet(ctx, url, "maintainer:user")
+	user, err := ms.users.do(ctx, strings.ToLower(login), func() (*githubUser, error) {
+		url := fmt.Sprintf("https://api.github.com/users/%s", login)
+		body, err := ms.githubGet(ctx, url, "maintainer:user")
+		if err != nil {
+			return nil, err
+		}
+		var user githubUser
+		if err := json.Unmarshal(body, &user); err != nil {
+			return nil, err
+		}
+		return &user, nil
+	})
 	if err != nil {
-		return nil
-	}
-	var user githubUser
-	if err := json.Unmarshal(body, &user); err != nil {
 		return nil
 	}
 
 	ms.mu.Lock()
-	ms.userCache[login] = &user
+	ms.userCache[login] = user
 	ms.mu.Unlock()
 
-	return &user
+	return user
 }
 
 func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo string) []githubContributor {
@@ -371,7 +662,9 @@ func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo 
 // githubGet fetches url from the disk cache when a fresh entry exists (within
 // the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
 // response body on HTTP 200, and returns the body. Non-200 responses are not
-// cached — the error is returned directly to the caller as before.
+// cached on disk — the error is returned directly to the caller. A 404 is
+// returned as ErrRepositoryNotFound; the per-process caches above this
+// function (repoMeta, fetchUser, LatestCommit) remember it, so it is asked once.
 func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string) ([]byte, error) {
 	// Consult the disk cache first.
 	if ms.diskCache != nil {
@@ -384,19 +677,38 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 	if ms.token != "" {
 		auth = "Bearer " + ms.token
 	}
-	body, resp, err := ms.client.Get(ctx, url, GetOptions{
-		Host:       "api.github.com",
+	opts := GetOptions{
+		Host:       githubAPIHost,
 		MaxBytes:   1 * 1024 * 1024, // 1 MB — paginated contributor lists can be large.
 		AuthHeader: auth,
 		Accept:     "application/vnd.github.v3+json",
 		Purpose:    purpose,
-	})
+	}
+	body, resp, err := ms.client.Get(ctx, url, opts)
 	if err != nil {
 		return nil, err
 	}
+
+	// GitHub answers a renamed or transferred repository with a redirect to
+	// its canonical /repositories/{id} URL, and the shared client blocks
+	// redirects. Follow one hop here, same host only, and only for this
+	// scanner: a second redirect or any other target is an error below.
+	if isRedirectStatus(resp.StatusCode) {
+		target, ok := githubAPIRedirectTarget(resp.Header.Get("Location"))
+		if !ok {
+			return nil, fmt.Errorf("GitHub API returned %d for %s with an unusable redirect", resp.StatusCode, url)
+		}
+		body, resp, err = ms.client.Get(ctx, target, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if resp.StatusCode != http.StatusOK {
-		if (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
-			resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		// A 429 is always a rate limit: GitHub also sends it without
+		// X-RateLimit-Remaining (a secondary limit). A 403 is one only
+		// when the remaining count says so; otherwise it is a permission error.
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
 			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 				resetAt := time.Unix(resetUnix, 0).UTC()
 				untilReset := time.Until(resetAt).Round(time.Second)
@@ -408,15 +720,71 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 			}
 			return nil, fmt.Errorf("%w", errRateLimited)
 		}
+		if resp.StatusCode == http.StatusNotFound {
+			// A definitive answer, not a failure: the callers cache it.
+			return nil, fmt.Errorf("%w: %s", ErrRepositoryNotFound, url)
+		}
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}
 
-	// Persist only on success; non-200 responses are never cached.
+	// Persist only on success; non-200 responses are never cached. The body is
+	// stored under the original URL, so a later run is served from the cache
+	// without repeating the redirect.
 	if ms.diskCache != nil {
 		_ = ms.diskCache.Put(url, body) // ignore cache-write errors — not fatal
 	}
 
 	return body, nil
+}
+
+// githubAPIHost is the only host the maintainer scanner talks to, and the only
+// host a redirect may lead to.
+const githubAPIHost = "api.github.com"
+
+// isRedirectStatus reports whether code is a redirect GitHub uses for moved
+// resources.
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
+// githubAPIRedirectTarget returns location when it is an absolute https URL on
+// api.github.com, with no credentials or port. Anything else (another host,
+// plain http, a relative reference, an empty header) is rejected, so a
+// redirect cannot move the request, or its Authorization header, off GitHub's
+// API.
+func githubAPIRedirectTarget(location string) (string, bool) {
+	u, err := url.Parse(location)
+	if err != nil || u.Scheme != "https" || u.User != nil || !strings.EqualFold(u.Host, githubAPIHost) {
+		return "", false
+	}
+	if !strings.HasPrefix(u.Path, "/") {
+		return "", false
+	}
+	return u.String(), true
+}
+
+// ownerNamePattern and repoNamePattern are GitHub's own name alphabets. They
+// are enforced on the full_name a response reports, so a garbled or hostile
+// value cannot inject path segments or query strings into the GitHub API URLs
+// built from it.
+var (
+	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	repoNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+)
+
+// canonicalRepoName splits a GitHub full_name ("owner/repo") into its parts,
+// returning empty strings when it is not exactly that shape.
+func canonicalRepoName(fullName string) (owner, repo string) {
+	owner, repo, ok := strings.Cut(fullName, "/")
+	if !ok || !ownerNamePattern.MatchString(owner) || !repoNamePattern.MatchString(repo) {
+		return "", ""
+	}
+	return owner, repo
 }
 
 // classifyActivity returns "active", "sporadic", "inactive", or "unknown"

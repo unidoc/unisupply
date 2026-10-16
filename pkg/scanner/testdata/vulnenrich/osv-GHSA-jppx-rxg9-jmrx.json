@@ -1,0 +1,24 @@
+{
+  "id": "GHSA-jppx-rxg9-jmrx",
+  "aliases": [
+    "CVE-2026-39833",
+    "GO-2026-5005"
+  ],
+  "published": "2026-06-25T22:13:31Z",
+  "modified": "2026-09-10T03:50:50.029914620Z",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+    }
+  ],
+  "database_specific": {
+    "cwe_ids": [
+      "CWE-862"
+    ],
+    "severity": "CRITICAL",
+    "github_reviewed": true,
+    "github_reviewed_at": "2026-06-25T22:13:31Z",
+    "nvd_published_at": "2026-05-22T04:16:22Z"
+  }
+}

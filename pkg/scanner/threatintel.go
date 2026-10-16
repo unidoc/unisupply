@@ -213,17 +213,60 @@ type kevCatalog struct {
 	Vulnerabilities []KEVEntry `json:"vulnerabilities"`
 }
 
-// LoadKEV fetches the CISA Known Exploited Vulnerabilities catalog (one bulk
-// JSON, cached 24h) and returns it as a map keyed by CVE ID.
-//
-// Best-effort: on failure it returns a nil map and a non-nil error the caller
-// should surface as a warning. A nil map means "KEV status unknown" — callers
-// must not interpret it as "not in KEV".
+// KEVCatalog is the result of LoadKEVCatalog. Entries is nil only when no
+// catalog is available at all.
+type KEVCatalog struct {
+	Entries map[string]KEVEntry
+	// Stale is true when the catalog could not be refreshed and Entries comes
+	// from an older on-disk copy, past the 24 h cache lifetime.
+	Stale bool
+	// StaleSince is the date that older copy was fetched. Zero unless Stale.
+	StaleSince time.Time
+}
+
+// KEVMaxStaleAge is the oldest a cached KEV catalog may be and still be used when the catalog could not be refreshed.
+// Beyond it there is no usable catalog: known-exploited status is unchecked, as when no catalog exists at all.
+const KEVMaxStaleAge = 30 * 24 * time.Hour
+
+// LoadKEV is LoadKEVCatalog reduced to the entry map, for callers that do not
+// need to know whether the catalog is stale. A stale copy is returned with a
+// nil error; use LoadKEVCatalog to see that it is stale.
 func (t *ThreatIntelClient) LoadKEV(ctx context.Context) (map[string]KEVEntry, error) {
+	c, err := t.LoadKEVCatalog(ctx)
+	return c.Entries, err
+}
+
+// LoadKEVCatalog fetches the CISA Known Exploited Vulnerabilities catalog (one
+// bulk JSON, cached 24h).
+//
+// When the fetch fails and an earlier catalog is on disk, past the 24 h lifetime but
+// no older than KEVMaxStaleAge (30 days), that copy is returned with Stale and StaleSince set and a nil
+// error: findings were checked, against an older list. Only when there is no
+// catalog at all does it return nil Entries and a non-nil error the caller
+// should surface as a warning. A nil map means "KEV status unknown" - callers
+// must not interpret it as "not in KEV".
+func (t *ThreatIntelClient) LoadKEVCatalog(ctx context.Context) (KEVCatalog, error) {
 	if cached, ok := t.loadKEVCache(); ok {
-		return cached, nil
+		return KEVCatalog{Entries: cached}, nil
 	}
 
+	entries, err := t.fetchKEV(ctx)
+	if err != nil {
+		if stale, since, ok := t.loadStaleKEVCache(); ok {
+			if age := t.now().Sub(since); age > KEVMaxStaleAge {
+				return KEVCatalog{}, fmt.Errorf("%w; the cached copy from %s is %d days old, older than the %d days allowed", err,
+					since.UTC().Format("2006-01-02"), int(age.Hours()/24), int(KEVMaxStaleAge.Hours()/24))
+			}
+			return KEVCatalog{Entries: stale, Stale: true, StaleSince: since}, nil
+		}
+		return KEVCatalog{}, err
+	}
+	t.saveKEVCache(entries)
+	return KEVCatalog{Entries: entries}, nil
+}
+
+// fetchKEV downloads and parses the catalog.
+func (t *ThreatIntelClient) fetchKEV(ctx context.Context) (map[string]KEVEntry, error) {
 	body, resp, err := t.client.Get(ctx, kevURL, GetOptions{
 		Host:     kevHost,
 		MaxBytes: kevMaxBytes,
@@ -249,9 +292,12 @@ func (t *ThreatIntelClient) LoadKEV(ctx context.Context) (map[string]KEVEntry, e
 		}
 		entries[e.CVEID] = e
 	}
-
-	t.saveKEVCache(entries)
 	return entries, nil
+}
+
+// kevStaleWarning is the warning for a catalog that could not be refreshed.
+func kevStaleWarning(since, now time.Time) string {
+	return fmt.Sprintf("CISA KEV catalog could not be refreshed; using the copy from %s (%d days old)", since.UTC().Format("2006-01-02"), int(now.Sub(since).Hours()/24))
 }
 
 // --- On-disk 24h caches (same pattern as vulnenrich.go) ---
@@ -325,6 +371,23 @@ func (t *ThreatIntelClient) loadKEVCache() (map[string]KEVEntry, bool) {
 		return nil, false
 	}
 	return f.Entries, true
+}
+
+// loadStaleKEVCache returns the cached KEV catalog whatever its age, with the
+// time it was fetched.
+func (t *ThreatIntelClient) loadStaleKEVCache() (map[string]KEVEntry, time.Time, bool) {
+	data, err := os.ReadFile(filepath.Join(t.kevCacheDir, kevCatalogFile))
+	if err != nil {
+		return nil, time.Time{}, false
+	}
+	var f kevCacheFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, time.Time{}, false
+	}
+	if f.Version != threatIntelCacheVers || f.Entries == nil || f.FetchedAt.IsZero() {
+		return nil, time.Time{}, false
+	}
+	return f.Entries, f.FetchedAt, true
 }
 
 // saveKEVCache persists the KEV catalog map with mode 0600.

@@ -1,0 +1,11 @@
+{
+  "id": "GO-2026-5932",
+  "aliases": null,
+  "published": "2026-07-07T22:15:29Z",
+  "modified": "2026-07-10T05:44:31.101996029Z",
+  "severity": null,
+  "database_specific": {
+    "url": "https://pkg.go.dev/vuln/GO-2026-5932",
+    "review_status": "REVIEWED"
+  }
+}

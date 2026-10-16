@@ -10,101 +10,6 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-// TestWriteText_ContainsSummary tests that output contains overall risk score and level.
-func TestWriteText_ContainsSummary(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "github.com/example/pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 45,
-		OverallLevel: scorer.RiskMedium,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "github.com/example/pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 45,
-				RiskLevel: scorer.RiskMedium,
-			},
-		},
-		MediumRiskCount: 1,
-	}
-
-	opts := TextOptions{
-		NoColor: true,
-		Writer:  &bytes.Buffer{},
-	}
-
-	err := WriteText(graph, ps, &opts)
-	if err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	// Check for overall score and level
-	if !strings.Contains(output, "45/100") {
-		t.Error("Output should contain overall score '45/100'")
-	}
-
-	if !strings.Contains(output, "MEDIUM") {
-		t.Error("Output should contain overall level 'MEDIUM'")
-	}
-
-	if !strings.Contains(output, "SUPPLY-CHAIN RISK:") {
-		t.Error("Output should contain 'SUPPLY-CHAIN RISK:' header")
-	}
-}
-
-// TestWriteText_UnscoredHeadline covers the UNKNOWN headline rendering. Both
-// switches it flows through (riskColor and overallExplanation) previously fell
-// to a `default` branch meaning LOW — green, with the text "no known
-// vulnerabilities were found". On a scan that never looked for vulnerabilities
-// that is the single most misleading sentence the report could print, so this
-// test asserts it is gone as much as it asserts UNKNOWN is present.
-func TestWriteText_UnscoredHeadline(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore:           26,
-		OverallLevel:           scorer.RiskUnknown,
-		HeadlineUnscoredReason: "vulnerability scan did not run — test reason",
-		Dependencies: []*scorer.DependencyScore{
-			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 26, RiskLevel: scorer.RiskMedium},
-		},
-		Warnings: []string{"vulnerability scan did not run"},
-	}
-
-	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
-	if err := WriteText(graph, ps, &opts); err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	for _, want := range []string{"UNKNOWN — not scored", "indicative: 26/100", "test reason", "No verdict"} {
-		if !strings.Contains(output, want) {
-			t.Errorf("output missing %q", want)
-		}
-	}
-
-	// The false-assurance sentence from the LOW branch must not appear.
-	if strings.Contains(output, "no known vulnerabilities were found") {
-		t.Error("unscored headline rendered the LOW explanation claiming no vulnerabilities were found")
-	}
-	// "26/100 (UNKNOWN)" would read as a scored 26; the band must lead.
-	if strings.Contains(output, "26/100 (UNKNOWN)") {
-		t.Error("headline presented the indicative number as a scored band")
-	}
-}
-
 // TestWriteText_NoColor tests that noColor=true removes ANSI codes.
 func TestWriteText_NoColor(t *testing.T) {
 	graph := testutil.MakeGraph(
@@ -255,85 +160,6 @@ func TestWriteText_VulnSection(t *testing.T) {
 	}
 }
 
-// TestWriteText_RiskLevelGrouping tests dependencies are grouped by risk level.
-func TestWriteText_RiskLevelGrouping(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "critical-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-		testutil.DepSpec{
-			Path:    "high-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-		testutil.DepSpec{
-			Path:    "safe-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 55,
-		OverallLevel: scorer.RiskHigh,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "critical-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 85,
-				RiskLevel: scorer.RiskCritical,
-			},
-			{
-				Module:    "high-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 65,
-				RiskLevel: scorer.RiskHigh,
-			},
-			{
-				Module:    "safe-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 15,
-				RiskLevel: scorer.RiskLow,
-			},
-		},
-		HighRiskCount: 2,
-		LowRiskCount:  1,
-	}
-
-	opts := TextOptions{
-		NoColor: true,
-		Writer:  &bytes.Buffer{},
-	}
-
-	err := WriteText(graph, ps, &opts)
-	if err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	// Check for risk level headers
-	if !strings.Contains(output, "CRITICAL RISK") {
-		t.Error("Output should contain 'CRITICAL RISK' section header")
-	}
-
-	if !strings.Contains(output, "HIGH RISK") {
-		t.Error("Output should contain 'HIGH RISK' section header")
-	}
-
-	if !strings.Contains(output, "LOW RISK") {
-		t.Error("Output should contain 'LOW RISK' section header")
-	}
-}
-
 // TestWriteText_DirectVsIndirectLabel tests that direct/indirect labels appear.
 func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 	graph := testutil.MakeGraph(
@@ -441,6 +267,8 @@ func TestWriteText_LowRiskVulnDetail(t *testing.T) {
 					Direct:    false,
 					RiskScore: 5,
 					RiskLevel: scorer.RiskLow,
+					// Verbose output expands the block: a maintenance line follows the heading.
+					Maintenance: &scanner.MaintenanceInfo{MonthsSinceRelease: 3},
 				},
 			},
 			LowRiskCount: 2,
@@ -723,5 +551,301 @@ func TestWriteText_ReachabilityAllCalled(t *testing.T) {
 	// No [called] tag should appear.
 	if strings.Contains(out, "[called]") {
 		t.Errorf("[called] tag should be suppressed; output:\n%s", out)
+	}
+}
+
+// archivedTimeBombScore returns a project with one archived transitive
+// dependency, which CollectTimeBombs reports as an "archived" time bomb.
+func archivedTimeBombScore() *scorer.ProjectScore {
+	return &scorer.ProjectScore{
+		OverallScore: 51,
+		OverallLevel: scorer.RiskHigh,
+		Dependencies: []*scorer.DependencyScore{
+			{
+				Module:    "github.com/google/go-cmdtest",
+				Version:   "v0.4.1-0.20220921163831-55ab3332a786",
+				RiskScore: 30,
+				RiskLevel: scorer.RiskMedium,
+				Maintenance: &scanner.MaintenanceInfo{
+					Archived:           true,
+					MonthsSinceRelease: 53,
+				},
+			},
+		},
+	}
+}
+
+// TestWriteText_TimeBombScopeNote verifies the TIME-BOMBS block says what a
+// time bomb is, so an archived transitive module is not read as an outdated
+// dependency that an update would fix.
+func TestWriteText_TimeBombScopeNote(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{
+		Path: "github.com/google/go-cmdtest", Version: "v0.4.1-0.20220921163831-55ab3332a786", Depth: 2,
+	})
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, archivedTimeBombScore(), &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	out := opts.Writer.(*bytes.Buffer).String()
+
+	for _, want := range []string{
+		"TIME-BOMBS (1)\n  Any dependency, direct or transitive and not confirmed as test-only",
+		"github.com/google/go-cmdtest — archived 53 months",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The note is wrapped, so compare it with whitespace collapsed.
+	flat := strings.Join(strings.Fields(out), " ")
+	if !strings.Contains(flat, timeBombScopeNote) {
+		t.Errorf("output does not contain the full time-bomb note:\n%s", out)
+	}
+}
+
+// TestWriteText_NoTimeBombsNoNote verifies the note is not printed on its own:
+// the TIME-BOMBS block stays absent when there are none.
+func TestWriteText_NoTimeBombsNoNote(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "pkg1", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{
+		OverallScore: 5,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "pkg1", Version: "v1.0.0", Direct: true, RiskScore: 5, RiskLevel: scorer.RiskLow},
+		},
+	}
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	out := opts.Writer.(*bytes.Buffer).String()
+	if strings.Contains(out, "TIME-BOMBS") || strings.Contains(out, "not confirmed as test-only") {
+		t.Errorf("no time bombs: TIME-BOMBS block and its note must be absent:\n%s", out)
+	}
+}
+
+func TestWrapWords(t *testing.T) {
+	lines := wrapWords(timeBombScopeNote, 74)
+	if len(lines) < 2 {
+		t.Fatalf("wrapWords() = %d line(s), want the note wrapped", len(lines))
+	}
+	for _, l := range lines {
+		if n := len([]rune(l)); n > 74 {
+			t.Errorf("line of %d runes exceeds width 74: %q", n, l)
+		}
+	}
+	if got := strings.Join(lines, " "); got != strings.Join(strings.Fields(timeBombScopeNote), " ") {
+		t.Errorf("wrapping lost or reordered words:\n got %q", got)
+	}
+	if got := wrapWords("a-very-long-single-word", 5); len(got) != 1 || got[0] != "a-very-long-single-word" {
+		t.Errorf("an over-long word must get its own line, got %q", got)
+	}
+	if got := wrapWords("", 10); len(got) != 0 {
+		t.Errorf("wrapWords(\"\") = %q, want no lines", got)
+	}
+}
+
+// TestWriteDependencyDetail_OutsideBuildLabel verifies that the "outside
+// build" label is shown only for a confirmed InBuild == &false, never for nil
+// or &true.
+func TestWriteDependencyDetail_OutsideBuildLabel(t *testing.T) {
+	trueVal, falseVal := true, false
+	noColor := func(_, s string) string { return s }
+
+	tests := []struct {
+		name    string
+		inBuild *bool
+		want    bool
+	}{
+		{"confirmed outside the build", &falseVal, true},
+		{"in build", &trueVal, false},
+		{"unknown", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := &scorer.DependencyScore{
+				Module: "github.com/charmbracelet/harmonica", Version: "v0.2.0",
+				RiskScore: 32, RiskLevel: scorer.RiskMedium, InBuild: tt.inBuild,
+			}
+			var buf bytes.Buffer
+			writeDependencyDetail(&buf, ds, noColor, "B", false)
+			if got := strings.Contains(buf.String(), "outside build"); got != tt.want {
+				t.Errorf("label present = %v, want %v:\n%s", got, tt.want, buf.String())
+			}
+		})
+	}
+}
+
+// scanNotesScore returns a one-dependency score for the scan limitations and
+// scan notes tests.
+func scanNotesScore(warnings, notes []string) *scorer.ProjectScore {
+	return &scorer.ProjectScore{
+		OverallScore: 20,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 20, RiskLevel: scorer.RiskLow},
+		},
+		Warnings: warnings,
+		Notes:    notes,
+	}
+}
+
+func renderScanNotes(t *testing.T, warnings, notes []string) string {
+	t.Helper()
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	ps := scanNotesScore(warnings, notes)
+	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
+	if err := WriteText(graph, ps, &opts); err != nil {
+		t.Fatalf("WriteText() failed: %v", err)
+	}
+	return opts.Writer.(*bytes.Buffer).String()
+}
+
+// TestWriteText_ScanNotes verifies that informational notes render under their
+// own heading, after the scan limitations, and are not listed as limitations.
+func TestWriteText_ScanNotes(t *testing.T) {
+	out := renderScanNotes(t,
+		[]string{"vulnerability scan did not run"},
+		[]string{"go list reported package errors that do not affect module classification: x"})
+
+	limits := strings.Index(out, "SCAN LIMITATIONS")
+	notes := strings.Index(out, "SCAN NOTES — informational, results unaffected")
+	if limits < 0 || notes < 0 || notes < limits {
+		t.Fatalf("want SCAN LIMITATIONS then SCAN NOTES, got indexes %d and %d:\n%s", limits, notes, out)
+	}
+	if !strings.Contains(out[notes:], "  - go list reported package errors") {
+		t.Errorf("note not rendered under SCAN NOTES with a '  - ' prefix:\n%s", out[notes:])
+	}
+	if strings.Contains(out[limits:notes], "do not affect module classification") {
+		t.Errorf("note rendered under SCAN LIMITATIONS:\n%s", out[limits:notes])
+	}
+	if !strings.Contains(out[limits:notes], "  ! vulnerability scan did not run") {
+		t.Errorf("warning missing from SCAN LIMITATIONS:\n%s", out[limits:notes])
+	}
+}
+
+// TestWriteText_OnlyNotesHasNoLimitations verifies the SCAN LIMITATIONS block
+// appears only when there are warnings.
+func TestWriteText_OnlyNotesHasNoLimitations(t *testing.T) {
+	out := renderScanNotes(t, nil, []string{"a note"})
+	if strings.Contains(out, "SCAN LIMITATIONS") {
+		t.Errorf("SCAN LIMITATIONS rendered with only notes:\n%s", out)
+	}
+	if !strings.Contains(out, "SCAN NOTES") {
+		t.Errorf("SCAN NOTES missing:\n%s", out)
+	}
+
+	out = renderScanNotes(t, []string{"a warning"}, nil)
+	if strings.Contains(out, "SCAN NOTES") {
+		t.Errorf("SCAN NOTES rendered with no notes:\n%s", out)
+	}
+	if !strings.Contains(out, "SCAN LIMITATIONS") {
+		t.Errorf("SCAN LIMITATIONS missing:\n%s", out)
+	}
+}
+
+// renderDetailed renders one detailed dependency block holding vulns.
+func renderDetailed(vulns ...scanner.Vulnerability) string {
+	ds := &scorer.DependencyScore{
+		Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+		RiskScore: 80, RiskLevel: scorer.RiskCritical, Vulns: vulns,
+	}
+	var buf bytes.Buffer
+	writeDependencyDetail(&buf, ds, func(_, s string) string { return s }, "B", true)
+	return buf.String()
+}
+
+// TestWriteDependencyDetail_ReachedVia verifies the call path lines under a
+// called finding: project position only, symbols line only for two or more
+// symbols, the cut marker, no output for imported findings, and the fallback
+// when a vulnerability has a path but no trace.
+func TestWriteDependencyDetail_ReachedVia(t *testing.T) {
+	const arrow = "  │  Reached via: example.com/u1repro.main (main.go:13) → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+
+	t.Run("issue 134 example", func(t *testing.T) {
+		v := issue134Vuln()
+		v.FixedVersion = "v0.52.0"
+		out := renderDetailed(v)
+		want := "  │  Fix available: v0.52.0\n" + arrow
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+		if strings.Contains(out, "keyring.go:149") {
+			t.Errorf("dependency position must not be shown in text:\n%s", out)
+		}
+		if strings.Contains(out, "Vulnerable symbols called") {
+			t.Errorf("one symbol must not print the symbols line:\n%s", out)
+		}
+	})
+
+	t.Run("two symbols", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+		out := renderDetailed(v)
+		want := arrow + "  │  Vulnerable symbols called: golang.org/x/crypto/ssh/agent.keyring.Add, golang.org/x/crypto/ssh/agent.keyring.Lock\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+
+	t.Run("cut path renders the marker", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CallPath = []string{"example.com/u1repro.main", "...", "golang.org/x/crypto/ssh/agent.keyring.Add"}
+		v.CallTrace = []scanner.CallFrame{v.CallTrace[0], {Elided: true}, v.CallTrace[1]}
+		out := renderDetailed(v)
+		want := "  │  Reached via: example.com/u1repro.main (main.go:13) → ... → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+
+	t.Run("imported prints no path", func(t *testing.T) {
+		v := issue134Vuln()
+		v.Reachability = "imported"
+		if out := renderDetailed(v); strings.Contains(out, "Reached via") {
+			t.Errorf("imported finding printed a path:\n%s", out)
+		}
+	})
+
+	t.Run("path without trace falls back to names", func(t *testing.T) {
+		v := issue134Vuln()
+		v.CallTrace = nil
+		out := renderDetailed(v)
+		want := "  │  Reached via: example.com/u1repro.main → golang.org/x/crypto/ssh/agent.keyring.Add\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	})
+}
+
+// TestWriteText_StdlibReachedVia verifies the stdlib section prints the call
+// path and symbols for a called advisory and nothing extra for an imported one.
+func TestWriteText_StdlibReachedVia(t *testing.T) {
+	out := renderAliasReport(t, aliasReport(), stdlibTestVulns())
+
+	for _, want := range []string{
+		"STDLIB VULNERABILITIES (2 found)",
+		"    Fixed in: go1.26.3\n    Reached via: example.com/app.main (main.go:21) → net/http.ListenAndServe\n" +
+			"    Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// The imported advisory is the last entry; nothing may follow its summary
+	// line except the section's closing blank line.
+	idx := strings.Index(out, "GO-2026-4002 Parser panic in encoding/asn1")
+	if idx < 0 {
+		t.Fatalf("imported stdlib advisory missing:\n%s", out)
+	}
+	rest := out[idx:]
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	if strings.Contains(rest, "Reached via") || strings.Contains(rest, "Vulnerable symbols") {
+		t.Errorf("imported stdlib advisory must not print call evidence:\n%s", rest)
 	}
 }

@@ -40,6 +40,12 @@ type GetOptions struct {
 	// This prevents accidentally leaking credentials to an unexpected host.
 	AuthHeader string
 
+	// APIKeyHeader, if non-empty, is injected as the named header with value
+	// APIKey at the RoundTripper layer, after the host-pin check — same
+	// guarantee as AuthHeader. Used for NVD's "apiKey" header.
+	APIKeyHeader string
+	APIKey       string
+
 	// Accept, if non-empty, is set as the request Accept header. Non-credential
 	// so it's safe to attach at the request level (not the transport).
 	Accept string
@@ -105,6 +111,8 @@ type ctxKey int
 const (
 	ctxKeyExpectedHost ctxKey = iota
 	ctxKeyAuthHeader
+	ctxKeyAPIKeyHeader
+	ctxKeyAPIKey
 )
 
 func (t *hostPinTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -119,12 +127,27 @@ func (t *hostPinTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if auth, _ := req.Context().Value(ctxKeyAuthHeader).(string); auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
+	name, _ := req.Context().Value(ctxKeyAPIKeyHeader).(string)
+	key, _ := req.Context().Value(ctxKeyAPIKey).(string)
+	if name != "" && key != "" {
+		req.Header.Set(name, key)
+	}
 
 	inner := t.client.Transport
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
 	return inner.RoundTrip(req)
+}
+
+// withAPIKey attaches the API-key header name and value to ctx so the
+// host-pin transport can inject them after validating the host.
+func withAPIKey(ctx context.Context, opts GetOptions) context.Context {
+	if opts.APIKeyHeader == "" || opts.APIKey == "" {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, ctxKeyAPIKeyHeader, opts.APIKeyHeader)
+	return context.WithValue(ctx, ctxKeyAPIKey, opts.APIKey)
 }
 
 func hostMatches(actual, expected string) bool {
@@ -165,6 +188,7 @@ func (c *Client) Get(ctx context.Context, url string, opts GetOptions) ([]byte, 
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = withAPIKey(ctx, opts)
 	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
@@ -202,6 +226,7 @@ func (c *Client) Post(ctx context.Context, url, contentType string, reqBody io.R
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = withAPIKey(ctx, opts)
 	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, reqBody)
@@ -240,6 +265,7 @@ func (c *Client) Head(ctx context.Context, url string, opts GetOptions) (*http.R
 	if opts.AuthHeader != "" {
 		ctx = context.WithValue(ctx, ctxKeyAuthHeader, opts.AuthHeader)
 	}
+	ctx = withAPIKey(ctx, opts)
 	ctx = netlog.WithPurpose(ctx, opts.Purpose)
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, http.NoBody)

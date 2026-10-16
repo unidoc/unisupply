@@ -3,9 +3,14 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/grade"
+	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
@@ -157,39 +162,27 @@ func TestWriteCycloneDX_Components(t *testing.T) {
 	}
 }
 
-// TestWriteCycloneDX_RiskScoreProperty tests that risk score is added as a property.
-func TestWriteCycloneDX_RiskScoreProperty(t *testing.T) {
+// TestWriteCycloneDX_GradeProperty tests that a graded row's letter and reason become component properties.
+func TestWriteCycloneDX_GradeProperty(t *testing.T) {
 	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "risky-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
+		testutil.DepSpec{Path: "risky-pkg", Version: "v1.0.0", Direct: true, Depth: 0},
 	)
-
 	ps := &scorer.ProjectScore{
-		OverallScore: 60,
-		OverallLevel: scorer.RiskHigh,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "risky-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 60,
-				RiskLevel: scorer.RiskHigh,
-			},
-		},
-		HighRiskCount: 1,
+		Dependencies: []*scorer.DependencyScore{{Module: "risky-pkg", Version: "v1.0.0", Direct: true}},
 	}
-
 	opts := SBOMOptions{
 		GoVersion: "1.21",
+		Grade: &grade.Result{
+			RuleVersion: grade.RuleVersion,
+			Letter:      grade.LetterD,
+			Rows: []grade.RowResult{
+				{Module: "risky-pkg", Letter: grade.LetterD, Reason: "called high-severity finding GO-2024-0001"},
+			},
+		},
 	}
 
 	var buf bytes.Buffer
-	err := WriteCycloneDX(graph, ps, opts, &buf)
-	if err != nil {
+	if err := WriteCycloneDX(graph, ps, opts, &buf); err != nil {
 		t.Fatalf("WriteCycloneDX() failed: %v", err)
 	}
 
@@ -197,43 +190,22 @@ func TestWriteCycloneDX_RiskScoreProperty(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &bom); err != nil {
 		t.Fatalf("Failed to unmarshal CycloneDX JSON: %v", err)
 	}
-
 	if len(bom.Components) != 1 {
 		t.Fatalf("Components length = %d, want 1", len(bom.Components))
 	}
 
-	comp := bom.Components[0]
-
-	// Find risk score property
-	found := false
-	for _, prop := range comp.Properties {
-		if prop.Name == "unisupply:risk_score" {
-			if prop.Value != "60" {
-				t.Errorf("risk_score property = %q, want %q", prop.Value, "60")
-			}
-			found = true
-			break
-		}
+	props := map[string]string{}
+	for _, prop := range bom.Components[0].Properties {
+		props[prop.Name] = prop.Value
 	}
-
-	if !found {
-		t.Error("unisupply:risk_score property not found")
+	if props["unisupply:grade"] != "D" {
+		t.Errorf("unisupply:grade = %q, want %q", props["unisupply:grade"], "D")
 	}
-
-	// Find risk level property
-	found = false
-	for _, prop := range comp.Properties {
-		if prop.Name == "unisupply:risk_level" {
-			if prop.Value != "HIGH" {
-				t.Errorf("risk_level property = %q, want %q", prop.Value, "HIGH")
-			}
-			found = true
-			break
-		}
+	if props["unisupply:grade_reason"] != "called high-severity finding GO-2024-0001" {
+		t.Errorf("unisupply:grade_reason = %q", props["unisupply:grade_reason"])
 	}
-
-	if !found {
-		t.Error("unisupply:risk_level property not found")
+	if bytes.Contains(buf.Bytes(), []byte("risk_score")) || bytes.Contains(buf.Bytes(), []byte("risk_level")) {
+		t.Errorf("SBOM still names risk_score/risk_level:\n%s", buf.String())
 	}
 }
 
@@ -469,39 +441,27 @@ func TestWriteSPDX_Relationships(t *testing.T) {
 	}
 }
 
-// TestWriteSPDX_RiskAnnotation tests that risk scores are added as annotations.
-func TestWriteSPDX_RiskAnnotation(t *testing.T) {
+// TestWriteSPDX_GradeAnnotation tests that a graded row's letter and reason become an annotation.
+func TestWriteSPDX_GradeAnnotation(t *testing.T) {
 	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "risky-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
+		testutil.DepSpec{Path: "risky-pkg", Version: "v1.0.0", Direct: true, Depth: 0},
 	)
-
 	ps := &scorer.ProjectScore{
-		OverallScore: 60,
-		OverallLevel: scorer.RiskHigh,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "risky-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 60,
-				RiskLevel: scorer.RiskHigh,
-			},
-		},
-		HighRiskCount: 1,
+		Dependencies: []*scorer.DependencyScore{{Module: "risky-pkg", Version: "v1.0.0", Direct: true}},
 	}
-
 	opts := SBOMOptions{
 		GoVersion: "1.21",
+		Grade: &grade.Result{
+			RuleVersion: grade.RuleVersion,
+			Letter:      grade.LetterD,
+			Rows: []grade.RowResult{
+				{Module: "risky-pkg", Letter: grade.LetterD, Reason: "called high-severity finding GO-2024-0001"},
+			},
+		},
 	}
 
 	var buf bytes.Buffer
-	err := WriteSPDX(graph, ps, opts, &buf)
-	if err != nil {
+	if err := WriteSPDX(graph, ps, opts, &buf); err != nil {
 		t.Fatalf("WriteSPDX() failed: %v", err)
 	}
 
@@ -509,41 +469,26 @@ func TestWriteSPDX_RiskAnnotation(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
 		t.Fatalf("Failed to unmarshal SPDX JSON: %v", err)
 	}
-
-	// Should have 2 packages: root + 1 dependency
 	if len(doc.Packages) != 2 {
 		t.Fatalf("Packages length = %d, want 2", len(doc.Packages))
 	}
-
-	// Check the dependency package for annotations
 	depPkg := doc.Packages[1]
 	if depPkg.Name != "risky-pkg" {
 		t.Fatalf("Package name = %q, want %q", depPkg.Name, "risky-pkg")
 	}
-
-	// Should have at least one annotation
 	if len(depPkg.Annotations) == 0 {
 		t.Fatal("Package should have annotations")
 	}
-
-	// Check the annotation contains risk score
 	ann := depPkg.Annotations[0]
 	if ann.AnnotationType != "REVIEW" {
 		t.Errorf("AnnotationType = %q, want %q", ann.AnnotationType, "REVIEW")
 	}
-
-	if !containsSubstring(ann.Comment, "risk_score=60") {
-		t.Errorf("Annotation comment should contain risk_score=60, got: %q", ann.Comment)
+	if want := "grade=D reason=called high-severity finding GO-2024-0001"; ann.Comment != want {
+		t.Errorf("Annotation comment = %q, want %q", ann.Comment, want)
 	}
-
-	if !containsSubstring(ann.Comment, "risk_level=HIGH") {
-		t.Errorf("Annotation comment should contain risk_level=HIGH, got: %q", ann.Comment)
+	if bytes.Contains(buf.Bytes(), []byte("risk_score")) || bytes.Contains(buf.Bytes(), []byte("risk_level")) {
+		t.Errorf("SBOM still names risk_score/risk_level:\n%s", buf.String())
 	}
-}
-
-// Helper function
-func containsSubstring(str, substr string) bool {
-	return bytes.Contains([]byte(str), []byte(substr))
 }
 
 // TestWriteCycloneDX_RootComponentVersion checks that the go directive is not
@@ -629,5 +574,118 @@ func TestWriteSPDX_RootPackageVersion(t *testing.T) {
 	}
 	if got, want := string(dep["downloadLocation"]), `"https://proxy.golang.org/github.com/example/pkg/@v/v1.0.0.zip"`; got != want {
 		t.Errorf("dependency downloadLocation = %s, want %s", got, want)
+	}
+}
+
+// determinismGraph builds a graph with enough modules and parent edges that
+// ranging its maps in iteration order would almost surely reorder the output
+// between runs.
+func determinismGraph() (*resolver.Graph, *scorer.ProjectScore) {
+	names := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet"}
+	specs := make([]testutil.DepSpec, 0, len(names))
+	ps := &scorer.ProjectScore{}
+	for i, n := range names {
+		path := "example.com/" + n
+		spec := testutil.DepSpec{Path: path, Version: "v1.0.0", Direct: i%2 == 0}
+		if spec.Direct {
+			spec.UsedBy = []string{"test/module"}
+		} else {
+			// Every transitive module is used by several earlier modules.
+			for _, p := range names[:i] {
+				spec.UsedBy = append(spec.UsedBy, "example.com/"+p)
+			}
+			spec.Depth = 1
+		}
+		specs = append(specs, spec)
+		ps.Dependencies = append(ps.Dependencies, &scorer.DependencyScore{
+			Module: path, Version: "v1.0.0", RiskScore: i, RiskLevel: scorer.RiskLow,
+		})
+	}
+	return testutil.MakeGraph(specs...), ps
+}
+
+// TestWriteCycloneDX_DeterministicOrder verifies that repeated generation
+// yields identical output once the per-run timestamp and serial number are
+// zeroed, and that the dependency lists are sorted.
+func TestWriteCycloneDX_DeterministicOrder(t *testing.T) {
+	graph, ps := determinismGraph()
+
+	generate := func() cdxBOM {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteCycloneDX(graph, ps, SBOMOptions{}, &buf); err != nil {
+			t.Fatalf("WriteCycloneDX() failed: %v", err)
+		}
+		var bom cdxBOM
+		if err := json.Unmarshal(buf.Bytes(), &bom); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		bom.SerialNumber = ""
+		bom.Metadata.Timestamp = ""
+		return bom
+	}
+
+	want := generate()
+	for i := 0; i < 20; i++ {
+		if got := generate(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: CycloneDX output differs from first run", i+1)
+		}
+	}
+
+	for _, dep := range want.Dependencies {
+		if !sort.StringsAreSorted(dep.DependsOn) {
+			t.Errorf("dependsOn of %s is not sorted: %v", dep.Ref, dep.DependsOn)
+		}
+	}
+	refs := make([]string, 0, len(want.Dependencies))
+	for _, dep := range want.Dependencies[1:] { // the root entry comes first
+		refs = append(refs, dep.Ref)
+	}
+	if !sort.StringsAreSorted(refs) {
+		t.Errorf("dependency entries are not sorted by parent: %v", refs)
+	}
+}
+
+// TestWriteSPDX_DeterministicOrder verifies that repeated generation yields
+// identical output once per-run timestamps are zeroed, and that package IDs
+// are assigned in sorted module order so SPDXRef-Package-N always names the
+// same module.
+func TestWriteSPDX_DeterministicOrder(t *testing.T) {
+	graph, ps := determinismGraph()
+
+	generate := func() spdxDocument {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteSPDX(graph, ps, SBOMOptions{}, &buf); err != nil {
+			t.Fatalf("WriteSPDX() failed: %v", err)
+		}
+		var doc spdxDocument
+		if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		doc.DocumentNamespace = ""
+		doc.CreationInfo.Created = ""
+		for i := range doc.Packages {
+			for j := range doc.Packages[i].Annotations {
+				doc.Packages[i].Annotations[j].AnnotationDate = ""
+			}
+		}
+		return doc
+	}
+
+	want := generate()
+	for i := 0; i < 20; i++ {
+		if got := generate(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: SPDX output differs from first run", i+1)
+		}
+	}
+
+	// Package 0 is the root; dependencies follow in sorted module order.
+	for i, path := range graph.SortedPaths() {
+		pkg := want.Packages[i+1]
+		wantID := fmt.Sprintf("SPDXRef-Package-%d", i+1)
+		if pkg.SPDXID != wantID || pkg.Name != path {
+			t.Errorf("package %d = %s (%s), want %s (%s)", i+1, pkg.SPDXID, pkg.Name, wantID, path)
+		}
 	}
 }

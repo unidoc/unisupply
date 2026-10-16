@@ -1,0 +1,13 @@
+{
+  "id": "GO-2026-5066",
+  "aliases": [
+    "CVE-2026-46604"
+  ],
+  "published": "2026-06-26T20:04:13Z",
+  "modified": "2026-06-27T06:14:20.408848742Z",
+  "severity": null,
+  "database_specific": {
+    "url": "https://pkg.go.dev/vuln/GO-2026-5066",
+    "review_status": "REVIEWED"
+  }
+}

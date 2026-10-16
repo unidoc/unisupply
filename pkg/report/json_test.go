@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,12 +70,9 @@ func TestWriteJSON_ValidOutput(t *testing.T) {
 		t.Errorf("Project.GoVersion = %q, want %q", report.Project.GoVersion, "1.21")
 	}
 
-	if report.OverallRisk != 30 {
-		t.Errorf("OverallRisk = %d, want %d", report.OverallRisk, 30)
-	}
-
-	if report.OverallLevel != "LOW" {
-		t.Errorf("OverallLevel = %q, want %q", report.OverallLevel, "LOW")
+	// Grading v2: the overall score/level are gone; with no grade supplied the grade block is null.
+	if report.Grade != nil {
+		t.Errorf("Grade = %+v, want nil when JSONOptions.Grade is nil", report.Grade)
 	}
 
 	// Verify GeneratedAt is present and valid
@@ -160,9 +158,6 @@ func TestWriteJSON_Dependencies(t *testing.T) {
 	if !dep1.Direct {
 		t.Errorf("Deps[0].Direct = false, want true")
 	}
-	if dep1.RiskScore != 20 {
-		t.Errorf("Deps[0].RiskScore = %d, want %d", dep1.RiskScore, 20)
-	}
 
 	// Check second dependency
 	dep2 := report.Deps[1]
@@ -174,9 +169,6 @@ func TestWriteJSON_Dependencies(t *testing.T) {
 	}
 	if dep2.Direct {
 		t.Errorf("Deps[1].Direct = true, want false")
-	}
-	if dep2.RiskScore != 50 {
-		t.Errorf("Deps[1].RiskScore = %d, want %d", dep2.RiskScore, 50)
 	}
 }
 
@@ -216,7 +208,6 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 	opts := JSONOptions{
 		GoVersion: "1.21",
 		CIReport:  nil,
-		Takeovers: nil,
 	}
 
 	var buf bytes.Buffer
@@ -251,7 +242,6 @@ func TestWriteJSON_NilOptionalFields(t *testing.T) {
 		t.Error("CI field should be nil, got non-nil value")
 	}
 
-	// Takeovers can be nil (omitempty in JSON output)
 }
 
 // TestWriteJSON_TestOnly_ConfirmedTrue verifies that a dep with IsTestOnly=&true
@@ -540,46 +530,7 @@ func TestWriteJSON_VulnerabilitiesPopulated(t *testing.T) {
 	}
 }
 
-// TestWriteJSON_CriticalRiskCount asserts that the JSON summary distinguishes
-// CRITICAL (>=76) from HIGH (51-75) — the plan 39 split.
-func TestWriteJSON_CriticalRiskCount(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{Path: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-		testutil.DepSpec{Path: "github.com/high/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 80,
-		OverallLevel: scorer.RiskCritical,
-		Dependencies: []*scorer.DependencyScore{
-			{Module: "github.com/crit/pkg", Version: "v1.0.0", Direct: true, RiskScore: 90, RiskLevel: scorer.RiskCritical},
-			{Module: "github.com/high/pkg", Version: "v1.0.0", Direct: true, RiskScore: 60, RiskLevel: scorer.RiskHigh},
-		},
-		CriticalRiskCount: 1,
-		HighRiskCount:     1,
-	}
-
-	var buf bytes.Buffer
-	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
-		t.Fatalf("WriteJSON() failed: %v", err)
-	}
-
-	// Snapshot: the raw JSON must contain the new field key.
-	if !bytes.Contains(buf.Bytes(), []byte(`"critical_risk_count"`)) {
-		t.Errorf("JSON output missing critical_risk_count key, got:\n%s", buf.String())
-	}
-
-	var report JSONReport
-	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if report.Summary.CriticalRiskCount != 1 {
-		t.Errorf("Summary.CriticalRiskCount = %d, want 1", report.Summary.CriticalRiskCount)
-	}
-	if report.Summary.HighRiskCount != 1 {
-		t.Errorf("Summary.HighRiskCount = %d, want 1 (must not be conflated with critical)", report.Summary.HighRiskCount)
-	}
-}
+// TestWriteJSON_CriticalRiskCount removed: the per-level risk counts left the summary in Grading v2 (see json_grade_test.go).
 
 // TestWriteJSON_Reachability verifies that each reachability tier (called,
 // imported, required) is preserved in JSONVuln, and that empty Reachability
@@ -790,5 +741,309 @@ func TestWriteJSON_TimeBombReachability(t *testing.T) {
 	}
 	if v, present := rawArchived["reachability"]; present {
 		t.Errorf("archived time_bomb reachability key must be absent, got %v", v)
+	}
+}
+
+// TestWriteJSON_InBuildAndPlatforms verifies that in_build is emitted for both
+// true and false, omitted for nil, and that platforms is emitted when set.
+func TestWriteJSON_InBuildAndPlatforms(t *testing.T) {
+	trueVal, falseVal := true, false
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/a/outside", Version: "v1.0.0", Depth: 1, InBuild: &falseVal},
+		testutil.DepSpec{Path: "github.com/b/built", Version: "v1.0.0", Depth: 1, InBuild: &trueVal},
+		testutil.DepSpec{Path: "github.com/c/unknown", Version: "v1.0.0", Depth: 1},
+	)
+	ps := &scorer.ProjectScore{
+		OverallScore: 10,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{
+			{Module: "github.com/a/outside", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow, InBuild: &falseVal},
+			{Module: "github.com/b/built", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow, InBuild: &trueVal, Platforms: []string{"windows"}},
+			{Module: "github.com/c/unknown", Version: "v1.0.0", RiskScore: 10, RiskLevel: scorer.RiskLow},
+		},
+		LowRiskCount: 3,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	// Decode into maps to check key presence, not just value.
+	var raw struct {
+		Deps []map[string]interface{} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to unmarshal JSON: %v", err)
+	}
+	byModule := map[string]map[string]interface{}{}
+	for _, d := range raw.Deps {
+		byModule[d["module"].(string)] = d
+	}
+
+	if v, ok := byModule["github.com/a/outside"]["in_build"]; !ok || v != false {
+		t.Errorf("outside: in_build = %v (present=%v), want false emitted", v, ok)
+	}
+	if _, ok := byModule["github.com/a/outside"]["platforms"]; ok {
+		t.Errorf("outside: platforms present, want omitted when empty")
+	}
+	if v, ok := byModule["github.com/b/built"]["in_build"]; !ok || v != true {
+		t.Errorf("built: in_build = %v (present=%v), want true", v, ok)
+	}
+	if p, _ := byModule["github.com/b/built"]["platforms"].([]interface{}); len(p) != 1 || p[0] != "windows" {
+		t.Errorf("built: platforms = %v, want [windows]", byModule["github.com/b/built"]["platforms"])
+	}
+	for _, key := range []string{"in_build", "platforms"} {
+		if _, ok := byModule["github.com/c/unknown"][key]; ok {
+			t.Errorf("unknown: %s present for nil, want omitted", key)
+		}
+	}
+}
+
+// TestWriteJSON_HeadlineTiedWith removed: the headline object no longer exists in Grading v2 (see json_grade_test.go).
+
+// TestWriteJSON_Notes verifies that notes are emitted next to warnings and the
+// key is omitted when there are none.
+func TestWriteJSON_Notes(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
+	)
+	dep := &scorer.DependencyScore{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 10, RiskLevel: scorer.RiskLow}
+
+	decode := func(t *testing.T, ps *scorer.ProjectScore) map[string]json.RawMessage {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+			t.Fatalf("WriteJSON() failed: %v", err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+			t.Fatalf("failed to unmarshal JSON: %v", err)
+		}
+		return raw
+	}
+
+	t.Run("emitted", func(t *testing.T) {
+		raw := decode(t, &scorer.ProjectScore{
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{dep},
+			Warnings:     []string{"a warning"},
+			Notes:        []string{"a note"},
+		})
+		var notes, warnings []string
+		if err := json.Unmarshal(raw["notes"], &notes); err != nil || len(notes) != 1 || notes[0] != "a note" {
+			t.Errorf("notes = %s, want [\"a note\"]", raw["notes"])
+		}
+		if err := json.Unmarshal(raw["warnings"], &warnings); err != nil || len(warnings) != 1 || warnings[0] != "a warning" {
+			t.Errorf("warnings = %s, want [\"a warning\"]", raw["warnings"])
+		}
+	})
+
+	t.Run("omitted when empty", func(t *testing.T) {
+		raw := decode(t, &scorer.ProjectScore{
+			OverallLevel: scorer.RiskLow,
+			Dependencies: []*scorer.DependencyScore{dep},
+		})
+		if _, ok := raw["notes"]; ok {
+			t.Errorf("notes present with none set: %s", raw["notes"])
+		}
+	})
+}
+
+// TestWriteJSON_SeverityAliasAndUnscored verifies severity_alias is emitted
+// when set, omitted when empty, and that "unscored" passes through unchanged.
+func TestWriteJSON_SeverityAliasAndUnscored(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{
+		Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0,
+	})
+	ps := &scorer.ProjectScore{
+		OverallScore: 30,
+		OverallLevel: scorer.RiskMedium,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true,
+			RiskScore: 30, RiskLevel: scorer.RiskMedium,
+			Vulns: []scanner.Vulnerability{
+				{ID: "GO-2026-0001", Severity: "CRITICAL", SeveritySource: "osv", SeverityAlias: "GHSA-aaaa-bbbb-cccc"},
+				{ID: "GO-2026-0002", Severity: "UNKNOWN", SeveritySource: "unscored"},
+			},
+		}},
+		TotalVulns: 2,
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.21"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+	var raw struct {
+		Deps []struct {
+			Vulns []map[string]interface{} `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	vulns := raw.Deps[0].Vulns
+	if vulns[0]["severity_alias"] != "GHSA-aaaa-bbbb-cccc" {
+		t.Errorf("severity_alias = %v, want GHSA-aaaa-bbbb-cccc", vulns[0]["severity_alias"])
+	}
+	if _, present := vulns[1]["severity_alias"]; present {
+		t.Error("empty severity_alias must be omitted")
+	}
+	if vulns[1]["severity_source"] != "unscored" {
+		t.Errorf("severity_source = %v, want unscored", vulns[1]["severity_source"])
+	}
+}
+
+// TestWriteJSON_CallTrace verifies call_trace and called_symbols are emitted
+// for a called finding with the project frame's position, are absent for an
+// imported one, and that call_path serializes exactly as before.
+func TestWriteJSON_CallTrace(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "golang.org/x/crypto", Version: "v0.48.0", Direct: true})
+
+	called := issue134Vuln()
+	imported := scanner.Vulnerability{ID: "GO-2026-0001", Severity: "HIGH", Reachability: "imported"}
+	ps := &scorer.ProjectScore{
+		OverallScore: 80,
+		OverallLevel: scorer.RiskCritical,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+			RiskScore: 80, RiskLevel: scorer.RiskCritical,
+			Vulns: []scanner.Vulnerability{called, imported},
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var raw struct {
+		Deps []struct {
+			Vulns []json.RawMessage `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Deps) != 1 || len(raw.Deps[0].Vulns) != 2 {
+		t.Fatalf("want 1 dep with 2 vulns, got %+v", raw.Deps)
+	}
+	// The report is indented; compact each entry so the byte assertions below
+	// pin the field order and values, not the whitespace.
+	compact := func(m json.RawMessage) string {
+		var b bytes.Buffer
+		if err := json.Compact(&b, m); err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		return b.String()
+	}
+	calledJSON, importedJSON := compact(raw.Deps[0].Vulns[0]), compact(raw.Deps[0].Vulns[1])
+
+	for _, want := range []string{
+		`"call_path":["example.com/u1repro.main","golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+		`"call_trace":[{"name":"example.com/u1repro.main","module":"example.com/u1repro","file":"main.go","line":13,"column":12,"project":true},`,
+		`"called_symbols":["golang.org/x/crypto/ssh/agent.keyring.Add"]`,
+	} {
+		if !strings.Contains(calledJSON, want) {
+			t.Errorf("called vuln JSON missing %s:\n%s", want, calledJSON)
+		}
+	}
+	// The dependency frame keeps its module-relative position and version.
+	if want := `{"name":"golang.org/x/crypto/ssh/agent.keyring.Add","module":"golang.org/x/crypto","version":"v0.48.0","file":"ssh/agent/keyring.go","line":149,"column":19}`; !strings.Contains(calledJSON, want) {
+		t.Errorf("called vuln JSON missing dependency frame %s:\n%s", want, calledJSON)
+	}
+
+	for _, key := range []string{`"call_trace"`, `"called_symbols"`, `"call_path"`} {
+		if strings.Contains(importedJSON, key) {
+			t.Errorf("imported vuln JSON must not contain %s:\n%s", key, importedJSON)
+		}
+	}
+}
+
+// TestWriteJSON_StdlibVulnerabilities verifies the top-level
+// stdlib_vulnerabilities list: the advisories in the given order, call_trace on
+// the called one, no severity_scored, and no change to the summary counts.
+func TestWriteJSON_StdlibVulnerabilities(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/dep", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{
+		OverallScore: 10,
+		OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "example.com/dep", Version: "v1.0.0", Direct: true,
+			RiskScore: 10, RiskLevel: scorer.RiskLow,
+		}},
+	}
+
+	stdlib := stdlibTestVulns()
+	// An UNKNOWN severity is what the scorer would promote for a dependency;
+	// for stdlib the scored tier must stay absent regardless.
+	stdlib[1].Severity = "UNKNOWN"
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26", StdlibVulns: stdlib}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+
+	var raw struct {
+		Stdlib  []json.RawMessage `json:"stdlib_vulnerabilities"`
+		Summary struct {
+			TotalVulns int `json:"total_vulns"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Stdlib) != 2 {
+		t.Fatalf("want 2 stdlib vulns, got %d:\n%s", len(raw.Stdlib), buf.String())
+	}
+	if raw.Summary.TotalVulns != 0 {
+		t.Errorf("summary.total_vulns = %d, want 0: stdlib must not count", raw.Summary.TotalVulns)
+	}
+
+	var ids []string
+	for _, m := range raw.Stdlib {
+		var v struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(m, &v); err != nil {
+			t.Fatalf("unmarshal vuln: %v", err)
+		}
+		ids = append(ids, v.ID)
+		if strings.Contains(string(m), "severity_scored") {
+			t.Errorf("stdlib vuln %s must not carry severity_scored:\n%s", v.ID, m)
+		}
+	}
+	if strings.Join(ids, ",") != "GO-2026-4001,GO-2026-4002" {
+		t.Errorf("stdlib ids = %v, want the given order", ids)
+	}
+	for _, want := range []string{`"call_trace"`, `"called_symbols"`, `"project": true`} {
+		if !strings.Contains(string(raw.Stdlib[0]), want) {
+			t.Errorf("called stdlib vuln missing %s:\n%s", want, raw.Stdlib[0])
+		}
+	}
+	if strings.Contains(string(raw.Stdlib[1]), "call_trace") {
+		t.Errorf("imported stdlib vuln must not carry call_trace:\n%s", raw.Stdlib[1])
+	}
+}
+
+// TestWriteJSON_NoStdlibVulnerabilities verifies the key is absent, not null or
+// empty, when there are no stdlib vulnerabilities.
+func TestWriteJSON_NoStdlibVulnerabilities(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/dep", Version: "v1.0.0", Direct: true})
+	ps := &scorer.ProjectScore{OverallScore: 0, OverallLevel: scorer.RiskLow}
+
+	for name, opts := range map[string]JSONOptions{
+		"nil":   {GoVersion: "1.26"},
+		"empty": {GoVersion: "1.26", StdlibVulns: []scanner.Vulnerability{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteJSON(graph, ps, opts, &buf); err != nil {
+				t.Fatalf("WriteJSON() failed: %v", err)
+			}
+			if strings.Contains(buf.String(), "stdlib_vulnerabilities") {
+				t.Errorf("stdlib_vulnerabilities must be absent:\n%s", buf.String())
+			}
+		})
 	}
 }

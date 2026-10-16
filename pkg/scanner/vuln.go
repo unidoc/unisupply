@@ -3,9 +3,14 @@ package scanner
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"os"
+	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -58,21 +63,61 @@ type Vulnerability struct {
 	// See the type-level doc comment for full semantics and caveats.
 	Reachability string `json:"reachability,omitempty"`
 
+	// CallPath is one example of how the project reaches the vulnerable
+	// function, outermost frame first, e.g. "example.com/app/cmd/app.main",
+	// "github.com/go-git/go-git/v5.Repository.Push", "golang.org/x/crypto/ssh.NewClientConn".
+	// It is condensed to the entry frame, the frame where each run of same-package
+	// frames hands over to the next package, and the vulnerable function itself
+	// (at most 8 entries), so consecutive entries are not necessarily direct
+	// callers. A path longer than that is cut in the middle and an entry of
+	// "..." marks the cut. Set only when Reachability is "called". It is static-analysis
+	// evidence that the code is on an execution path, not proof that the
+	// vulnerability is exploitable in the application's deployment.
+	CallPath []string `json:"call_path,omitempty"`
+
+	// CallTrace is CallPath with a source position per entry: same selection,
+	// same order, len(CallTrace) == len(CallPath). CallTrace[i].Name equals
+	// CallPath[i] except for the cut marker, whose entry is CallFrame{Elided: true}.
+	// Set only when Reachability is "called". The position of a non-sink frame is
+	// the call that frame makes, not the frame's own declaration; the position of
+	// the last entry (the vulnerable symbol) is its declaration. Because CallPath is
+	// condensed, consecutive entries are not necessarily direct callers, and a
+	// kept frame's position may point at a call to a dropped frame. The path need
+	// not start at main. Like CallPath it is static-analysis evidence that the
+	// code is on an execution path, not proof that the vulnerability is exploitable.
+	CallTrace []CallFrame `json:"call_trace,omitempty"`
+
+	// CalledSymbols lists the vulnerable symbols govulncheck found called for this
+	// advisory in this module: the innermost frame of every called finding,
+	// rendered like a CallPath entry, sorted and without duplicates. govulncheck
+	// emits one finding per symbol but CallPath keeps only one path, so this is
+	// where the other symbols survive. It is capped at maxCalledSymbols entries;
+	// the cut keeps the first maxCalledSymbols in sorted order. Set only when
+	// Reachability is "called".
+	CalledSymbols []string `json:"called_symbols,omitempty"`
+
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
 
 	// EnrichmentAttempted is true when the enricher ran for this vuln (i.e.
 	// the original severity was UNKNOWN and the ID passed validation).
 	EnrichmentAttempted bool `json:"enrichment_attempted,omitempty"`
 
-	// EnrichmentFailed is true when enrichment was attempted but all tiers
-	// (OSV, NVD, and GitHub Advisory) failed. Distinguishes "no severity data"
-	// from "severity data unavailable due to API failure".
+	// EnrichmentFailed is true when enrichment was attempted, no tier produced
+	// a severity, and at least one lookup (OSV, NVD or GitHub) failed
+	// (SeveritySource "none"). It is false for an "unscored" advisory: every
+	// source consulted answered, but none has published a severity. Distinguishes "no severity data" from "severity data
+	// unavailable due to API failure".
 	EnrichmentFailed bool `json:"enrichment_failed,omitempty"`
 
 	// SeveritySource records which API resolved the severity: "osv", "nvd",
-	// "ghsa", or "none" when all tiers failed. Empty when enrichment was not
-	// attempted (severity was known from govulncheck).
+	// "ghsa"; "none" when a lookup failed; or "unscored" when every source
+	// consulted (OSV, NVD, GitHub) answered but none has published a severity. Empty when
+	// enrichment was not attempted (severity was known from govulncheck).
 	SeveritySource string `json:"severity_source,omitempty"`
+
+	// SeverityAlias is the alias ID (GHSA-* or CVE-*) whose OSV record
+	// supplied the severity, when it did not come from the advisory's own ID.
+	SeverityAlias string `json:"severity_alias,omitempty"`
 
 	// EnrichmentErrors holds a brief failure summary when all enrichment tiers
 	// failed (EnrichmentFailed==true). At most one entry: the consolidated
@@ -107,6 +152,10 @@ type Vulnerability struct {
 	// CVE alias to look up — i.e. InKEV is a real answer, not a default.
 	KEVChecked bool `json:"kev_checked,omitempty"`
 
+	// KEVCatalogStaleSince is set when the KEV catalog could not be refreshed
+	// and this vuln was checked against the older copy fetched at that time.
+	KEVCatalogStaleSince *time.Time `json:"kev_catalog_stale_since,omitempty"`
+
 	// KEVDateAdded is the date CISA added the CVE to the catalog.
 	KEVDateAdded string `json:"kev_date_added,omitempty"`
 
@@ -117,6 +166,10 @@ type Vulnerability struct {
 	// PublishedAt is the date the vulnerability was first disclosed, from OSV.
 	PublishedAt *time.Time `json:"published_at,omitempty"`
 
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod ("1.26"): the Go release the fix needs. Empty when there is
+	// no fix or it could not be read. The fix may need a newer Go than the scanned module supports.
+	FixRequiresGo string `json:"fix_requires_go,omitempty"`
+
 	// FixPublishedAt is the date a fix became available, derived from OSV's
 	// published timestamp for the fixed version event.
 	FixPublishedAt *time.Time `json:"fix_published_at,omitempty"`
@@ -124,6 +177,62 @@ type Vulnerability struct {
 	// DaysUnpatched is the number of days since a fix was available.
 	// Zero when no fix exists or the fix date is unknown.
 	DaysUnpatched int `json:"days_unpatched,omitempty"`
+
+	// FixReleasedAt is when the first fixed version was RELEASED: the later of the advisory's publication
+	// (FixPublishedAt) and the time the Go module proxy gives that version. FixPublishedAt alone is the
+	// advisory's date, which can be days before the fixed version exists. Nil when there is no fix or no
+	// date could be found; FixDateSource then says why it is unknown ("" with no fix).
+	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
+
+	// FixDateSource records where FixReleasedAt came from: "module_proxy" (the proxy's time for the first
+	// fixed version, which was later than or equal to the advisory's date), "advisory" (the advisory's
+	// publication date was the later one, or the proxy had no time for that version), or "" (unknown).
+	FixDateSource string `json:"fix_date_source,omitempty"`
+
+	// AffectedPackages lists the import paths within the module that the advisory names (OSV
+	// affected[].ecosystem_specific.imports[].path), so a report can say "only if you import X". Empty when
+	// the advisory names none (it affects the whole module).
+	AffectedPackages []string `json:"affected_packages,omitempty"`
+
+	// Condition says in one short sentence what the project must do to reach a called vulnerability, when
+	// that can be read from the call path ("reached through gin.Context.Render"). Empty when there is no
+	// path or no condition can be named. It is evidence, not a promise of exploitability.
+	Condition string `json:"condition,omitempty"`
+}
+
+// CallFrame is one entry of Vulnerability.CallTrace, index-aligned with
+// Vulnerability.CallPath.
+//
+// Name equals CallPath[i] except for the cut marker, which is
+// CallFrame{Elided: true} with every other field empty. The position of a
+// non-sink frame is the call that frame makes; the position of the sink (the
+// last entry) is the vulnerable function's declaration. Consecutive frames are
+// not necessarily direct callers, because the trace is condensed. A frame is
+// evidence that the code is reachable, not proof that it is exploitable.
+type CallFrame struct {
+	// Name is the same string as CallPath[i]: package, then Receiver.Function.
+	Name string `json:"name,omitempty"`
+
+	// Module and Version identify the module that owns the frame. Version is
+	// empty for the main module and for replaced local paths.
+	Module  string `json:"module,omitempty"`
+	Version string `json:"version,omitempty"`
+
+	// File is relative to the root of that frame's own module (the standard
+	// library's is relative to GOROOT), so it is meaningless without Module and
+	// Version. It is dropped when govulncheck reports an absolute path or one
+	// that leaves the module ("../..."); Line and Column are kept regardless.
+	File   string `json:"file,omitempty"`
+	Line   int    `json:"line,omitempty"`
+	Column int    `json:"column,omitempty"`
+
+	// Project is true when the frame's package is one of the scan roots in
+	// govulncheck's SBOM message, that is, the project's own code. It is false on
+	// every frame when govulncheck emitted no SBOM message (older versions).
+	Project bool `json:"project,omitempty"`
+
+	// Elided marks the slot where condensing cut the middle of a long path.
+	Elided bool `json:"elided,omitempty"`
 }
 
 // govulncheck JSON output is a stream of objects, each with one top-level key.
@@ -164,6 +273,9 @@ type traceEntry struct {
 	Version  string `json:"version,omitempty"`
 	Package  string `json:"package,omitempty"`
 	Function string `json:"function,omitempty"`
+	// Receiver is the method receiver type ("*Repository", "Result"), empty for
+	// a plain function. govulncheck splits a method into Function and Receiver.
+	Receiver string `json:"receiver,omitempty"`
 	Position *struct {
 		Filename string `json:"filename"`
 		Line     int    `json:"line"`
@@ -223,6 +335,243 @@ func classifyReachability(trace []traceEntry) string {
 	return "required"
 }
 
+// maxCallPathFrames bounds Vulnerability.CallPath.
+const maxCallPathFrames = 8
+
+// maxCalledSymbols bounds Vulnerability.CalledSymbols.
+const maxCalledSymbols = 20
+
+// callPathElision marks, in a path that was cut to maxCallPathFrames, where the
+// middle was dropped: its neighbours are not direct callers.
+const callPathElision = "..."
+
+// preferPath reports whether candidate should replace current as a
+// vulnerability's call path: the shorter path wins (the most direct route to
+// the vulnerable code), and ties are broken on the joined string. govulncheck
+// emits one called finding per vulnerable symbol in no stable order, so the
+// choice must depend on the paths and not on arrival order.
+func preferPath(candidate, current []string) bool {
+	switch {
+	case len(candidate) == 0:
+		return false
+	case len(current) == 0:
+		return true
+	case len(candidate) != len(current):
+		return len(candidate) < len(current)
+	}
+	return strings.Join(candidate, "\x00") < strings.Join(current, "\x00")
+}
+
+// preferCandidate is preferPath over a (path, trace) pair. Two different
+// findings can condense to the same path string yet carry different source
+// positions, so when the paths are identical the frames' (File, Line, Column)
+// break the tie. That keeps the selected trace independent of arrival order
+// without ever changing which path is selected.
+func preferCandidate(candPath []string, candFrames []CallFrame, curPath []string, curFrames []CallFrame) bool {
+	if preferPath(candPath, curPath) {
+		return true
+	}
+	if preferPath(curPath, candPath) {
+		return false
+	}
+	return compareFramePositions(candFrames, curFrames) < 0
+}
+
+// compareFramePositions orders two frame lists frame by frame on (File, Line,
+// Column). Lists of different length compare by the common prefix first; the
+// caller only uses it for lists whose paths are equal, so the lengths match.
+func compareFramePositions(a, b []CallFrame) int {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if c := cmp.Compare(a[i].File, b[i].File); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a[i].Line, b[i].Line); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a[i].Column, b[i].Column); c != 0 {
+			return c
+		}
+	}
+	return cmp.Compare(len(a), len(b))
+}
+
+// formatsMessage reports whether a called finding's trace only exists to format
+// an error or a string: the sink or an intermediate frame is a method named
+// Error or String, or the path passes through package fmt or log. Such a path
+// reaches the vulnerable function because a value is being printed, which is
+// weaker evidence than a path that calls the vulnerable function on purpose.
+// The check reads the whole trace, not the condensed path, which drops frames.
+func formatsMessage(trace []traceEntry) bool {
+	for _, t := range trace {
+		if t.Package == "fmt" || t.Package == "log" {
+			return true
+		}
+		name, _, _ := strings.Cut(t.Function, "$")
+		if t.Receiver != "" && (name == "Error" || name == "String") {
+			return true
+		}
+	}
+	return false
+}
+
+// preferCalled reports whether candidate (a called finding's trace, condensed
+// to candPath and candFrames) should replace the current call path. A path that
+// does not only format a message beats one that does; among paths of the same
+// kind preferCandidate decides: shorter first, then the deterministic tiebreak.
+// When every path only formats a message the preferCandidate choice stands
+// unchanged. The result depends only on the paths, not on arrival order.
+func preferCalled(candTrace []traceEntry, candPath []string, candFrames []CallFrame, curFormats bool, curPath []string, curFrames []CallFrame) bool {
+	if len(candPath) == 0 {
+		return false
+	}
+	if len(curPath) == 0 {
+		return true
+	}
+	if candFormats := formatsMessage(candTrace); candFormats != curFormats {
+		return !candFormats
+	}
+	return preferCandidate(candPath, candFrames, curPath, curFrames)
+}
+
+// callCondition names, in one short sentence, what the project must do to reach
+// a called finding, read only from the chosen trace (innermost frame first):
+// the first frame, after the first project frame, that belongs neither to the
+// project nor to the Go standard library, rendered package.Receiver.Function.
+// Standard-library frames are skipped because a path that goes through a
+// callback (main -> net/http.ServeMux.ServeHTTP -> the project's handler ->
+// the dependency) would otherwise be explained by the standard library's
+// dispatcher, which says nothing the project can act on. It returns "" when no
+// frame of the trace is a project frame (roots unknown, or the path starts
+// inside a dependency) or when no such frame follows one. It never says
+// anything about configuration.
+func callCondition(trace []traceEntry, roots map[string]bool) string {
+	sawProject := false
+	var firstStd *traceEntry
+	for i := len(trace) - 1; i >= 0; i-- { // outermost first
+		t := trace[i]
+		if t.Function == "" {
+			continue
+		}
+		if roots[t.Package] {
+			sawProject = true
+			continue
+		}
+		if !sawProject {
+			// The path starts inside a dependency: there is no project call to name.
+			return ""
+		}
+		if isStdlibFrame(t) {
+			// A standard-library frame that only forwards to a later dependency or
+			// project frame (a callback) does not explain the path; remember the
+			// first one in case nothing else follows.
+			if firstStd == nil {
+				c := t
+				firstStd = &c
+			}
+			continue
+		}
+		return "reached through " + frameName(t)
+	}
+	if firstStd != nil {
+		return "reached through " + frameName(*firstStd)
+	}
+	return ""
+}
+
+// isStdlibFrame reports whether a trace frame is in the Go standard library:
+// govulncheck names the module of those frames "stdlib" (also what the rest of
+// this file keys on).
+func isStdlibFrame(t traceEntry) bool {
+	return t.Module == "stdlib"
+}
+
+// frameName renders a trace frame the way govulncheck prints it: package, then
+// "Receiver.Function" for a method (a leading * trimmed from the receiver), with
+// a closure suffix ("$1") cut off the function name.
+func frameName(t traceEntry) string {
+	name, _, _ := strings.Cut(t.Function, "$")
+	if t.Receiver != "" {
+		name = strings.TrimPrefix(t.Receiver, "*") + "." + name
+	}
+	if t.Package != "" {
+		name = t.Package + "." + name
+	}
+	return name
+}
+
+// moduleRelativeFile returns filename when it is a path inside the frame's
+// module and "" otherwise. govulncheck makes positions relative to each frame's
+// module root; an absolute path or one that climbs out of the module (a cgo file
+// in the build cache, say) would leak the scanning machine's layout into a
+// report that gets shared, and means nothing to the reader.
+func moduleRelativeFile(filename string) string {
+	switch {
+	case filename == "", filename == "..":
+		return ""
+	case filepath.IsAbs(filename), path.IsAbs(filename):
+		return ""
+	case strings.HasPrefix(filename, "../"), strings.HasPrefix(filename, `..\`):
+		return ""
+	}
+	return filename
+}
+
+// newCallFrame builds the CallFrame for one trace frame. roots is the set of
+// scan-root package paths from govulncheck's SBOM message; a nil map marks no
+// frame as a project frame.
+func newCallFrame(t traceEntry, roots map[string]bool) CallFrame {
+	f := CallFrame{
+		Name:    frameName(t),
+		Module:  t.Module,
+		Version: t.Version,
+		Project: roots[t.Package],
+	}
+	if t.Position != nil {
+		f.File = moduleRelativeFile(t.Position.Filename)
+		f.Line = t.Position.Line
+		f.Column = t.Position.Column
+	}
+	return f
+}
+
+// condense condenses a govulncheck trace (innermost frame first) into an
+// outermost-first path of "package.Function" entries and a parallel list of
+// frames: the entry frame, the frame where each run of same-package frames
+// hands over to the next package, and the vulnerable function itself. Both come
+// from one walk, so len(frames) == len(path) and frames[i].Name == path[i]
+// (except the cut marker, whose frame is CallFrame{Elided: true}). It returns
+// nil, nil when the trace has no function frames.
+func condense(trace []traceEntry, roots map[string]bool) (path []string, frames []CallFrame) {
+	var fr []traceEntry
+	for i := len(trace) - 1; i >= 0; i-- { // outermost first
+		if trace[i].Function != "" {
+			fr = append(fr, trace[i])
+		}
+	}
+	for i, t := range fr {
+		last := i == len(fr)-1
+		if i == 0 || last || fr[i+1].Package != t.Package {
+			frame := newCallFrame(t, roots)
+			path = append(path, frame.Name)
+			frames = append(frames, frame)
+		}
+	}
+	if len(path) > maxCallPathFrames {
+		// Keep the entry point and the tail (the last frames lead to the symbol),
+		// and mark the cut.
+		keep := maxCallPathFrames - 2
+		path = append([]string{path[0], callPathElision}, path[len(path)-keep:]...)
+		frames = append([]CallFrame{frames[0], {Elided: true}}, frames[len(frames)-keep:]...)
+	}
+	return path, frames
+}
+
+// callPath returns the condensed call path of a trace without positions.
+func callPath(trace []traceEntry) []string {
+	path, _ := condense(trace, nil)
+	return path
+}
+
 // ScanVulns runs govulncheck on the project directory, then enriches any
 // UNKNOWN-severity vulnerabilities via OSV.dev and the GitHub Advisory API.
 // githubToken may be empty; enrichment proceeds unauthenticated in that case
@@ -238,6 +587,26 @@ func classifyReachability(trace []traceEntry) string {
 // failed scan as a clean one. The scorer excludes the 40% vulnerability weight
 // when this is false; see scorer.ScoreInput.VulnScanUnavailable.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
+	return ScanVulnsWithOptions(ctx, projectDir, VulnScanOptions{GitHubToken: githubToken})
+}
+
+// VulnScanOptions carries the credentials ScanVulnsWithOptions forwards to the
+// severity enrichment lookups.
+type VulnScanOptions struct {
+	// GitHubToken is sent as a Bearer token to api.github.com only.
+	GitHubToken string
+	// NVDAPIKey is sent as the apiKey header to services.nvd.nist.gov only.
+	NVDAPIKey string
+	// Info, when non-nil, is filled with the platform, govulncheck and
+	// vulnerability-database versions the scan ran with. Platform is set as
+	// soon as a scan starts; the rest come from govulncheck's config message
+	// and stay empty when the output has none.
+	Info *ScanInfo
+}
+
+// ScanVulnsWithOptions is ScanVulns with explicit credentials for the
+// enrichment lookups. It returns the same values as ScanVulns.
+func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanOptions) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
 		// govulncheck runs in-process and reaches vuln.go.dev through
 		// http.DefaultClient, so offline mode would refuse its requests and
@@ -251,7 +620,33 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 
 	var stderrBuf bytes.Buffer
 
+	// govulncheck's -C only moves package loading; it resolves the Go version
+	// and GOROOT for the standard library in this process's working directory.
+	// Resolve the project's own so the result does not depend on where
+	// unisupply was launched from.
+	projectGoVersion, projectGoRoot, projectErr := resolveGoEnv(ctx, projectDir)
+	if projectErr != nil {
+		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
+	}
+	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
+	if projectErr == nil {
+		if err := CheckToolchain(projectGoVersion); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	// A failure here only costs stdlib file positions, so it is not reported.
+	_, scannerGoRoot, scannerErr := resolveGoEnv(ctx, "")
+	parseOpts := gvcParseOptions{}
+	if projectErr == nil && scannerErr == nil {
+		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
+	}
+	if opts.Info != nil {
+		*opts.Info = ScanInfo{Platform: scanPlatform(), GovulncheckVersion: govulncheckVersion(readBuildInfo)}
+		parseOpts.info = opts.Info
+	}
+
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
+	cmd.Env = govulncheckEnv(os.Environ(), projectGoVersion)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderrBuf
 
@@ -275,6 +670,9 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 		} else if !strings.HasPrefix(msg, "govulncheck:") {
 			msg = "govulncheck: " + msg
 		}
+		if terr := toolchainErrorFrom(msg); terr != nil {
+			msg = terr.Error()
+		}
 		warnings = append(warnings, msg)
 	}
 
@@ -283,15 +681,18 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 		return nil, warnings, false, nil
 	}
 
-	results, err := parseGovulncheckJSON(&stdout)
+	results, err := parseGovulncheckJSONWithOptions(&stdout, parseOpts)
 	if err != nil {
 		return nil, append(warnings, err.Error()), false, nil
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
-	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: githubToken})
+	enricher := NewVulnEnricher(VulnEnricherOptions{GitHubToken: opts.GitHubToken, NVDAPIKey: opts.NVDAPIKey})
 	var enrichWarnings []string
-	for modPath, modVulns := range results {
+	// Sorted module order keeps the warning order, and the single-failure path
+	// in collapseSeverityLookupWarnings, stable across runs.
+	for _, modPath := range slices.Sorted(maps.Keys(results)) {
+		modVulns := results[modPath]
 		for i := range modVulns {
 			if modVulns[i].Severity != "UNKNOWN" && modVulns[i].Severity != "" {
 				continue
@@ -302,7 +703,11 @@ func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[s
 	}
 	warnings = append(warnings, collapseSeverityLookupWarnings(enrichWarnings)...)
 
-	warnings = append(warnings, enrichThreatIntel(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)...)
+	tiWarnings, kevStale := enrichThreatIntelStale(ctx, NewThreatIntelClient(ThreatIntelOptions{}), results)
+	warnings = append(warnings, tiWarnings...)
+	if opts.Info != nil && !kevStale.IsZero() {
+		opts.Info.KEVStaleSince = &kevStale
+	}
 
 	// A non-nil exitErr means govulncheck failed even though it emitted parseable
 	// output, so the results are partial. Report the axis as unmeasured rather
@@ -330,6 +735,14 @@ func CVEAlias(v *Vulnerability) string {
 // has a CVE alias. Both lookups are best-effort: failures produce warnings,
 // never errors — the scan completes with the threat-intel fields absent.
 func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string) {
+	warnings, _ = enrichThreatIntelStale(ctx, ti, results)
+	return warnings
+}
+
+// enrichThreatIntelStale is enrichThreatIntel that also returns the date of the
+// KEV catalog copy used when the catalog could not be refreshed (zero when the
+// catalog was fresh or unavailable).
+func enrichThreatIntelStale(ctx context.Context, ti *ThreatIntelClient, results map[string][]Vulnerability) (warnings []string, kevStaleSince time.Time) {
 	// Collect the distinct CVE IDs across all vulns.
 	cveSet := make(map[string]bool)
 	for _, modVulns := range results {
@@ -340,7 +753,7 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 		}
 	}
 	if len(cveSet) == 0 {
-		return nil
+		return nil, time.Time{}
 	}
 	cveIDs := make([]string, 0, len(cveSet))
 	for cve := range cveSet {
@@ -354,7 +767,12 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 			"EPSS lookup incomplete; exploitation probability may be missing for some CVEs: %v", epssErr))
 	}
 
-	kev, kevErr := ti.LoadKEV(ctx)
+	kevCat, kevErr := ti.LoadKEVCatalog(ctx)
+	kev := kevCat.Entries
+	if kevCat.Stale {
+		kevStaleSince = kevCat.StaleSince
+		warnings = append(warnings, kevStaleWarning(kevCat.StaleSince, ti.now()))
+	}
 	if kevErr != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"CISA KEV catalog unavailable; known-exploited status unchecked: %v", kevErr))
@@ -377,6 +795,10 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 			// KEVChecked false so consumers see "not checked", not "not listed".
 			if kev != nil {
 				v.KEVChecked = true
+				if kevCat.Stale {
+					since := kevCat.StaleSince
+					v.KEVCatalogStaleSince = &since
+				}
 				if entry, ok := kev[cve]; ok {
 					v.InKEV = true
 					v.KEVDateAdded = entry.DateAdded
@@ -387,19 +809,47 @@ func enrichThreatIntel(ctx context.Context, ti *ThreatIntelClient, results map[s
 		results[modPath] = modVulns
 	}
 
-	return warnings
+	return warnings, kevStaleSince
 }
 
+// gvcParseOptions carries the toolchain locations needed to normalise
+// standard-library frame filenames. The zero value disables the rebase.
+type gvcParseOptions struct {
+	// scannerGOROOT is the GOROOT of the process running govulncheck.
+	scannerGOROOT string
+	// projectGOROOT is the GOROOT of the scanned project's toolchain.
+	projectGOROOT string
+	// info, when non-nil, receives govulncheck's config message.
+	info *ScanInfo
+}
+
+// parseGovulncheckJSON parses govulncheck's JSON stream without any standard
+// library filename rebasing.
 func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error) {
+	return parseGovulncheckJSONWithOptions(buf, gvcParseOptions{})
+}
+
+// parseGovulncheckJSONWithOptions parses govulncheck's JSON stream. Filenames
+// of standard-library trace frames are rebased from opts.scannerGOROOT onto
+// opts.projectGOROOT before the call path is condensed; see rebaseStdlibFile.
+func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (map[string][]Vulnerability, error) {
 	// Collect OSVs and findings.
 	osvs := make(map[string]*gvcOSV) // id -> osv
 	var findings []gvcFinding
+	// roots is the set of scan-root package paths from govulncheck's SBOM
+	// message. It stays nil when the stream has none (older govulncheck), which
+	// leaves every CallFrame.Project false rather than guessing.
+	var roots map[string]bool
 
 	dec := json.NewDecoder(buf)
 	for dec.More() {
 		var raw map[string]json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			continue
+		}
+
+		if cfg, ok := raw["config"]; ok && opts.info != nil {
+			opts.info.apply(cfg)
 		}
 
 		if osvData, ok := raw["osv"]; ok {
@@ -409,9 +859,31 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			}
 		}
 
+		// The message key is literally "SBOM". Findings are processed after the
+		// whole stream is read, so its position in the stream does not matter.
+		if sbomData, ok := raw["SBOM"]; ok {
+			var sbom struct {
+				Roots []string `json:"roots"`
+			}
+			if err := json.Unmarshal(sbomData, &sbom); err == nil {
+				for _, r := range sbom.Roots {
+					if roots == nil {
+						roots = make(map[string]bool, len(sbom.Roots))
+					}
+					roots[r] = true
+				}
+			}
+		}
+
 		if findingData, ok := raw["finding"]; ok {
 			var f gvcFinding
 			if err := json.Unmarshal(findingData, &f); err == nil && f.OSV != "" {
+				for i := range f.Trace {
+					t := &f.Trace[i]
+					if t.Module == "stdlib" && t.Position != nil {
+						t.Position.Filename = rebaseStdlibFile(t.Position.Filename, opts.scannerGOROOT, opts.projectGOROOT)
+					}
+				}
 				findings = append(findings, f)
 			}
 		}
@@ -423,6 +895,14 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 	// allowing dedup to upgrade reachability when a higher-rank duplicate appears
 	// (called > imported > required — keep the most severe signal).
 	seenIdx := make(map[string]int)
+	// calledSinks collects, per "module@osvID", the vulnerable symbol of every
+	// called finding. It is sorted, deduplicated and capped once after the loop.
+	calledSinks := make(map[string][]string)
+	// chosenTrace is, per "module@osvID", the raw trace of the finding whose
+	// path was kept as CallPath, and chosenFormats whether that trace only
+	// formats a message. Condition is read from the trace after the loop.
+	chosenTrace := make(map[string][]traceEntry)
+	chosenFormats := make(map[string]bool)
 
 	for _, f := range findings {
 		osv, ok := osvs[f.OSV]
@@ -465,6 +945,14 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			if reachabilityRank[reach] > reachabilityRank[results[modPath][idx].Reachability] {
 				results[modPath][idx].Reachability = reach
 			}
+			if reach == "called" {
+				cur := &results[modPath][idx]
+				if p, frames := condense(f.Trace, roots); preferCalled(f.Trace, p, frames, chosenFormats[key], cur.CallPath, cur.CallTrace) {
+					cur.CallPath, cur.CallTrace = p, frames
+					chosenTrace[key], chosenFormats[key] = f.Trace, formatsMessage(f.Trace)
+				}
+				calledSinks[key] = appendCalledSink(calledSinks[key], f.Trace)
+			}
 			continue
 		}
 
@@ -482,11 +970,24 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 			FixedVersion: fixedVersion,
 			Reachability: reach,
 		}
+		if reach == "called" {
+			vuln.CallPath, vuln.CallTrace = condense(f.Trace, roots)
+			chosenTrace[key], chosenFormats[key] = f.Trace, formatsMessage(f.Trace)
+			calledSinks[key] = appendCalledSink(calledSinks[key], f.Trace)
+		}
 
 		// Capture the publication timestamp from the govulncheck OSV record.
 		if osv.Published != "" {
 			if t, err := time.Parse(time.RFC3339, osv.Published); err == nil {
 				vuln.PublishedAt = &t
+				// The advisory date is the fallback fix date for EVERY
+				// finding with a fix, whether or not severity enrichment
+				// runs; ResolveFixDates takes the later of it and the
+				// proxy's time for the fixed version.
+				if fixedVersion != "" {
+					fp := t
+					vuln.FixPublishedAt = &fp
+				}
 			}
 		}
 
@@ -494,7 +995,42 @@ func parseGovulncheckJSON(buf *bytes.Buffer) (map[string][]Vulnerability, error)
 		results[modPath] = append(results[modPath], vuln)
 	}
 
+	for modPath, vulns := range results {
+		for i := range vulns {
+			key := modPath + "@" + vulns[i].ID
+			vulns[i].CalledSymbols = capCalledSymbols(calledSinks[key])
+			if len(vulns[i].CallPath) > 0 {
+				vulns[i].Condition = callCondition(chosenTrace[key], roots)
+			}
+		}
+	}
+
 	return results, nil
+}
+
+// appendCalledSink adds the vulnerable symbol of a called finding's trace (its
+// innermost frame) to sinks. A frame without a function name has no symbol to
+// report, so it adds nothing.
+func appendCalledSink(sinks []string, trace []traceEntry) []string {
+	if len(trace) == 0 || trace[0].Function == "" {
+		return sinks
+	}
+	return append(sinks, frameName(trace[0]))
+}
+
+// capCalledSymbols sorts and deduplicates sinks and keeps the first
+// maxCalledSymbols. Sorting before the cut makes the kept set independent of
+// the order govulncheck emitted the findings in. It returns nil for no sinks.
+func capCalledSymbols(sinks []string) []string {
+	if len(sinks) == 0 {
+		return nil
+	}
+	slices.Sort(sinks)
+	sinks = slices.Compact(sinks)
+	if len(sinks) > maxCalledSymbols {
+		sinks = sinks[:maxCalledSymbols]
+	}
+	return sinks
 }
 
 func severityFromOSV(osv *gvcOSV, modPath string) string {
@@ -529,74 +1065,96 @@ func fixedVersionFromOSV(osv *gvcOSV, modPath string) string {
 // rewords all three at once.
 const severityLookupFailedPrefix = "severity lookup failed (OSV/NVD/GitHub) for "
 
+// severityRateLimitedPrefix opens the per-advisory message for a lookup that
+// failed because NVD rate limited it (or the pacing budget ran out). It has
+// its own prefix so the collapsed summary can tell the user to set NVD_API_KEY.
+const severityRateLimitedPrefix = "severity could not be looked up (NVD rate limit: set NVD_API_KEY) for "
+
+// severityUnscoredPrefix opens the enricher's per-advisory "no severity
+// published yet" message. It is not a failure: every source consulted answered
+// and none carried a severity. Kept next to severityLookupFailedPrefix for the same
+// reason: emitter, matcher and collapsed summary share one constant.
+const severityUnscoredPrefix = "severity not yet published (OSV/NVD/GitHub) for "
+
 // maxListedFailedIDs caps how many advisory IDs the aggregate warning names
 // before eliding the rest.
 const maxListedFailedIDs = 5
 
 // collapseSeverityLookupWarnings replaces a run of per-advisory
-// "severity lookup failed" warnings with a single line naming the count and
-// the first few IDs. Every other warning passes through untouched, in order.
+// "severity lookup failed" warnings, and separately a run of per-advisory
+// "severity not yet published" warnings, with one summary line each naming the
+// count and the first few IDs. Every other warning passes through untouched,
+// in order.
 //
 // A scan of a vulnerability-heavy module produced 21 near-identical lines,
 // which buried the warnings that were not repeats. The information is not
-// lost: each affected vulnerability keeps its own EnrichmentErrors entry,
-// which is what the JSON report exposes.
+// lost: each affected vulnerability keeps its own EnrichmentErrors entry
+// (failures) or SeveritySource (unscored), which is what the JSON report
+// exposes.
 func collapseSeverityLookupWarnings(warnings []string) []string {
+	out := collapseWarningGroup(warnings, severityRateLimitedPrefix, "advisories; severities remain UNKNOWN")
+	out = collapseWarningGroup(out, severityLookupFailedPrefix, "advisories; severities remain UNKNOWN")
+	return collapseWarningGroup(out, severityUnscoredPrefix, "advisories; not lookup failures, scored conservatively")
+}
+
+// collapseWarningGroup collapses the warnings that start with prefix into one
+// summary placed where the group started. The summary is
+// prefix + count + " " + tail + " (ids)".
+func collapseWarningGroup(warnings []string, prefix, tail string) []string {
 	var (
-		out       []string
-		failedIDs []string
-		seen      = make(map[string]struct{})
-		firstMsg  string
-		insertAt  = -1
+		out      []string
+		ids      []string
+		seen     = make(map[string]struct{})
+		firstMsg string
+		insertAt = -1
 	)
 
 	for _, w := range warnings {
-		if !strings.HasPrefix(w, severityLookupFailedPrefix) {
+		if !strings.HasPrefix(w, prefix) {
 			out = append(out, w)
 			continue
 		}
 		if insertAt < 0 {
 			// Hold the position of the first collapsed warning so the summary
 			// lands where the group started rather than at the end, and keep
-			// the message itself for the single-failure case below.
+			// the message itself for the single-warning case below.
 			insertAt = len(out)
 			firstMsg = w
 		}
-		id := strings.TrimPrefix(w, severityLookupFailedPrefix)
+		id := strings.TrimPrefix(w, prefix)
 		if i := strings.Index(id, ";"); i >= 0 {
 			id = id[:i]
 		}
 		// The same advisory can be reported under more than one module —
 		// parsing deduplicates by module@osvID, not globally — and the second
-		// enrichment hits the cached failure and re-emits the same warning.
+		// enrichment hits the cache and re-emits the same warning.
 		// Count and list each advisory once so repeats neither inflate the
-		// count nor consume the displayed slots. The order here is the
-		// caller's map-iteration order, so the list is sorted below before
-		// anything is truncated or displayed.
+		// count nor consume the displayed slots. The list is sorted below
+		// before anything is truncated or displayed.
 		if _, dup := seen[id]; dup {
 			continue
 		}
 		seen[id] = struct{}{}
-		failedIDs = append(failedIDs, id)
+		ids = append(ids, id)
 	}
 
-	switch len(failedIDs) {
+	switch len(ids) {
 	case 0:
 		return out
 	case 1:
-		// A single failure reads better as itself than as a summary of one.
+		// A single warning reads better as itself than as a summary of one.
 		// Passed through verbatim rather than rebuilt, so this function owns
 		// no second copy of the message the enricher writes.
 		return slices.Insert(out, insertAt, firstMsg)
 	}
 
-	// The caller enriches by ranging over a map, so failedIDs arrives in a
-	// different order on every run. Sort before truncating so the summary —
-	// which consumers diff between runs — names the same IDs in the same
-	// order for the same scan. GO/CVE IDs sort by year, then number.
-	sort.Strings(failedIDs)
+	// ids arrives in the caller's enrichment order (ScanVulns walks modules in
+	// sorted path order). Sort by ID anyway before truncating, so the summary —
+	// which consumers diff between runs — lists IDs in ID order whatever order
+	// the caller uses. GO/CVE IDs sort by year, then number.
+	sort.Strings(ids)
 
-	listed := failedIDs
+	listed := ids
 	ellipsis := ""
 	if len(listed) > maxListedFailedIDs {
 		listed = listed[:maxListedFailedIDs]
@@ -606,8 +1164,8 @@ func collapseSeverityLookupWarnings(warnings []string) []string {
 	// reword of the constant cannot leave the summary reading the old text
 	// while the matcher above still passes.
 	summary := fmt.Sprintf(
-		"%s%d advisories; severities remain UNKNOWN (%s%s)",
-		severityLookupFailedPrefix, len(failedIDs), strings.Join(listed, ", "), ellipsis,
+		"%s%d %s (%s%s)",
+		prefix, len(ids), tail, strings.Join(listed, ", "), ellipsis,
 	)
 	return slices.Insert(out, insertAt, summary)
 }

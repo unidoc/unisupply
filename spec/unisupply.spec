@@ -1,5 +1,11 @@
 # unisupply — Go Supply Chain Risk Assessment CLI NEW NEW
 
+> **Status of this document.** This is the original v0.1.0 planning spec. The risk scoring it describes (a 0-100 score per
+> dependency, a weighted blend, a headline) was **replaced by Grading v2**: one letter, A to F, taken from the worst row, with
+> the row that decides it named. The current rules, inputs and output contract are in [`docs/grading.md`](../docs/grading.md),
+> the scanner reference is [`docs/scanners.md`](../docs/scanners.md), and the changes are in `CHANGELOG.md`. Where this file and
+> those disagree, they win. The sections on scoring, the headline and the output formats below are kept for history.
+
 ## Overview
 
 `unisupply` is an open-source CLI tool by UniDoc that analyzes Go module dependency chains and produces a risk assessment report. It takes a `go.mod` file (or a Go project directory) as input, resolves all direct and transitive dependencies, and evaluates each one for security vulnerabilities, maintenance health, and supply chain risk indicators.

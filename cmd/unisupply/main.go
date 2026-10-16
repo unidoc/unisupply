@@ -8,20 +8,18 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
 	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/offline"
-	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/policy"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/report"
-	"github.com/unidoc/unisupply/pkg/resolver"
+	"github.com/unidoc/unisupply/pkg/runner"
 	"github.com/unidoc/unisupply/pkg/scanner"
-	"github.com/unidoc/unisupply/pkg/scorer"
 
 	flag "github.com/spf13/pflag"
 )
@@ -30,10 +28,11 @@ import (
 var errPolicyViolation = errors.New("policy violation")
 
 // errTokenPrecondition is returned when --require-github-token is set but the
-// token is missing or invalid. Exit code 3 is reserved for this precondition
-// failure so CI pipelines can distinguish it from a runtime error (1) or a
-// policy violation (2).
-var errTokenPrecondition = errors.New("github token precondition failed")
+// token is missing, rejected, or could not be validated. Exit code 3 is
+// reserved for this precondition failure so CI pipelines can distinguish it
+// from a runtime error (1) or a policy violation (2). It is the runner's
+// sentinel, because runner.Run is where a present token is validated.
+var errTokenPrecondition = runner.ErrGithubTokenPrecondition
 
 func main() {
 	var (
@@ -41,7 +40,10 @@ func main() {
 		output                 string
 		verbose                bool
 		noColor                bool
-		minRisk                int
+		moduleVersion          string
+		responseHistory        bool
+		gradeStdlib            bool
+		strictArchived         bool
 		directOnly             bool
 		timeout                time.Duration
 		showHelp               bool
@@ -50,13 +52,13 @@ func main() {
 		scanCI                 bool
 		workflowPath           string
 		githubToken            string
+		nvdAPIKey              string
 		requireGithubToken     bool
 		policyFile             string
 		policyPreset           string
 		trustIndexURL          string
 		trustIndexAllowPrivate bool
 		progressMode           string
-		debugScoring           bool
 		networkLog             bool
 		offlineMode            bool
 	)
@@ -65,7 +67,6 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
-	flag.IntVar(&minRisk, "min-risk", 0, "Only show dependencies with risk score >= this value (0-100)")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
 	flag.DurationVar(&timeout, "timeout", 30*time.Second, "HTTP request timeout")
 	flag.BoolVarP(&showHelp, "help", "h", false, "Show help")
@@ -73,7 +74,8 @@ func main() {
 	flag.BoolVar(&scanWorkflows, "scan-workflows", false, "Scan GitHub Actions workflow files in .github/workflows/")
 	flag.BoolVar(&scanCI, "scan-ci", false, "Scan CI/CD configuration (GitHub Actions, Dockerfile, Makefile)")
 	flag.StringVar(&workflowPath, "workflow-path", ".github/workflows", "Path to workflow directory")
-	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (or set GITHUB_TOKEN env)")
+	flag.StringVar(&githubToken, "github-token", "", "GitHub API token for maintainer analysis (prefer set GITHUB_TOKEN env)")
+	flag.StringVar(&nvdAPIKey, "nvd-api-key", "", "NVD API key for higher CVE severity lookup rate limits (prefer set the NVD_API_KEY env)")
 	flag.BoolVar(&requireGithubToken, "require-github-token", false, "Exit code 3 if GitHub token is missing or invalid (for strict CI use)")
 	flag.StringVar(&policyFile, "policy", "", "Path to policy JSON file for compliance checks")
 	flag.StringVar(&policyPreset, "policy-preset", "", "Use a built-in policy preset: strict, moderate")
@@ -82,7 +84,10 @@ func main() {
 	flag.StringVar(&progressMode, "progress", "auto", "Progress output: auto, plain, none")
 	flag.BoolVar(&networkLog, "network-log", false, "Log every outbound HTTP request to stderr (verify the documented network contract)")
 	flag.BoolVar(&offlineMode, "offline", false, "Make no network requests; scanners that need the network degrade to UNKNOWN with a warning")
-	flag.BoolVar(&debugScoring, "debug-scoring", false, "Include diagnostic debug_scoring block in output (non-normative; for miscalibration reports)")
+	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
+	flag.BoolVar(&gradeStdlib, "grade-stdlib", false, "Let the Go standard library decide the letter (it is always listed, with the Go release it was matched against, but not graded by default: its findings follow the Go toolchain that runs the scan)")
+	flag.BoolVar(&strictArchived, "strict-archived", false, "Make an archived flag that could not be read (GitHub rate limit without a token) make the grade Pending, instead of grading on what is known with a note")
+	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
 
@@ -101,7 +106,12 @@ func main() {
 
 	// GitHub token from env if not set via flag.
 	if githubToken == "" {
-		githubToken = os.Getenv("GITHUB_TOKEN")
+		githubToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	}
+
+	// NVD API key from env if not set via flag.
+	if nvdAPIKey == "" {
+		nvdAPIKey = strings.TrimSpace(os.Getenv("NVD_API_KEY"))
 	}
 
 	// Determine target path.
@@ -116,20 +126,23 @@ func main() {
 		output:                 output,
 		verbose:                verbose,
 		noColor:                noColor,
-		minRisk:                minRisk,
+		moduleVersion:          moduleVersion,
+		responseHistory:        responseHistory,
+		gradeStdlib:            gradeStdlib,
+		strictArchived:         strictArchived,
 		directOnly:             directOnly,
 		timeout:                timeout,
 		scanWorkflows:          scanWorkflows,
 		scanCI:                 scanCI,
 		workflowPath:           workflowPath,
 		githubToken:            githubToken,
+		nvdAPIKey:              nvdAPIKey,
 		requireGithubToken:     requireGithubToken,
 		policyFile:             policyFile,
 		policyPreset:           policyPreset,
 		trustIndexURL:          trustIndexURL,
 		trustIndexAllowPrivate: trustIndexAllowPrivate,
 		progressMode:           progressMode,
-		debugScoring:           debugScoring,
 		networkLog:             networkLog,
 		offlineMode:            offlineMode,
 	}
@@ -155,31 +168,57 @@ type runConfig struct {
 	output                 string
 	verbose                bool
 	noColor                bool
-	minRisk                int
+	moduleVersion          string
+	responseHistory        bool
+	gradeStdlib            bool
+	strictArchived         bool
 	directOnly             bool
 	timeout                time.Duration
 	scanWorkflows          bool
 	scanCI                 bool
 	workflowPath           string
 	githubToken            string
+	nvdAPIKey              string
 	requireGithubToken     bool
 	policyFile             string
 	policyPreset           string
 	trustIndexURL          string
 	trustIndexAllowPrivate bool
 	progressMode           string
-	debugScoring           bool
 	networkLog             bool
 	offlineMode            bool
 }
 
 func run(cfg *runConfig) error {
+	// A malformed --module-version fails before anything is scanned: OSV would
+	// otherwise be asked about a version no release has.
+	if cfg.responseHistory && cfg.moduleVersion == "" {
+		return fmt.Errorf("--response-history needs --module-version: the history is of the published module's releases")
+	}
+	if cfg.moduleVersion != "" {
+		if err := scanner.CheckModuleVersion(cfg.moduleVersion); err != nil {
+			return fmt.Errorf("--module-version: %w", err)
+		}
+	}
+
 	// --require-github-token: fail fast (exit 3) when no token is present.
-	// Token validation is intentionally lightweight — we only check for
-	// presence here; a 401/403 from the GitHub API during the actual scan
-	// would surface through DataAvailable==false in the results.
+	// This is the cheap, offline half of the precondition; whether a present
+	// token is accepted by GitHub is checked by runner.Run, after the
+	// dependency graph is resolved and before any scanner runs.
 	if cfg.requireGithubToken && cfg.githubToken == "" {
 		return fmt.Errorf("%w: --require-github-token is set but no GitHub token was provided (set --github-token or GITHUB_TOKEN)", errTokenPrecondition)
+	}
+
+	// Both are checked before the scan: a typo must not cost a whole scan, nor end in an empty output file.
+	switch cfg.format {
+	case "text", "json", "pdf", "sbom-cyclonedx", "sbom-spdx":
+	default:
+		return fmt.Errorf("unknown format: %s (supported: text, json, pdf, sbom-cyclonedx, sbom-spdx)", cfg.format)
+	}
+	switch cfg.policyPreset {
+	case "", "strict", "moderate":
+	default:
+		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
 	}
 
 	if cfg.policyFile != "" && cfg.policyPreset != "" {
@@ -200,20 +239,15 @@ func run(cfg *runConfig) error {
 		if cfg.format == "pdf" {
 			return errors.New("--offline cannot be combined with --format pdf: PDF generation requires a UniDoc license check over the network; use --format text, json, or sbom-*")
 		}
-		// --require-github-token is only a precondition on the token being
-		// present, and it was already checked above. A token supplied
-		// alongside --offline is unused, not contradictory — CI configs
-		// routinely set the token and the mode flag from separate layers — so
-		// warn and continue rather than failing the run.
+		// A token supplied alongside --offline is unused, not contradictory —
+		// CI configs routinely set the token and the mode flag from separate
+		// layers — so warn and continue rather than failing the run. The
+		// wording must not claim the token is good: offline, there is no way
+		// to know, and runner.Run skips the probe.
 		if cfg.requireGithubToken {
-			fmt.Fprintln(os.Stderr, "warning: --require-github-token is satisfied but --offline means GitHub will not be contacted")
+			fmt.Fprintln(os.Stderr, "warning: --require-github-token is set and a token is present, but it was not validated because --offline means GitHub will not be contacted")
 		}
 	}
-
-	// Compute scan-start time once and floor it to the start of the UTC day.
-	// All scanner age/activity classifications use this value so that two runs
-	// on the same calendar day yield identical band results for the same module.
-	scanStart := time.Now().UTC().Truncate(24 * time.Hour)
 
 	mode, err := progress.ParseMode(cfg.progressMode)
 	if err != nil {
@@ -249,229 +283,55 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	rep.Stage("Parsing go.mod")
-	gomodPath, err := parser.FindGoMod(cfg.path)
-	if err != nil {
-		return err
-	}
-	gomod, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		return err
-	}
-	projectDir := filepath.Dir(gomodPath)
-	rep.Done("%s", gomodPath)
-
-	// Audit replace/exclude directives. Pure go.mod analysis (no network calls);
-	// the per-module classification feeds the scorer below, and the report is
-	// wired into the text/JSON/PDF output next to the CI/CD report.
-	rep.Stage("Auditing go.mod directives")
-	integrityScanner := scanner.NewIntegrityScanner()
-	// Offline skips `go mod verify`, reporting GoSumVerifiedOffline rather
-	// than a verification failure.
-	integrityScanner.Offline = cfg.offlineMode
-	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
-	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
-
-	rep.Stage("Resolving dependency graph")
-	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, cfg.directOnly)
-	if err != nil {
-		return fmt.Errorf("resolving dependencies: %w", err)
-	}
-	for _, w := range resolverWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d modules", len(graph.Dependencies))
-
-	if len(graph.Dependencies) == 0 {
-		fmt.Fprintln(os.Stderr, "No dependencies found.")
-		return nil
-	}
-
-	// Pseudo-version audit (offline; needs the resolved graph for Direct/
-	// IsTestOnly, so it runs here rather than alongside ScanDirectives above).
-	rep.Stage("Auditing pseudo-version pins")
-	pseudoVersionClasses := integrityScanner.ScanPseudoVersions(graph, integrityReport)
-	rep.Done("%d pseudo-version pins", integrityReport.PseudoVersionCount)
-
-	// go.sum presence/completeness (offline file logic, needs the resolved
-	// graph) and go.sum verification via `go mod verify` (local module cache
-	// against go.sum; the toolchain handles GOPRIVATE/GONOSUMDB itself).
-	rep.Stage("Verifying go.sum (go mod verify)")
-	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
-	integrityScanner.VerifyGoSum(ctx, gomodPath, integrityReport)
-	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
-
-	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	vulns, vulnWarnings, vulnScanned, err := scanner.ScanVulns(ctx, projectDir, cfg.githubToken)
-	// The scanner reports availability directly. Deriving it here from err would
-	// miss the common case: govulncheck failures come back as a warning with a
-	// nil error, so `err != nil` reads a failed scan as a clean one and the
-	// scorer then counts the 40% vulnerability axis as measured.
-	vulnScanUnavailable := !vulnScanned
-	if err != nil {
-		rep.Warn("Vulnerability scan failed: %v", err)
-	}
-	for _, w := range vulnWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d affected modules", len(vulns))
-
-	rep.Stage("Checking maintenance health")
-	maintScanner := scanner.NewMaintenanceScanner(cfg.timeout)
-	maintScanner.ScanStart = scanStart
-	maintenance, err := maintScanner.ScanAll(ctx, graph)
-	var maintWarnings []string
-	if err != nil {
-		if cfg.offlineMode {
-			// Stderr only. The scorer already emits one authoritative report
-			// warning for this — cause, affected module count, and the scoring
-			// consequence — and its count is per-dependency rather than the
-			// scanner's lookup-failure tally. Appending the scanner's message
-			// too put two near-identical lines in the SCAN LIMITATIONS block.
-			rep.Warn("%v", err)
-		} else {
-			// Same reasoning as the offline branch — a degradation that shows up
-			// only on stderr leaves the final report looking complete, and an
-			// API outage is exactly the degraded case this needs to cover.
-			//
-			// The wrapped error is deliberately NOT carried into the report:
-			// unlike the offline message, which the scanner phrases itself, this
-			// err wraps a *url.Error embedding the full proxy URL — a module
-			// path. ps.Warnings reaches the JSON and text reports, and the
-			// network-transparency docs promise disclosing hosts, not paths. The
-			// scorer already reports the affected module count (it counts every
-			// dependency whose maintenance weight was excluded), so this
-			// contributes the cause and leaves the count to it.
-			maintWarnings = append(maintWarnings,
-				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
-			rep.Warn("Some maintenance checks failed: %v", err)
-		}
-	}
-	rep.Done("")
-
-	// Offline contacts GitHub either way, so the rate-limit advice below would
-	// point the user at a token that cannot change the outcome.
-	if cfg.githubToken == "" && !cfg.offlineMode {
-		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
-		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			rep.Warn("found %d GitHub-hosted deps but GITHUB_TOKEN is unset — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n)
-		}
-	}
-
-	rep.Stage("Analyzing maintainers (GitHub API)")
-	maintainerScanner := scanner.NewMaintainerScanner(cfg.timeout, cfg.githubToken)
-	maintainerScanner.ScanStart = scanStart
-	maintainers := maintainerScanner.ScanAll(ctx, graph)
-	rep.Done("")
-
-	rep.Stage("Detecting typosquats")
-	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquats := typosquatScanner.ScanAll(ctx, graph)
-	rep.Done("%d suspicious", len(typosquats))
-
-	rep.Stage("Scoring resilience")
-	resilienceScanner := scanner.NewResilienceScanner(cfg.timeout)
-	resilienceScanner.ScanStart = scanStart
-	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
-	rep.Done("")
-
-	rep.Stage("Assessing AI-generation risk")
-	aiGenScanner := scanner.NewAIGenScanner()
-	aiGenScanner.ScanStart = scanStart
-	aiGenRisks, aiGenWarnings := aiGenScanner.ScanAll(ctx, graph, maintainers, resilience)
-	for _, w := range aiGenWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d flagged", len(aiGenRisks))
-
-	var trustIndex map[string]*scanner.TrustIndexEntry
-	trustClient, err := scanner.NewTrustIndexClient(cfg.trustIndexURL, cfg.timeout, cfg.trustIndexAllowPrivate)
-	if err != nil {
-		return fmt.Errorf("trust index: %w", err)
-	}
-	if trustClient != nil {
-		rep.Stage("Querying Trust Index")
-		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
-		if tiErr != nil {
-			rep.Warn("Trust Index lookup failed: %v", tiErr)
-		}
-		rep.Done("%d entries", len(trustIndex))
-		scanner.EnrichMaintainersFromTrustIndex(maintainers, trustIndex)
-	}
-
-	rep.Stage("Computing risk scores")
-	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:         graph,
-		Vulns:         vulns,
-		Maintenance:   maintenance,
-		Maintainers:   maintainers,
-		Typosquats:    typosquats,
-		Resilience:    resilience,
-		AIGenRisks:    aiGenRisks,
-		TrustIndex:    trustIndex,
-		Integrity:     integrityClasses,
-		PseudoVersion: pseudoVersionClasses,
-		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
-
-		VulnScanUnavailable: vulnScanUnavailable,
-
-		DebugMode: cfg.debugScoring,
-		Now:       scanStart,
+	scanResult, err := runner.Run(ctx, runner.Options{
+		Path:                   cfg.path,
+		Timeout:                cfg.timeout,
+		DirectOnly:             cfg.directOnly,
+		GithubToken:            cfg.githubToken,
+		NVDAPIKey:              cfg.nvdAPIKey,
+		RequireGithubToken:     cfg.requireGithubToken,
+		TrustIndexURL:          cfg.trustIndexURL,
+		TrustIndexAllowPrivate: cfg.trustIndexAllowPrivate,
+		ScanWorkflows:          cfg.scanWorkflows,
+		ScanCI:                 cfg.scanCI,
+		WorkflowPath:           cfg.workflowPath,
+		SelfVersion:            cfg.moduleVersion,
+		ResponseHistory:        cfg.responseHistory,
+		GradeStdlib:            cfg.gradeStdlib,
+		StrictArchivedStatus:   cfg.strictArchived,
 	})
-	// Resolver degradations belong in the report, not just on stderr. A cold
-	// offline cache makes `go mod graph` fail, and the fallback go.mod/go.sum
-	// parse yields a flatter graph — every transitive dep collapses to depth 1,
-	// which feeds the depth axis directly — while `go list` failing leaves
-	// IsTestOnly nil for every dep, disabling the test-only discount. Both change
-	// the numbers, so both have to be visible next to them.
-	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, aiGenWarnings...)
-	rep.Done("")
-
-	var ciReport *scanner.CIReport
-	if cfg.scanWorkflows || cfg.scanCI {
-		rep.Stage("Auditing CI/CD pipelines")
-		ciScanner := scanner.NewCIScanner()
-
-		wfPath := cfg.workflowPath
-		if !filepath.IsAbs(wfPath) {
-			wfPath = filepath.Join(projectDir, wfPath)
-		}
-
-		ciReport, err = ciScanner.ScanWorkflows(ctx, wfPath)
-		if err != nil {
-			rep.Warn("Workflow scanning failed: %v", err)
-		}
-
-		if cfg.scanCI && ciReport != nil {
-			buildFindings := ciScanner.ScanBuildFiles(ctx, projectDir)
-			ciReport.BuildFindings = buildFindings
-			ciReport.TotalFindings += len(buildFindings)
-		}
-		rep.Done("")
+	if err != nil {
+		return err
 	}
 
-	// Collect takeover candidates.
-	var takeovers []*scanner.MaintainerInfo
-	for _, mi := range maintainers {
-		if mi.TakeoverCandidate {
-			takeovers = append(takeovers, mi)
+	// A module with nothing to scan and no published version to grade has no report. A policy is still evaluated: a gate
+	// must not pass because there was nothing to look at.
+	noReport := len(scanResult.Graph.Dependencies) == 0 && cfg.moduleVersion == ""
+	if noReport {
+		fmt.Fprintln(os.Stderr, "No dependencies found. Pass --module-version to grade the module itself.")
+	}
+
+	if !noReport {
+		if err := writeReport(ctx, cfg, rep, scanResult); err != nil {
+			return err
 		}
 	}
 
-	// Separate stdlib vulns from module vulns.
-	var stdlibVulns []scanner.Vulnerability
-	if stdlibList, ok := vulns["stdlib"]; ok {
-		stdlibVulns = stdlibList
-		delete(vulns, "stdlib")
+	if cfg.policyFile != "" || cfg.policyPreset != "" {
+		return evaluatePolicy(cfg, rep, scanResult)
 	}
+	return nil
+}
 
-	if ctx.Err() != nil {
-		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
-	}
+// writeReport renders the scan result in the format asked for.
+func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, scanResult *runner.Result) (err error) {
+	gomod := scanResult.GoMod
+	graph := scanResult.Graph
+	projectScore := scanResult.ProjectScore
+	ciReport := scanResult.CIReport
+	gradeResult := scanResult.Grade
+	stdlibVulns := scanResult.StdlibVulns
+	integrityReport := scanResult.IntegrityReport
 
 	// Generate output.
 	writer := os.Stdout
@@ -486,7 +346,7 @@ func run(cfg *runConfig) error {
 		cfg.output = "unisupply-report.pdf"
 	}
 
-	sbomOpts := report.SBOMOptions{GoVersion: gomod.GoVersion}
+	sbomOpts := report.SBOMOptions{GoVersion: gomod.GoVersion, Grade: gradeResult}
 
 	// Only open a progress stage when the report writer targets a file (or
 	// is the PDF writer, which writes to its own file). Streaming text/json/
@@ -505,21 +365,23 @@ func run(cfg *runConfig) error {
 	switch cfg.format {
 	case "text":
 		err = report.WriteText(graph, projectScore, &report.TextOptions{
+			Scan:            scanResult.ScanInfo,
 			NoColor:         cfg.noColor,
 			Verbose:         cfg.verbose,
-			MinRisk:         cfg.minRisk,
 			Writer:          writer,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
 		})
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
+			Scan:            scanResult.ScanInfo,
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
+			StdlibVulns:     stdlibVulns,
 		}, writer)
 	case "pdf":
 		err = report.WritePDF(ctx, graph, projectScore, report.PDFOptions{
@@ -527,7 +389,8 @@ func run(cfg *runConfig) error {
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
-			Takeovers:       takeovers,
+			Grade:           gradeResult,
+			StdlibVulns:     stdlibVulns,
 		})
 	case "sbom-cyclonedx":
 		err = report.WriteCycloneDX(graph, projectScore, sbomOpts, writer)
@@ -548,7 +411,19 @@ func run(cfg *runConfig) error {
 		}
 	}
 
-	if cfg.policyFile != "" || cfg.policyPreset != "" {
+	return nil
+}
+
+// evaluatePolicy checks the grade and the scan result against the policy; a violation is errPolicyViolation.
+func evaluatePolicy(cfg *runConfig, rep progress.Reporter, scanResult *runner.Result) error {
+	projectScore := scanResult.ProjectScore
+	gradeResult := scanResult.Grade
+	maintainers := scanResult.Maintainers
+	typosquats := scanResult.Typosquats
+	ciReport := scanResult.CIReport
+	integrityReport := scanResult.IntegrityReport
+	var err error
+	{
 		rep.Stage("Evaluating policy")
 		var pol *policy.Policy
 
@@ -570,6 +445,7 @@ func run(cfg *runConfig) error {
 
 		result := pol.Evaluate(policy.EvalInput{
 			ProjectScore:    projectScore,
+			Grade:           gradeResult,
 			Maintainers:     maintainers,
 			Typosquats:      typosquats,
 			CIReport:        ciReport,
@@ -602,27 +478,26 @@ func printUsage() {
 	fmt.Println("  unisupply                                    # Analyze current directory")
 	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
 	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
-	fmt.Println("  unisupply -f pdf                             # Generate PDF risk report")
+	fmt.Println("  unisupply -f pdf                             # Generate PDF report")
 	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
 	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
-	fmt.Println("  unisupply --min-risk 50                      # Only show medium+ risk deps")
+	fmt.Println("  unisupply --module-version v1.4.0            # Also grade the module itself at a published version")
 	fmt.Println("  unisupply --scan-workflows                   # Include GitHub Actions audit")
 	fmt.Println("  unisupply --scan-ci                          # Full CI/CD pipeline scan")
 	fmt.Println("  unisupply --policy policy.json               # Evaluate against policy file")
 	fmt.Println("  unisupply --policy-preset strict             # Use strict built-in policy")
-	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if no token")
+	fmt.Println("  unisupply --require-github-token ./          # Fail (exit 3) if token missing or invalid")
 	fmt.Println("  unisupply --progress plain                   # Plain log-style progress on stderr")
 	fmt.Println("  unisupply --progress none -f json            # Silent run; JSON to stdout")
-	fmt.Println("  unisupply --debug-scoring -f json            # Emit non-normative debug_scoring block")
 	fmt.Println("  unisupply --network-log 2>net.log            # Log every outbound request to stderr")
 	fmt.Println("  unisupply --offline                          # Air-gapped scan; no network requests")
 	fmt.Println("  unisupply --offline --network-log 2>net.log  # Prove the scan made no requests")
 	fmt.Println()
 	fmt.Println("Exit codes:")
-	fmt.Println("  0  Clean scan — no policy violations, token precondition satisfied")
+	fmt.Println("  0  Success. Without --policy or --policy-preset the exit code ignores the grade: a grade of F or Pending still exits 0")
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
-	fmt.Println("  2  Policy violation — one or more policy rules failed")
-	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing")
+	fmt.Println("  2  Policy violation — one or more policy rules failed (max_grade: a grade worse than the limit, or Pending unless allow_pending)")
+	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

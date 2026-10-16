@@ -7,8 +7,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -30,12 +32,16 @@ const (
 type TextOptions struct {
 	NoColor         bool
 	Verbose         bool
-	MinRisk         int
 	Writer          io.Writer
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
-	Takeovers       []*scanner.MaintainerInfo
 	StdlibVulns     []scanner.Vulnerability
+
+	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
+	Grade *grade.Result
+
+	// Scan is what the vulnerability scan ran with (platform, Go release, govulncheck, vulnerability database). nil: none ran.
+	Scan *scanner.ScanInfo
 }
 
 // WriteText generates the human-readable terminal output.
@@ -61,142 +67,51 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	total := directCount + transitiveCount
 	fmt.Fprintf(w, "Dependencies: %d direct, %d transitive (%d total, %d graph edges)\n\n", directCount, transitiveCount, total, graph.TotalEdges())
 
-	// Overall score (five-candidate headline).
-	scoreColor := riskColor(ps.OverallLevel)
-	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n")
-	if ps.OverallLevel == scorer.RiskUnknown {
-		// Lead with UNKNOWN and label the number as indicative. "26/100
-		// (UNKNOWN)" reads as a scored 26; the band has to come first.
-		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
-			c(scoreColor, fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)))
-		fmt.Fprintf(w, "  Why: %s\n", ps.HeadlineUnscoredReason)
-	} else {
-		fmt.Fprintf(w, "SUPPLY-CHAIN RISK: %s\n",
-			c(scoreColor, fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)))
-	}
-	if ps.HeadlineCandidate != nil {
-		hc := ps.HeadlineCandidate
-		switch {
-		case hc.DrivingDep != "" && hc.Reason != "":
-			fmt.Fprintf(w, "  Driver: %s — %s (%s)\n", hc.Name, hc.DrivingDep, hc.Reason)
-		case hc.Reason != "":
-			fmt.Fprintf(w, "  Driver: %s — %s\n", hc.Name, hc.Reason)
-		default:
-			fmt.Fprintf(w, "  Driver: %s\n", hc.Name)
-		}
-	}
-	if ps.WorstCVEID != "" {
-		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
-			fmt.Fprintf(w, "  Worst CVE: %s (scored %s, source %s)\n",
-				ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
-		} else {
-			fmt.Fprintf(w, "  Worst CVE: %s (%s)\n", ps.WorstCVEID, ps.WorstCVESeverity)
-		}
-	}
-	fmt.Fprintf(w, "%s\n", overallExplanation(ps.OverallLevel, hasExploitEvidence(ps)))
-	fmt.Fprintf(w, "═══════════════════════════════════════════════════\n\n")
+	writeGradeText(w, c, opts.Grade, opts.Verbose)
+	writeScanInfoText(w, opts.Scan)
 
 	// TIME-BOMBS: archived deps and CRITICAL CVEs listed unconditionally for
 	// undeniable visibility, even when the headline already reflects them.
 	if timeBombs := scorer.CollectTimeBombs(ps); len(timeBombs) > 0 {
 		fmt.Fprintf(w, "TIME-BOMBS (%d)\n", len(timeBombs))
+		for _, line := range wrapWords(timeBombScopeNote, 74) {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 		for _, tb := range timeBombs {
 			fmt.Fprintf(w, "  [%-12s] %s — %s\n", tb.Kind, tb.Module, tb.Detail)
-		}
-		if ps.HeadlineDriver == "severity_adjusted" && allRequiredReachability(timeBombs) {
-			fmt.Fprintf(w, "  Note: all above have reachability=required; headline reflects reachability-downgraded severity.\n")
 		}
 		fmt.Fprintf(w, "\n")
 	}
 
-	// Debug scoring block (--debug-scoring). NON-NORMATIVE.
-	if ps.DebugScoring != nil {
-		writeDebugScoring(w, c, ps.DebugScoring)
-	}
-
-	// Sort dependencies by risk score descending.
+	// Dependency listing, worst row first. The letter is the grade row's; the old 0-100 score is not shown.
+	rows := gradeRowIndex(opts.Grade)
 	sorted := make([]*scorer.DependencyScore, len(ps.Dependencies))
 	copy(sorted, ps.Dependencies)
-	sort.Slice(sorted, func(i, j int) bool {
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ri, rj := rows[sorted[i].Module], rows[sorted[j].Module]
+		if ri != nil && rj != nil && ri.Score != rj.Score {
+			return ri.Score > rj.Score
+		}
 		return sorted[i].RiskScore > sorted[j].RiskScore
 	})
-
-	// Group by risk level (matches spec: 0-25 LOW, 26-50 MEDIUM, 51-75 HIGH, 76-100 CRITICAL).
-	var critical, high, medium, low []*scorer.DependencyScore
-	for _, ds := range sorted {
-		if ds.RiskScore < opts.MinRisk {
-			continue
-		}
-		switch {
-		case ds.RiskScore >= 76:
-			critical = append(critical, ds)
-		case ds.RiskScore >= 51:
-			high = append(high, ds)
-		case ds.RiskScore >= 26:
-			medium = append(medium, ds)
-		default:
-			low = append(low, ds)
-		}
-	}
-
-	// Critical risk.
-	if len(critical) > 0 {
-		fmt.Fprintf(w, "%s\n", c(colorRed, fmt.Sprintf("CRITICAL RISK (%d dependencies)", len(critical))))
-		fmt.Fprintf(w, "%s\n", c(colorRed, strings.Repeat("─", 40)))
-		for _, ds := range critical {
-			writeDependencyDetail(w, ds, c, true)
-		}
-		fmt.Fprintln(w)
-	}
-
-	// High risk.
-	if len(high) > 0 {
-		fmt.Fprintf(w, "%s\n", c(colorOrange, fmt.Sprintf("HIGH RISK (%d dependencies)", len(high))))
-		fmt.Fprintf(w, "%s\n", c(colorOrange, strings.Repeat("─", 40)))
-		for _, ds := range high {
-			writeDependencyDetail(w, ds, c, true)
-		}
-		fmt.Fprintln(w)
-	}
-
-	// Medium risk.
-	if len(medium) > 0 {
-		fmt.Fprintf(w, "%s\n", c(colorYellow, fmt.Sprintf("MEDIUM RISK (%d dependencies)", len(medium))))
-		fmt.Fprintf(w, "%s\n", c(colorYellow, strings.Repeat("─", 40)))
-		for _, ds := range medium {
-			// Always show details if dep has vulns, otherwise respect --verbose.
-			showDetail := opts.Verbose || len(ds.Vulns) > 0
-			writeDependencyDetail(w, ds, c, showDetail)
-		}
-		fmt.Fprintln(w)
-	}
-
-	// Low risk.
-	if len(low) > 0 {
-		fmt.Fprintf(w, "%s\n", c(colorGreen, fmt.Sprintf("LOW RISK (%d dependencies)", len(low))))
-		fmt.Fprintf(w, "%s\n", c(colorGreen, strings.Repeat("─", 40)))
-		if opts.Verbose {
-			for _, ds := range low {
-				// Verbose shows full detail for every dep, regardless of vulns.
-				writeDependencyDetail(w, ds, c, true)
+	listed := sorted
+	if len(listed) > 0 {
+		fmt.Fprintf(w, "%s\n", c(colorBold, fmt.Sprintf("DEPENDENCIES (%d)", len(listed))))
+		fmt.Fprintf(w, "%s\n", strings.Repeat("─", 40))
+		shown := 0
+		for _, ds := range listed {
+			letter := gradeRowLabel(rows[ds.Module])
+			detail := opts.Verbose || len(ds.Vulns) > 0 || gradeNeedsDetail(rows[ds.Module])
+			if detail {
+				shown++
 			}
-		} else {
-			// Always show deps with vulns even in low risk.
-			hasVulnDeps := false
-			for _, ds := range low {
-				if len(ds.Vulns) > 0 {
-					writeDependencyDetail(w, ds, c, true)
-					hasVulnDeps = true
-				}
+			if !detail && !opts.Verbose {
+				continue
 			}
-			if !hasVulnDeps {
-				fmt.Fprintf(w, "%s\n", c(colorDim, "[use --verbose to see details]"))
-			} else {
-				lowNoVuln := len(low) - countWithVulns(low)
-				if lowNoVuln > 0 {
-					fmt.Fprintf(w, "%s\n", c(colorDim, fmt.Sprintf("[%d more without vulnerabilities — use --verbose]", lowNoVuln)))
-				}
-			}
+			writeDependencyDetail(w, ds, c, letter, true)
+		}
+		if rest := len(listed) - shown; rest > 0 && !opts.Verbose {
+			fmt.Fprintf(w, "%s\n", c(colorDim, fmt.Sprintf("[%d more without vulnerabilities — use --verbose]", rest)))
 		}
 		fmt.Fprintln(w)
 	}
@@ -213,11 +128,6 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		writeIntegrityReportText(w, opts.IntegrityReport, c)
 	}
 
-	// Takeover Candidates section.
-	if len(opts.Takeovers) > 0 {
-		writeTakeoverText(w, opts.Takeovers, c)
-	}
-
 	// Stdlib vulnerabilities.
 	if len(opts.StdlibVulns) > 0 {
 		fmt.Fprintf(w, "\n%s\n", c(colorRed, fmt.Sprintf("STDLIB VULNERABILITIES (%d found)", len(opts.StdlibVulns))))
@@ -228,6 +138,12 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			fmt.Fprintf(w, "  %s %s\n", c(colorRed, v.ID), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
+			}
+			if via := reachedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Reached via:"), via)
+			}
+			if syms := calledSymbolsLine(v); syms != "" {
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Vulnerable symbols called:"), syms)
 			}
 		}
 		fmt.Fprintln(w)
@@ -240,25 +156,31 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	// Summary.
 	fmt.Fprintf(w, "──────────────────────────\n")
 	fmt.Fprintf(w, "SUMMARY\n")
-	if len(critical) > 0 {
-		fmt.Fprintf(w, "  Critical:    %s\n", formatCount(len(critical), total))
+	if opts.Grade != nil && len(opts.Grade.Rows) > 0 {
+		fmt.Fprintf(w, "  Rows by letter: %s\n", gradeLetterCounts(opts.Grade))
+		fmt.Fprintln(w)
 	}
-	fmt.Fprintf(w, "  High risk:   %s\n", formatCount(len(high), total))
-	fmt.Fprintf(w, "  Medium risk: %s\n", formatCount(len(medium), total))
-	fmt.Fprintf(w, "  Low risk:    %s\n", formatCount(len(low), total))
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(sorted))
+	fmt.Fprintf(w, "  Vulnerabilities found: %d across %d dependencies\n", ps.TotalVulns, countWithVulns(listed))
 	fmt.Fprintf(w, "  Unmaintained 1–2yr:    %d dependencies\n", ps.Unmaintained1yr)
 	fmt.Fprintf(w, "  Unmaintained  >2yr:    %d dependencies\n", ps.Unmaintained2yr)
 	// Scan limitations. Without this block a degraded scan — offline, rate
 	// limited, vuln DB unreachable — renders identically to a complete one,
 	// and "Vulnerabilities found: 0" reads as a clean bill of health rather
 	// than as a scan that never looked. Warnings reached JSON only until now.
-	if len(ps.Warnings) > 0 {
+	if warnings := publishedWarnings(ps.Warnings); len(warnings) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "SCAN LIMITATIONS — the results above are incomplete\n")
-		for _, warning := range ps.Warnings {
+		for _, warning := range warnings {
 			fmt.Fprintf(w, "  ! %s\n", warning)
+		}
+	}
+	// Notes are informational: they say nothing is missing, so they get their
+	// own heading rather than sitting under SCAN LIMITATIONS.
+	if len(ps.Notes) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "SCAN NOTES — informational, results unaffected\n")
+		for _, note := range ps.Notes {
+			fmt.Fprintf(w, "  - %s\n", note)
 		}
 	}
 
@@ -270,8 +192,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	return nil
 }
 
-func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(string, string) string, detailed bool) {
-	scoreColor := riskColor(ds.RiskLevel)
+func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(string, string) string, letter string, detailed bool) {
 	label := "transitive"
 	if ds.Direct {
 		label = "direct"
@@ -282,18 +203,21 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 	if ds.IsTestOnly != nil && *ds.IsTestOnly {
 		label += ", test-only"
 	}
+	// Same rule for [outside build]: only when InBuild is confirmed false (a
+	// module in the graph that no package of the main module imports); nil
+	// shows nothing.
+	if ds.InBuild != nil && !*ds.InBuild {
+		label += ", outside build"
+	}
 
 	fmt.Fprintf(w, "● %s %s  %s  (%s)\n",
 		ds.Module, ds.Version,
-		c(scoreColor, fmt.Sprintf("Risk: %d/100", ds.RiskScore)),
+		c(gradeLetterColor(letter), "Grade: "+letter),
 		label)
 
 	if !detailed {
 		return
 	}
-
-	// What this score means.
-	fmt.Fprintf(w, "  ├─ %s\n", c(colorDim, depExplanation(ds)))
 
 	// Vulnerabilities.
 	if len(ds.Vulns) > 0 {
@@ -328,9 +252,9 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			// Threat-intel badges: EPSS exploitation probability and KEV
 			// status. KEV is colored like CRITICAL — confirmed exploitation
 			// in the wild.
-			ti := epssBadge(v)
+			ti := ""
 			if v.InKEV {
-				ti += " " + c(colorRed, "[KEV]")
+				ti = " " + c(colorRed, "[KEV]")
 			}
 			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySev, tag, ti)
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
@@ -338,6 +262,12 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			}
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "  │  Fix available: %s\n", v.FixedVersion)
+			}
+			if via := reachedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "  │  Reached via: %s\n", via)
+			}
+			if syms := calledSymbolsLine(v); syms != "" {
+				fmt.Fprintf(w, "  │  Vulnerable symbols called: %s\n", syms)
 			}
 		}
 	}
@@ -347,11 +277,14 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		if ds.Maintenance.MonthsSinceRelease > 0 {
 			fmt.Fprintf(w, "  ├─ Last release: %d months ago\n", ds.Maintenance.MonthsSinceRelease)
 		}
+		if ds.Maintenance.HasActivity() {
+			fmt.Fprintf(w, "  ├─ Last commit%s: %d months ago\n", branchSuffix(ds.Maintenance.ActivityBranch), ds.Maintenance.MonthsSinceActivity)
+		}
 		if ds.Maintenance.Archived {
 			fmt.Fprintf(w, "  ├─ ⚠ Repository archived\n")
 		}
 		if ds.Maintenance.Deprecated {
-			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated\n")
+			fmt.Fprintf(w, "  ├─ ⚠ Module deprecated%s\n", deprecationSuffix(ds.Maintenance.DeprecationNotice()))
 		}
 	}
 
@@ -383,9 +316,10 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  ├─ License: %s\n", mi.License)
 		}
 
-		// Activity.
+		// Activity. LastCommitDate is GitHub's pushed_at, which moves on a push
+		// to any branch; the scored date is the maintenance "Last commit" line.
 		if !mi.LastCommitDate.IsZero() {
-			fmt.Fprintf(w, "  ├─ Last commit: %s (%s)\n",
+			fmt.Fprintf(w, "  ├─ Last push (any branch): %s (%s)\n",
 				mi.LastCommitDate.Format("2006-01-02"), mi.ActivityPattern)
 		} else if mi.ActivityPattern != "" && mi.ActivityPattern != "unknown" {
 			fmt.Fprintf(w, "  ├─ Activity: %s\n", mi.ActivityPattern)
@@ -408,10 +342,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		if mi.SubDependencies > 0 {
 			fmt.Fprintf(w, "  ├─ Pulls in %d sub-dependencies\n", mi.SubDependencies)
 		}
-
-		if mi.TakeoverCandidate {
-			fmt.Fprintf(w, "  ├─ ⚠ Takeover candidate: %s\n", mi.TakeoverReason)
-		}
 	}
 
 	// Resilience.
@@ -420,14 +350,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			ds.Resilience.Score, ds.Resilience.ReleaseCadence, ds.Resilience.TotalReleases, ds.Resilience.ProjectAgeDays)
 		if ds.Resilience.HasSecurityPolicy {
 			fmt.Fprintf(w, "  │  Has SECURITY.md\n")
-		}
-	}
-
-	// AI-generated code risk.
-	if ds.AIGenRisk != nil && ds.AIGenRisk.Score > 0 {
-		fmt.Fprintf(w, "  ├─ ⚠ AI-generated code risk: %s (%d/100)\n", ds.AIGenRisk.RiskLevel, ds.AIGenRisk.Score)
-		for _, ind := range ds.AIGenRisk.Indicators {
-			fmt.Fprintf(w, "  │  - %s\n", ind)
 		}
 	}
 
@@ -462,55 +384,6 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			fmt.Fprintf(w, "  │  ⚠ Safer alternative: %s\n", ti.SaferAlternative)
 		}
 	}
-
-	// Risk score breakdown. The printed weights are the *effective* ones: when
-	// an axis is unavailable it is dropped from the denominator, so the nominal
-	// 40/25/15/10/10 no longer describes the arithmetic. Printing the nominal
-	// weights next to a renormalized score would contradict the score on the
-	// same line, which is the opposite of a defensible breakdown.
-	axis := func(label string, score, weight float64, excluded bool) string {
-		if excluded {
-			return fmt.Sprintf("%s=n/a", label)
-		}
-		return fmt.Sprintf("%s=%.0f×%.0f%%", label, score, weight/ds.MeasuredWeight*100)
-	}
-	breakdown := strings.Join([]string{
-		axis("vuln", ds.VulnScore, scorer.WeightVulnerabilities, ds.VulnWeightExcluded),
-		axis("maint", ds.MaintenanceScore, scorer.WeightMaintenance, ds.MaintenanceWeightExcluded),
-		axis("depth", ds.DepthScore, scorer.WeightDepthRisk, false),
-		axis("maintainer", ds.MaintainerScore, scorer.WeightMaintainerRisk, ds.MaintainerWeightExcluded),
-		axis("maturity", ds.MaturityScore, scorer.WeightMaturity, false),
-	}, " ")
-	if ds.ResilienceBonus > 0 {
-		breakdown += fmt.Sprintf(" +resilience=%.1f", ds.ResilienceBonus)
-	}
-	if ds.AIGenBonus > 0 {
-		breakdown += fmt.Sprintf(" +aigen=%.1f", ds.AIGenBonus)
-	}
-	if ds.TyposquatBonus > 0 {
-		breakdown += fmt.Sprintf(" +typosquat=%.1f", ds.TyposquatBonus)
-	}
-	if ds.IntegrityBonus > 0 {
-		breakdown += fmt.Sprintf(" +integrity(replace)=%.1f", ds.IntegrityBonus)
-	}
-	if ds.FlooredTo > 0 {
-		breakdown += fmt.Sprintf(" [floored→%d]", ds.FlooredTo)
-	}
-	if ds.MeasuredWeight < 1.0 {
-		var excl []string
-		if ds.VulnWeightExcluded {
-			excl = append(excl, "vuln")
-		}
-		if ds.MaintenanceWeightExcluded {
-			excl = append(excl, "maint")
-		}
-		if ds.MaintainerWeightExcluded {
-			excl = append(excl, "maintainer")
-		}
-		breakdown += fmt.Sprintf(" [renorm: %s excl., %.0f%% of model measured]",
-			strings.Join(excl, "+"), ds.MeasuredWeight*100)
-	}
-	fmt.Fprintf(w, "  ├─ %s %s\n", c(colorDim, "Score breakdown:"), breakdown)
 
 	// Dependency path.
 	if len(ds.DependencyPath) > 0 {
@@ -594,40 +467,6 @@ func writeIntegrityReportText(w io.Writer, ir *scanner.IntegrityReport, c func(s
 	fmt.Fprintln(w)
 }
 
-func writeTakeoverText(w io.Writer, takeovers []*scanner.MaintainerInfo, c func(string, string) string) {
-	fmt.Fprintf(w, "\n%s\n", c(colorCyan, "PACKAGES ELIGIBLE FOR MAINTENANCE TAKEOVER"))
-	fmt.Fprintf(w, "%s\n", c(colorCyan, strings.Repeat("─", 40)))
-	fmt.Fprintf(w, "%s\n\n", c(colorDim, "These packages are widely used but lack active maintenance."))
-
-	for _, t := range takeovers {
-		fmt.Fprintf(w, "  ● %s/%s", t.Owner, t.Repo)
-		if t.Stars > 0 {
-			fmt.Fprintf(w, " (%d stars)", t.Stars)
-		}
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "    Activity: %s | Bus factor: %d | Reason: %s\n",
-			t.ActivityPattern, t.BusFactor, t.TakeoverReason)
-	}
-	fmt.Fprintln(w)
-}
-
-func riskColor(level scorer.RiskLevel) string {
-	switch level {
-	case scorer.RiskCritical:
-		return colorRed
-	case scorer.RiskHigh:
-		return colorOrange
-	case scorer.RiskMedium:
-		return colorYellow
-	case scorer.RiskUnknown:
-		// Not green. An unscored headline must not read as a pass at a glance —
-		// the colour is the first thing seen and the default here was green.
-		return colorDim
-	default:
-		return colorGreen
-	}
-}
-
 func ciRiskColor(level scanner.CIRiskLevel) string {
 	switch level {
 	case scanner.CIRiskCritical:
@@ -694,14 +533,6 @@ func colorFunc(noColor bool) func(string, string) string {
 	}
 }
 
-func formatCount(count, total int) string {
-	if total == 0 {
-		return fmt.Sprintf("%3d", count)
-	}
-	pct := float64(count) / float64(total) * 100
-	return fmt.Sprintf("%3d (%4.1f%%)", count, pct)
-}
-
 func countWithVulns(deps []*scorer.DependencyScore) int {
 	count := 0
 	for _, ds := range deps {
@@ -710,167 +541,6 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 		}
 	}
 	return count
-}
-
-// hasExploitEvidence reports whether any CVE in the project carries real
-// exploitation evidence: KEV-listed (confirmed exploited) or EPSS >= 0.5
-// (FIRST.org estimates >50% exploitation probability within 30 days).
-// Gates the "actively exploited" wording in overallExplanation so the
-// CRITICAL boilerplate is evidence-based, not reflexive.
-func hasExploitEvidence(ps *scorer.ProjectScore) bool {
-	for _, ds := range ps.Dependencies {
-		for i := range ds.Vulns {
-			v := &ds.Vulns[i]
-			if v.InKEV {
-				return true
-			}
-			if v.EPSSScore != nil && *v.EPSSScore >= 0.5 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func overallExplanation(level scorer.RiskLevel, exploitEvidence bool) string {
-	switch level {
-	case scorer.RiskUnknown:
-		// The default branch below claims "no known vulnerabilities were found",
-		// which is precisely the false assurance an unscored scan must not give.
-		return "No verdict. This scan could not measure enough to rate the supply\nchain — see SCAN LIMITATIONS below for what was skipped. The score\nshown is indicative only; re-run with network access for a verdict."
-	case scorer.RiskCritical:
-		if exploitEvidence {
-			return "Immediate action required. Your supply chain has critical vulnerabilities\nwith evidence of active exploitation in the wild (CISA KEV or high EPSS)."
-		}
-		return "Immediate action required. Your supply chain has critical vulnerabilities\nor severely compromised dependencies."
-	case scorer.RiskHigh:
-		return "Action recommended. Known vulnerabilities with available fixes, or\ndependencies with serious maintenance/trust concerns."
-	case scorer.RiskMedium:
-		return "Monitor and plan. Some dependencies have stale maintenance, limited\nbus factor, or minor concerns that should be addressed over time."
-	default:
-		return "Supply chain is in good shape. Dependencies are well-maintained\nand no known vulnerabilities were found."
-	}
-}
-
-func depExplanation(ds *scorer.DependencyScore) string {
-	// Build a human-readable summary of WHY this score is what it is.
-	var reasons []string
-
-	if len(ds.Vulns) > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d known vulnerability(ies) with available fixes — update recommended", len(ds.Vulns)))
-	}
-
-	if ds.Maintenance != nil {
-		switch {
-		case ds.Maintenance.Archived:
-			reasons = append(reasons, "repository is archived — no future fixes expected, consider replacing")
-		case ds.Maintenance.MonthsSinceRelease >= 24:
-			reasons = append(reasons, fmt.Sprintf("no release in %d months — may be abandoned, monitor or find alternative", ds.Maintenance.MonthsSinceRelease))
-		case ds.Maintenance.MonthsSinceRelease >= 12:
-			reasons = append(reasons, fmt.Sprintf("last release %d months ago — maintenance may be slowing", ds.Maintenance.MonthsSinceRelease))
-		}
-	}
-
-	if ds.MaintainerInfo != nil {
-		if ds.MaintainerInfo.BusFactor <= 1 && ds.MaintainerInfo.ContributorCount > 0 {
-			reasons = append(reasons, "single key maintainer — if they stop, no one else can fix issues")
-		}
-		if ds.MaintainerInfo.TakeoverCandidate {
-			reasons = append(reasons, "candidate for maintenance takeover — widely used but unmaintained")
-		}
-	}
-
-	if ds.AIGenRisk != nil && ds.AIGenRisk.Score >= 25 {
-		reasons = append(reasons, "shows patterns common in AI-generated supply chain attacks — verify manually")
-	}
-
-	if ds.Typosquat != nil && ds.Typosquat.Confidence >= 0.4 {
-		reasons = append(reasons, fmt.Sprintf("name suspiciously similar to %s — verify this is the intended package", ds.Typosquat.SimilarTo))
-	}
-
-	// DataAvailable gates this for the same reason it gates the scorer's
-	// low_resilience factor: an unreachable proxy leaves Score at 0, and this
-	// prose asserts specifics ("few releases, no governance files") that were
-	// never measured.
-	if ds.Resilience != nil && ds.Resilience.DataAvailable && ds.Resilience.Score < 30 {
-		reasons = append(reasons, "low resilience — few releases, no governance files, uncertain long-term viability")
-	}
-
-	if len(reasons) == 0 {
-		switch ds.RiskLevel {
-		case scorer.RiskCritical:
-			return "Multiple severe risk factors detected."
-		case scorer.RiskHigh:
-			return "Significant risk factors — review and plan remediation."
-		case scorer.RiskMedium:
-			return "Some concerns but manageable — monitor over time."
-		default:
-			return "No significant concerns found."
-		}
-	}
-
-	if len(reasons) == 1 {
-		return reasons[0]
-	}
-
-	// Join first two reasons for conciseness.
-	return reasons[0] + "; " + reasons[1]
-}
-
-// writeDebugScoring emits the --debug-scoring diagnostic block in text form.
-// NON-NORMATIVE: layout may change between releases; do not parse this block.
-func writeDebugScoring(w io.Writer, c func(string, string) string, d *scorer.DebugScoring) {
-	fmt.Fprintf(w, "%s\n", c(colorDim, "── debug_scoring (non-normative) ─────────────────"))
-	fmt.Fprintf(w, "  mean=%d  severity_adjusted=%d  driver=%s\n",
-		d.MeanDepRiskScore, d.SeverityAdjustedVulnScore, d.HeadlineDriver)
-	fmt.Fprintf(w, "  step_function_inputs: CRITICAL=%d HIGH=%d MEDIUM=%d LOW=%d\n",
-		d.StepFunctionInputs.Critical, d.StepFunctionInputs.High,
-		d.StepFunctionInputs.Medium, d.StepFunctionInputs.Low)
-
-	if len(d.EnrichedCVEs) > 0 {
-		fmt.Fprintf(w, "  enriched_cves (%d):\n", len(d.EnrichedCVEs))
-		for _, cve := range d.EnrichedCVEs {
-			testOnly := "?"
-			if cve.TestOnly != nil {
-				if *cve.TestOnly {
-					testOnly = "test_only"
-				} else {
-					testOnly = "production"
-				}
-			}
-			downgrade := ""
-			if cve.DowngradedTier != "" {
-				downgrade = fmt.Sprintf(" → %s", cve.DowngradedTier)
-			}
-			enrich := ""
-			if cve.EnrichmentFailed {
-				enrich = " [enrichment_failed]"
-			}
-			reachInfo := ""
-			if cve.Reachability != "" {
-				reachInfo = fmt.Sprintf(" reach=%s", cve.Reachability)
-			}
-			if cve.ReachabilityDowngrade != "" {
-				reachInfo += fmt.Sprintf(" (%s)", cve.ReachabilityDowngrade)
-			}
-			fmt.Fprintf(w, "    %s on %s: %s%s [%s]%s%s\n",
-				cve.ID, cve.Module, cve.OriginalTier, downgrade, testOnly, enrich, reachInfo)
-		}
-	}
-
-	if len(d.PerDepInputs) > 0 {
-		fmt.Fprintf(w, "  per_dep_inputs (%d):\n", len(d.PerDepInputs))
-		for _, p := range d.PerDepInputs {
-			amp := ""
-			if p.FixAgeAmplifier {
-				amp = " amp"
-			}
-			fmt.Fprintf(w, "    %s: worst=%s high+_count=%d floor=%d%s vuln_score=%d risk=%d/%s\n",
-				p.Module, p.WorstSeverity, p.HighOrAboveCount, p.FloorApplied, amp,
-				p.FinalVulnScore, p.FinalRiskScore, p.FinalRiskLevel)
-		}
-	}
-	fmt.Fprintf(w, "%s\n\n", c(colorDim, "──────────────────────────────────────────────────"))
 }
 
 // reachabilityTag returns the bracket tag to append after a CVE ID for
@@ -886,20 +556,58 @@ func reachabilityTag(r string) string {
 	}
 }
 
-// allRequiredReachability returns true when the TIME-BOMBS list contains at
-// least one critical_cve entry and every such entry has Reachability "required".
-// Used to print an explanatory note that the headline reflects downgraded severity.
-func allRequiredReachability(bombs []scorer.TimeBomb) bool {
-	hasCVE := false
-	for _, b := range bombs {
-		if b.Kind == "critical_cve" {
-			hasCVE = true
-			if b.Reachability != "required" {
-				return false
-			}
-		}
+// timeBombScopeNote says what makes a dependency a time bomb, so an archived
+// transitive module is not mistaken for an outdated dependency that an update
+// would fix. Shared by the text and PDF reports; the weekly issue renderer
+// (.github/scripts/render-scan-report.sh) keeps its own copy, which also
+// relates it to the workflow's stale-dependency check.
+const timeBombScopeNote = "Any dependency, direct or transitive and not confirmed as test-only or outside the build, that is " +
+	"archived upstream or has a CISA KEV-listed or CRITICAL CVE. Updating cannot fix an archived module, because " +
+	"upstream has stopped: it has to be replaced or removed. Age alone does not make a time bomb: " +
+	"modules with no recent release are counted under Unmaintained."
+
+// branchSuffix renders the branch an activity date was read from, " (main)",
+// or "" when the branch is not known.
+func branchSuffix(branch string) string {
+	if branch == "" {
+		return ""
 	}
-	return hasCVE
+	return " (" + branch + ")"
+}
+
+// deprecationSuffix renders a deprecation message as ": <message>", or "" when
+// there is none (a deprecation signalled by the proxy carries no message).
+func deprecationSuffix(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return ": " + msg
+}
+
+// wrapWords splits s into lines of at most width runes, breaking at spaces.
+// A single word longer than width gets a line of its own.
+func wrapWords(s string, width int) []string {
+	var lines []string
+	var line strings.Builder
+	n := 0 // runes in line
+	for _, word := range strings.Fields(s) {
+		wn := utf8.RuneCountInString(word)
+		if n > 0 && n+1+wn > width {
+			lines = append(lines, line.String())
+			line.Reset()
+			n = 0
+		}
+		if n > 0 {
+			line.WriteByte(' ')
+			n++
+		}
+		line.WriteString(word)
+		n += wn
+	}
+	if n > 0 {
+		lines = append(lines, line.String())
+	}
+	return lines
 }
 
 // vulnReachabilityCountHeader builds the "X called, Y imported, Z required"
@@ -988,4 +696,27 @@ func writeVulnAliasGlossary(w io.Writer, ps *scorer.ProjectScore, stdlib []scann
 		fmt.Fprintf(w, "  %s = %s\n", e.ID, strings.Join(e.Aliases, ", "))
 	}
 	fmt.Fprintln(w)
+}
+
+// writeScanInfoText says what the vulnerability scan ran with, so a letter can be reproduced: the platform, the Go release the
+// standard library was matched against, the govulncheck version and the vulnerability database with its last-modified time.
+func writeScanInfoText(w io.Writer, info *scanner.ScanInfo) {
+	if info == nil {
+		return
+	}
+	var parts []string
+	add := func(label, v string) {
+		if v != "" {
+			parts = append(parts, label+" "+v)
+		}
+	}
+	add("platform", info.Platform)
+	add("Go", info.GoVersion)
+	add("govulncheck", info.GovulncheckVersion)
+	add("database", info.VulnDB)
+	add("database modified", info.VulnDBLastModified)
+	if len(parts) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nSCAN DETAILS\n  %s\n", strings.Join(parts, " · "))
 }

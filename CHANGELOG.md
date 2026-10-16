@@ -3,6 +3,556 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-16
+
+Grading release. The published result is now one letter, A to F, with the row
+that decides it and the evidence behind it, in place of the 0-100 risk score.
+This is a breaking change to the JSON, text, PDF and SBOM output and to the
+policy file (see "Breaking: Grading v2" under Improvements). The scan pipeline
+is now an importable package, `pkg/runner`. The grade's inputs are more
+precise: how each reachable vulnerability is reached, severity from OSV alias
+records, which modules are in the build, maintenance from the default branch's
+last commit, go.mod deprecation notices, and standard-library vulnerabilities.
+
+### New Features
+
+#### Inputs of the grade
+
+- **The module's own advisories** (`scanner.ScanModuleAdvisories`): OSV advisories for the exact published version of
+  the scanned module, assumed called (govulncheck does not check the module it starts from).
+- **Fix-release dates** (`scanner.ResolveFixDates`, `ResolveStdlibFixDates`): the later of the advisory's fix date and the
+  module proxy's time for the first fixed version.
+- **Retraction** is read from the `retract` directives in the latest go.mod and graded like deprecation.
+- **Archived status** now follows the repository a module is published from (vanity paths such as `gopkg.in/yaml.v3`),
+  and an archived flag that could not be read is reported as unchecked, never as not archived. A repository that does
+  not exist (404) is reported as `repo_not_found` and is not blamed on the GitHub API.
+- **Build status:** a module that is not listed in `go.mod` and is reachable only from a build-tag-only requirement is
+  now classified as not built instead of unknown (Go 1.17 and newer `go.mod` files).
+- **Strongest call path:** a path that does not just format a message (`fmt`, `log`, an `Error` or `String` method) is
+  preferred, and `condition` says what the project must do to reach the vulnerable code.
+- **Response history** (`scanner.ScanResponseHistory`, `--response-history`): the median number of days the project took
+  to adopt comparable fixes, with at least three samples.
+- **Request bounds:** the resilience scan samples at most 24 versions per module and a shared budget of 3,000 date
+  requests, and GitHub repository, owner and latest-commit answers are cached per scan.
+
+
+
+- **Audit fixes after review (same release):**
+  - `--module-version` must be a full version (`v1.4.0`, `v1.4.0-rc.1`, `v2.0.0+incompatible`), checked before any scan;
+    `--response-history` needs `--module-version`. A policy is now evaluated even for a module with no dependencies (it
+    used to be skipped with the report), and `--help` says the exit code ignores the grade unless a policy is given.
+  - The grade notes what it could not check instead of reading it as clean: a reached finding whose known-exploited status
+    could not be checked (CISA catalog), and modules whose archived flag was never read for a reason other than a failed
+    call. A row whose upkeep could not be read has no letter. A checksum mismatch is always reported
+    (`checksum_mismatch`), also when another row already scores F.
+  - A module confirmed not to be compiled in is graph-only whatever its reachability says; `C*` marks only a C that
+    rests on an estimate; a row's vulnerability score is capped at 100; the +5 further-advisory step is for reached findings
+    only; Pending is decided on the letter a missing check could change, not on the score.
+  - Request bounds: the fix-date stage shares one 60-second deadline, response history is bounded (fixes per dependency,
+    a request budget and a deadline), and the resilience budget is allocated in module order so a scan is repeatable.
+  - A Pending grade publishes no score and no deciding row (what is known is in `pending.known`); the same vulnerability under
+    two identifiers merges the same way whatever the order; the archived flag of `gopkg.in/*` modules is read through the
+    host's repository convention (the module proxy records no origin for most of them); `-f` and `--policy-preset` are
+    checked before the scan; the token is validated when `--module-version` is set even for a module with no dependencies;
+    `policy.Evaluate` no longer panics when only a grade is passed.
+  - The retired score wording is gone from the published warnings; `.github` workflows and scripts read the grade.
+
+#### How long the fix existed before the scanned version was released
+
+- With `--module-version`, the module proxy's release time of that version (`scanner.ModuleVersionTime`, cached) is
+  compared with each fix's release date. The JSON `response.fix_age_at_release_days` and the text "Fix available for 87
+  days before this version was released (120 days to the scan date)" say how long the fix had existed at release; both are
+  absent when the release time is unknown or the fix came after the release. The letter does not change.
+
+#### NVD API key for severity lookups
+
+- **`--nvd-api-key` (or `NVD_API_KEY`) raises the NVD rate limit** of the CVE
+  severity fallback from 5 to 50 requests per 30 seconds. The key is sent only
+  as an `apiKey` header to `services.nvd.nist.gov`, with surrounding whitespace
+  trimmed. A key NVD rejects (404 with `message: Invalid apiKey.`, or 401)
+  produces one warning and the scan continues unauthenticated, so a bad key
+  never costs severities that no key would have found. A 403 does not drop
+  the key. `pkg/runner.Options`
+  gains `NVDAPIKey`, and `scanner.ScanVulnsWithOptions` is the new entry point
+  (`ScanVulns` is unchanged).
+
+#### Call path for every reachable vulnerability
+
+- **JSON reports now carry `call_path` on each vulnerability whose
+  reachability is `called`:** one example of how the project reaches the
+  vulnerable function, outermost frame first, condensed to the entry frame, the
+  frame where each package hands over, and the vulnerable function itself
+  (at most 8 entries). A longer path is cut in the middle and a `"..."` entry
+  marks the cut, so a consumer must not treat every entry as a function name.
+  When a vulnerability has several vulnerable symbols the shortest path is
+  kept, with ties broken on the path string, so the choice does not depend on
+  govulncheck's output order. It is static-analysis evidence of reachability,
+  not proof of exploitability. Vulnerabilities that are only `imported` or
+  `required` have no call path. `pkg/runner.Result` carries the same field
+  through `scanner.Vulnerability.CallPath`.
+- **`call_trace` gives each `call_path` entry a source position (#134).** It is
+  an array of `{name, module, version, file, line, column, project, elided}`
+  objects (empty fields omitted), the same length and order as `call_path`,
+  present only for `called` findings; the cut slot is `{"elided": true}`. A
+  non-sink frame's position is the call it makes and the last entry's is the
+  vulnerable function's declaration; because the path is condensed, a kept
+  frame's position can point at a call to a dropped frame. `file` is relative
+  to that frame's own module (the standard library's to GOROOT), so read it
+  with `module` and `version`; it is dropped when govulncheck reports an
+  absolute path or one outside the module, while `line` and `column` are kept.
+  `project` is true for frames in govulncheck's scan roots, taken from its
+  `SBOM` message, and is false everywhere with a govulncheck that emits none.
+  Equally short paths are ordered on the path string and then on frame
+  positions. Exposed as `scanner.Vulnerability.CallTrace` and
+  `scanner.CallFrame`.
+- **`called_symbols` lists every vulnerable symbol found called for an
+  advisory in a module (#134).** govulncheck emits one finding per symbol while
+  `call_path` keeps one path. The list is sorted, deduplicated and capped at 20
+  (the first 20 in sorted order). Exposed as
+  `scanner.Vulnerability.CalledSymbols`.
+- **Text and PDF reports show a `Reached via:` line under each called
+  finding.** For example `Reached via: example.com/u1repro.main (main.go:13) →
+  golang.org/x/crypto/ssh/agent.keyring.Add`. `(file:line)` is shown only on
+  project frames, `...` marks a cut, and a `Vulnerable symbols called:` line
+  follows when there is more than one symbol. The PDF separates frames with
+  ` > ` because its standard font has no arrow glyph. There is no call-site
+  count: govulncheck emits one representative stack per symbol, so the number
+  of call sites is not in its output. `call_trace` and `called_symbols` do not
+  affect scores or policy results.
+
+#### `pkg/runner`: the scan pipeline as an importable package
+
+- **`runner.Run(ctx, Options)` runs the full scan-and-score pipeline in
+  process.** `cmd/unisupply` now calls it, so the CLI and library callers share
+  one implementation; flags and output are unchanged. Offline mode is the
+  process-wide `pkg/offline` switch, so call `offline.Enable()` before `Run`.
+- **`Result` tells a library caller when a scan is incomplete.**
+  `VulnScanErr` is non-nil when the vulnerability scan did not complete, and
+  `Interrupted` is true when the context ended before every scanner finished.
+  A caller must not present either as "no vulnerabilities".
+- **`Options.RequireGithubToken` and `Result.GithubTokenRejected`.** `Run`
+  validates `Options.GithubToken` with GitHub before the scanners use it. With
+  `RequireGithubToken`, a missing, rejected or unvalidated token fails `Run`
+  with an error wrapping `runner.ErrGithubTokenPrecondition`; without it, a
+  rejected token is dropped, the scan runs unauthenticated, and
+  `GithubTokenRejected` is set.
+
+### Improvements
+
+#### Breaking: Grading v2, one letter A to F instead of a 0-100 score
+
+The published result is now a letter with the evidence behind it, decided by one rule you can trace (see
+[docs/grading.md](docs/grading.md)). **This changes the JSON, text, PDF and SBOM output and the policy file, and it
+breaks consumers that read the old fields.**
+
+- **New `grade` object in the JSON report, and in `pkg/runner.Result.Grade`.** The module itself and every dependency
+  get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst row, which
+  the result names with a one-sentence reason. Called vulnerabilities score 90/70/45/15 (critical/high/medium/low),
+  imported-only code at most 50, graph-only findings are shown and not graded, a called known-exploited finding is F,
+  test-only findings are halved, archived or deprecated modules count up to C only, and whole-tree rules raise the letter
+  (three called high or critical findings, any called critical, a checksum mismatch: F; five called or imported high or
+  critical findings: at least D). A finding with no published severity is scored as medium and the letter is marked `C*`.
+- **Pending.** When a check the grade needs did not run (vulnerability scan failed, scan did not finish, the module's
+  own status or advisories could not be read, a dependency's maintenance data is missing and could change the letter) the
+  grade has no letter and says which check and why. It is never an A.
+- **Response window.** A fix released within the last 14 days is labelled with the date its window ends; the label never
+  changes the letter. `fix_released_at` and `fix_date_source` come from the module proxy.
+- **Deprecated, kept for one release (JSON only), derived from the grade:** `overall_risk_score` (the worst row's policy
+  value), `overall_risk_level` (the coarse band of the letter: A and B read LOW, C MEDIUM, D HIGH, F CRITICAL, UNKNOWN
+  without a letter), `headline` (the deciding row in the old shape, with an empty `candidates`), the `*_risk_count`
+  summary fields (dependency rows by level) and the per-dependency `risk_score` / `risk_level`. They no longer carry their
+  old meaning (a weighted risk score); `deprecated_fields` in the report lists them. On a Pending result
+  `overall_risk_score`, `headline.score` and the per-dependency `risk_score` are omitted (not 0, which a v1 gate would
+  read as the cleanest result); `overall_risk_level` stays `UNKNOWN`. Read `grade` instead: they are removed in the next
+  release.
+- **Removed from every output (no equivalent in the grade):** `headline_driver`, `mean_dep_risk_score`,
+  `severity_adjusted_vuln_score`, `worst_cve_*`, `diagnostics`, `debug_scoring`, `headline_unscored_reason`, the
+  per-dependency `score_breakdown` and `risk_factors`, `severity_scored`, `takeover_candidates` (and
+  `pkg/runner.Result.Takeovers`), the AI-generation and EPSS-adjusted displays, and the SBOM `unisupply:risk_score` /
+  `unisupply:risk_level` (now `unisupply:grade` and `unisupply:grade_reason`). The Go types behind them in `pkg/report`
+  (`JSONTakeover`, `JSONScoreBreakdown`, `JSONDiagnostics`, `JSONCandidate`) are removed; `JSONHeadline` and the
+  deprecated fields above remain.
+- **CLI:** `--min-risk` and `--debug-scoring` are removed. New `--module-version` grades the scanned module itself at a
+  published version, and `--response-history` adds how fast the project adopted past fixes.
+- **Policy:** `max_risk_score` and `max_overall_score` are removed (a policy file that contains them is rejected). New
+  `max_grade` ("A" to "F") and `allow_pending`. A Pending grade fails `max_grade` unless `allow_pending` is set. The
+  presets are `strict` = B and `moderate` = C. `pkg/policy.EvalInput` gains `Grade`.
+- **Standard library findings** are graded as a row named `stdlib`.
+- **Go API breaks** (library callers of `pkg/report`, `pkg/policy`, `pkg/runner`, `pkg/grade`):
+  - `report.TextOptions`, `report.JSONOptions` and `report.PDFOptions` no longer have a `Takeovers` field.
+    `report.TextOptions.MinRisk` is removed too (no flag set it), and the text writer no longer prints the
+    `debug_scoring` block.
+  - `report.JSONReport` loses `OverallRisk`, `OverallLevel`, `MeanDepRiskScore`, `SeverityAdjustedVulnScore`,
+    `HeadlineDriver`, the headline and diagnostics objects, `takeover_candidates` and the per-dependency risk fields.
+    The types `report.Headline`, `JSONHeadline`, `JSONCandidate`, `JSONDiagnostics`, `JSONScoreBreakdown` and
+    `JSONTakeover` are removed. `JSONDependency` loses `RiskScore`, `RiskLevel`, `RiskFactors` and `ScoreBreakdown`,
+    `JSONSummary` loses the `*RiskCount` fields, and `JSONVuln` loses `SeverityScored`.
+  - `report.SBOMOptions` gains `Grade`. CycloneDX and SPDX carry `unisupply:grade` per component with the same label as
+    the text report (`C*` when estimated) and no property or annotation for a row with no letter, plus the overall grade
+    (a letter, or `PENDING (<check>)`) on the root component (CycloneDX `metadata.component`) and as an SPDX document
+    annotation.
+  - `policy.Policy.MaxRiskScore` and `MaxOverallScore` are removed. `MaxGrade` and `AllowPending` are new. An enabled
+    `max_grade` **fails** when `policy.EvalInput.Grade` is nil (grading did not run), and on a Pending grade unless
+    `AllowPending` is set. `Result.FormatText` now prints warnings on a PASS (`PASS (1 warning): ...`) and counts only
+    errors in the `FAIL: N policy violation(s)` line, listing warnings separately.
+  - The AI-generation scanner no longer runs and its result is not published (`pkg/scanner/aigen.go` is kept but not
+    called).
+  - Fixes that need a newer Go: each finding with a fix now says which Go the fixed version needs (`fix_requires_go`, the `go`
+    directive of its go.mod, read from the module proxy) and whether taking it raises the scanned module's minimum Go
+    (`response.fix_compat` = `raises_minimum` | `compatible`, in the response text); `grade.notes` and `grade.fixes_need_newer_go`
+    count them. The letter does not change for it. New `scanner.ResolveFixGoRequirements`, `Vulnerability.FixRequiresGo`.
+  - Severity lookups (from the 214-module replay): a lookup that FAILED is now a check that did not run, not an
+    unpublished severity. NVD requests are paced (5 per 30 s without `NVD_API_KEY`, 50 with), retried with backoff and
+    `Retry-After` (up to 3 times, within a 3-minute budget), and every CVSS v3.1, v3.0 and v4.0 metric counts, also a
+    Secondary (CNA) one with the record still "Awaiting Analysis". When it still fails, the grade is Pending
+    (`pending.check` = `severity_lookup`) if a different severity would change the letter; before, the finding was
+    estimated as MEDIUM and 23 modules hit by the 8 Oct x/net advisories graded `C*` instead of F. `grade.Finding` has the
+    new field `SeverityLookupFailed`.
+  - A dependency with no tagged release (the proxy answers 404 for `@latest`) is read at its pinned version, so it no
+    longer leaves the grade Pending for ever (`itchyny/go-yaml`).
+  - `runner.Options.StrictArchivedStatus` is new (`--strict-archived`, default off): by default a grade is given when the
+    only gap is a dependency's archived flag that GitHub's rate limit kept unread (an archived dependency adds at most 20 to
+    its row): the result lists the modules in `grade.archived_unread` and says in a note that the letter may be one band
+    better. With the strict rule the grade is Pending instead (a service that publishes letters sets it). The module's
+    own archived flag is always required.
+  - `runner.Options.GradeStdlib` is new (`--grade-stdlib` on the CLI, default off): the Go standard library's advisories
+    are always listed (`runner.Result.StdlibVulns`, with the Go release they were matched against in `grade.notes`), but
+    they decide the letter only when it is set, as in the agreed rules. A module with no dependencies runs the
+    vulnerability scan too and lists them (with the scan block); a failed scan is Pending only under `--grade-stdlib`,
+    otherwise a warning. The "scanned at go1.x" note is written only when the scan ran (also on the multi-dependency
+    path, where it said so after an offline or failed scan).
+  - `archived_unread` and its note appear only when an unread archived flag could change the letter (an unread flag adds
+    at most 20 to a row, so only an A can move); on C, D and F, or when the row already scores 20 or more, the list is
+    empty and there is no note. A policy `max_grade` now fails when the letter equals the maximum and
+    `archived_unread` is not empty (`max_grade: "A"`), and otherwise passes with a warning naming how many flags were
+    unread and saying to set `GITHUB_TOKEN`.
+  - The CISA KEV catalog fallback has an age cap of 30 days (`scanner.KEVMaxStaleAge`): a cached copy older than that is
+    not a catalog, so known-exploited status is unchecked (Pending `known_exploited`, as with no catalog); within it,
+    the note and warning state the copy's date and age.
+  - `scan.govulncheck_version` is the version of `golang.org/x/vuln` linked into the binary (from the build info), not
+    govulncheck's `scanner_version`, which in-process is unisupply's own version. It is omitted when the build info does
+    not list it.
+  - A locally replaced dependency is detected with go.mod's own rule (`GoMod.ReplacementFor`): a replace scoped to one
+    version (`example.com/lib v1.0.0 => ../lib`) does not make another selected version local.
+  - `grade.Result` gains `ChecksumMismatch` and `ChecksumDetail` (`checksum_mismatch`, `checksum_detail` in JSON), and
+    a `grade.RowResult` may have an empty `Letter` (the key is present and `""`, not omitted): its upkeep could not be
+    read (the text and PDF reports show `-`).
+  - JSON contract since the first draft of this change: `upkeep_state` has the new value `not_assessed` (the module
+    itself without a published version, a locally replaced dependency, the standard library); `pending.check` has the new
+    values `checksum` and `known_exploited`; a Pending result has neither a letter, a `deciding` row nor a `score`.
+- **Published scan warnings** no longer carry the retired score language: lines about excluded axis weights, scores
+  that are "NOT comparable" and the high-EPSS "verify reachability manually" notice are dropped or shortened (for
+  example "vulnerability scan did not run"). Warnings about data that could not be fetched are kept.
+- **The 0-100 numbers kept in the grade rows** (`score`, `vulnerability_score`, `upkeep_score`, `grade.score`) are
+  policy values shown for traceability, not a measurement and not a risk score. The CI/CD audit keeps its own 0-100
+  score.
+- **The repository's own CI** now reads `.grade.letter`, `.grade.pending`, `.grade.deciding` and `.grade.rows[]`; the
+  weekly issue is filed on C, D, F or Pending. `.github/security-policy.json` sets `allow_pending`.
+
+#### Scores can change in this release
+
+- **Scores and policy results can change for existing projects, in both
+  directions.** Scores can drop for repositories whose p95 or archived floor was
+  set by a module that is only in the module graph and never built. Test-only
+  classification now works for the first time, so every test-only discount (CVE
+  tier, archived and CVE floors, time bombs, pseudo-version checks and the
+  `forbid_pseudo_versions` exemption) applies to real scans; scores and policy
+  results can change for repositories with test-only dependencies. Example from
+  a real scan: `spf13/cobra` at `adbc881` went from 34 (driven by
+  `gopkg.in/check.v1`, which is never built) to 26 (#135).
+
+#### Build membership: `in_build` and `platforms`
+
+- **JSON dependencies now carry `in_build` and `platforms`.** `in_build: false`
+  marks a module that is in the module graph only: no package of it is imported
+  by your code or your tests. `platforms` lists the operating systems
+  (`linux`, `darwin`, `windows`) of a module built on only some of them, such as
+  `github.com/inconshreveable/mousetrap` in `spf13/cobra`, which is imported
+  only on Windows. Both are omitted when unknown, and an unknown value never
+  discounts anything. The text and PDF reports label confirmed graph-only
+  modules `outside build`, next to `test-only`.
+- **Classification uses the main module's own package lists** (`go list -e
+  -deps ./...` and `-deps -test ./...`, for each of linux, darwin and windows
+  on amd64 and arm64, with `CGO_ENABLED` 0 and 1) instead of `go list all`.
+  Every target is listed whatever the host, so the result does not depend on
+  the machine the scan runs on. A package behind a custom build tag is not
+  seen, so a module that `go.mod` requires directly but that no list contains
+  is left unclassified rather than called graph-only, and so is every module
+  reachable from it in the module graph (gin's `sonic` dependencies under
+  `-tags=sonic`, for example). If one platform fails to list, the others still
+  classify, and the warning names the one that failed. A module needed only by
+  a go 1.24 `tool` directive is classified as outside the build. Under `--offline` these lists run with `-mod=readonly`,
+  so the scanned project's `go.mod` and `go.sum` are never rewritten; when they
+  need updating, classification is unavailable and the warning names that cause.
+  See [docs/scanners.md](docs/scanners.md#build-membership).
+
+#### The headline counts only modules in the build
+
+- **`p95_dep_risk` and `archived_floor` ignore modules that are confirmed
+  test-only or outside the build.** A module with an unknown classification is
+  still counted. Previously an unmaintained module that was only in the graph
+  could set the headline, or a HIGH archived floor, for code that is never
+  compiled in.
+- **The p95 driver is now deterministic and says when it is one of several.**
+  Modules at the same score are ordered by module path, so repeated scans name
+  the same module. When others share the score, the headline candidate carries
+  `tied_with` (the number of other modules at that score) and its reason reads
+  "one of N modules at S".
+- **The headline says when dependency health alone decided it.** When the
+  vulnerability scan ran and no vulnerability or integrity candidate scored,
+  the reason now reads "no reachable vulnerabilities; grade reflects dependency
+  health (maintenance, maturity) of built modules" before the driving module,
+  so it is not mistaken for a vulnerability finding. Score and level are
+  unchanged.
+
+#### Modules outside the build are exempt from time bombs, pseudo-version checks and policy
+
+- **Time bombs skip modules that are outside the build.** An archived or
+  CRITICAL-CVE module that no package imports cannot detonate in the shipped
+  code, so it is no longer listed.
+- **A pseudo-version pin on a module outside the build is INFO with no score
+  penalty**, as for a test-only module, and the `forbid_pseudo_versions` policy
+  rule no longer fails on it.
+- **The `no_unmaintained_months`, `no_archived` and `no_deprecated` policy rules
+  skip modules that are outside the build.** `--policy-preset strict` no longer
+  fails on an archived or unmaintained module that is only in the module graph,
+  which the scorer already did not count. A module with an unknown classification
+  is still checked, and so is a test-only module.
+- **Some checks deliberately still apply to such modules:** CVE severity and
+  `cve_floor` (reachability already discounts a vulnerability in a module that
+  is not linked in), and `integrity_floor` and `forbid_replace_redirect` (a
+  `replace` directive is a `go.mod`-level signal).
+
+#### Maintenance uses the default branch's last commit
+
+- **Scores can change in both directions.** A repository whose default branch
+  is worked on but that rarely tags a release is no longer scored as abandoned,
+  and a deprecated module is no longer scored by its dates at all (see below).
+- **The maintenance score, the `unmaintained` risk factor, the unmaintained
+  counts and the `no_unmaintained_months` policy rule use the newer of the last
+  release and the last commit on the default branch.** The commit time comes
+  from the module proxy (`@v/<branch>.info`, with the GitHub default branch,
+  else `main`, then `master`), so it needs no token or GitHub quota and covers
+  modules outside GitHub. With a token, the GitHub commits API is the fallback
+  when the proxy query fails. GitHub's `pushed_at` is not used: it moves on
+  pushes to any branch, Dependabot's included. The JSON `maintenance` object
+  gains `last_activity`, `months_since_activity`, `activity_source` and
+  `activity_branch`, and the text and PDF reports show "Last commit". The text
+  report's maintainer section now labels its `pushed_at` date "Last push (any
+  branch)". Without activity data the release age alone is used, as before.
+  Branch queries time out after 10 seconds, and resolved branches and the
+  `go.mod` files read for deprecation are cached on disk for 24 hours.
+- **`no_unmaintained_months` is more lenient for repositories with recent
+  default-branch commits:** a dependency passes when it was released or
+  committed to within the limit, and the violation names both ages.
+
+#### go.mod deprecation notices are read (#138)
+
+- **A module is now deprecated when the `go.mod` of its latest version carries
+  a `// Deprecated:` notice,** the way `go list -m -u` and `go get` report it.
+  Before, only a 410 from the proxy counted, which almost never happens, so
+  modules such as `github.com/golang/protobuf` were not reported. The message,
+  which usually names the successor, is reported as
+  `maintenance.deprecation_message`, in the text and PDF reports and in the
+  `no_deprecated` violation.
+- **A deprecated module's maintenance component is 100, like an archived
+  one,** whatever its release or commit dates. `no_deprecated` is not enabled
+  by either preset, so a custom policy that enables it can now fail on modules
+  it previously passed.
+
+#### Severity resolved from OSV alias records
+
+- **Advisories whose severity was left `UNKNOWN` by NVD or GitHub rate
+  limiting now resolve from OSV itself.** The GHSA and CVE aliases of an
+  advisory are looked up on OSV before NVD and GitHub, which become fallbacks.
+  CVSS v3.0/v3.1 vectors on CVE records are scored locally. The advisory's
+  `severity_alias` JSON field names the alias that supplied the severity.
+  On a cold, unauthenticated scan of a module with 35 reported advisories,
+  NVD requests fell from 84 (68 rate-limited) to 24 (11 rate-limited), and the
+  advisories with a published severity that were left `UNKNOWN` now resolve.
+- **`severity_source: "unscored"` separates "not published yet" from "lookup
+  failed".** When every source consulted (OSV, NVD, GitHub) answered but
+  none has a severity, the advisory is reported as unscored instead of as an
+  enrichment failure. A rate-limited or failed lookup still counts as a
+  failure, because it may have missed a published severity. Scoring
+  is unchanged (MEDIUM, or HIGH when called). The text report labels it
+  `[severity_unpublished]`, the PDF lists it under Data-quality Notes, and its
+  warnings collapse into their own summary line.
+
+#### Time bombs explained in every report; PDF reports now list them
+
+- **The text report, PDF report and weekly security issue now say what a
+  time bomb is:** any dependency, direct or transitive and not confirmed as
+  test-only or outside the build, that is archived upstream or has a CISA
+  KEV-listed or CRITICAL CVE. An archived
+  module cannot be fixed by updating — it has to be replaced or removed — and
+  age alone does not make a time bomb (modules with no recent release are
+  counted under Unmaintained).
+- **PDF reports now have a Time Bombs section** under Key Findings, listing
+  each one's kind, module and detail. Previously the PDF named only the
+  headline rule on its cover (`Driver: archived_floor`), not the module
+  behind it.
+- **The weekly security issue explains its stale-dependency check.** It could
+  read "Stale dependencies (>90d): false" next to an archived time bomb — for
+  example `github.com/google/go-cmdtest` in 2026-W40. That is not a
+  contradiction: the stale check covers direct dependencies that have a newer
+  version available, pinned more than 90 days ago, and `go-cmdtest` is
+  transitive with no newer release. Both sections of the issue and the job
+  summary now carry a note stating their scope, and the renderer has bats
+  tests in CI.
+
+#### Standard-library vulnerabilities in JSON and PDF reports
+
+- **JSON and PDF reports now include standard-library vulnerabilities,** which
+  only the text report listed before. JSON gains a top-level
+  `stdlib_vulnerabilities` array after `dependencies` (omitted when there are
+  none); the PDF gains a "Standard Library Vulnerabilities" section before the
+  vulnerability ID alias appendix, and that appendix now covers
+  standard-library aliases. Entries carry the same evidence as a dependency
+  vulnerability (`reachability`, `call_path`, `call_trace`, `called_symbols`,
+  EPSS and KEV fields in JSON; severity, fix version, `Reached via:` and
+  `Vulnerable symbols called:` in the PDF), except that JSON never sets
+  `severity_scored`.
+- **All three reports list them in the same order, sorted by advisory ID**,
+  instead of govulncheck's finding order. The text report's
+  `STDLIB VULNERABILITIES` section now also prints `Reached via:` and, when more
+  than one symbol is called, `Vulnerable symbols called:`.
+- **They are not scored.** The scorer does not read standard-library
+  vulnerabilities, so they are not counted in `summary` and change no risk
+  score or the headline.
+
+### Bug Fixes
+
+- **A failed severity lookup on one alias no longer makes the grade Pending when another alias of the same vulnerability
+  supplies the severity.** When advisories are merged, `SeverityLookupFailed` is kept only while the merged severity is
+  still unknown.
+- **A scan that needs a newer Go than unisupply was built with now says so.** govulncheck runs in-process, and the loader's
+  "file requires newer Go version go1.27 (application built with go1.26)" error was all a user saw. The scan now stops with
+  "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27; rebuild unisupply with go1.27 or
+  newer", which is the `vulnerability_scan` Pending reason. New exported `scanner.CheckToolchain(scanGo)` lets gorisk check
+  at startup. Only a newer Go minor (language) version is refused: a newer patch release or release candidate of the same
+  minor version (go1.27.1 to go1.27.2) loads fine and is scanned.
+  A scan that failed (including this refusal) is also named in the report `warnings`, for a module with no dependencies
+  too, not only on stderr.
+  The v0.7.0 release binaries are built with Go 1.26.9. To scan code that needs go1.27, install unisupply with Go 1.27
+  or newer (`go install github.com/unidoc/unisupply/cmd/unisupply@v0.7.0`).
+- **The module's own advisories count toward the known-exploited check.** With no CISA catalog (not even a copy under 30
+  days old), a called advisory on the module itself with a CVE is now Pending `known_exploited`, like a dependency's, instead
+  of a D.
+
+- **`--require-github-token` now fails (exit 3) when GitHub rejects the
+  token, and a rejected token is reported as such.** The flag used to check
+  only that a token was present. GitHub answers 401 to every request that
+  carries a bad token, so every maintainer lookup failed individually, the scan
+  exited 0, and the only signal was the same "GitHub API unauthenticated"
+  warning a run with no token produces. The token is now validated once, after
+  the dependency graph is resolved and before any scanner runs, with a request
+  to `api.github.com/rate_limit`; a network error or 5xx is retried twice with
+  a short backoff. A rejected token exits 3 under the flag; without it the scan
+  warns (`GitHub token rejected (401) — continuing unauthenticated`), records
+  the same notice in the report's warnings (so it also shows under
+  `--progress none` and in JSON output), and drops the token so the scanners
+  really run unauthenticated. The GitHub rate-limit warnings then say the token
+  was rejected instead of asking for `GITHUB_TOKEN`. Under the flag, a token
+  that could not be validated (a network error, or any response other than 200
+  and 401, such as 403, 429 or 5xx) also exits 3, with a different message;
+  without the flag it warns and keeps the token. Ctrl-C during the check exits
+  as an interrupted run, not as a token failure. `--offline` skips the check,
+  and the warning no longer says the requirement is "satisfied". The new
+  request is listed in the README network-contract table.
+- **The same scan now produces the same report.** Several lists were built
+  from Go maps, so their order changed from run to run: the takeover
+  candidates in the text, JSON and PDF reports, CI/CD findings (workflow jobs
+  and step `env`/`with` secrets), and the CycloneDX `dependsOn` lists and SPDX
+  package list. In SPDX, each `SPDXRef-Package-N` ID could point at a
+  different module on every run. All of these are now sorted (takeovers and
+  SBOM entries by module path, CI jobs by job ID), so SPDX package IDs follow
+  module-path order. Fields that are meant to differ per run (timestamps, the
+  CycloneDX `serialNumber`, the SPDX `documentNamespace`) are unchanged.
+- **Modules from the same GitHub repository now report their own
+  sub-dependency count.** Modules such as `foo/bar` and `foo/bar/v2` shared
+  one cached maintainer record, so "Pulls in N sub-dependencies" (text) and
+  `sub_dependencies` (JSON) showed the same, last-written count for all of
+  them, and that count changed from run to run.
+- **The takeover list names each repository once**, sorted by owner/repo.
+  Several modules from one repository used to produce identical rows.
+- **The CI/CD write-all permissions finding names unnamed jobs by their job
+  ID.** A job without a `name:` key was reported as "Job '' has write-all
+  permissions".
+- **Test-only classification could never report a test-only module (#135).**
+  It compared `go list all` with `go list -test all`, which list the same
+  modules, so no module was ever marked test-only and every test-only discount
+  was inactive. For a `go.mod` below go 1.16 it also counted modules used only
+  by the tests of your dependencies as production: `gopkg.in/check.v1` drove the
+  headline of `spf13/cobra` this way. Modules are now classified from
+  `go list -deps ./...` and `-deps -test ./...`.
+- **Classification failed outright for repositories that `//go:embed` a
+  directory that is not in the checkout.** A build output such as `web/dist` is
+  usually gitignored, so a fresh clone made `go list` exit with `pattern
+  web/dist: no matching files found` and every dependency went unclassified. The
+  listing now tolerates per-package errors that do not hide a module, and a scan
+  note names the failing package. Notes are shown apart from the scan
+  limitations (text report heading "SCAN NOTES", JSON `notes`) because they do
+  not make the results incomplete. Errors that do hide a module (an import no
+  module provides, a missing `go.sum` entry) still make that platform
+  unavailable instead of producing a wrong answer.
+- **Platform-specific dependencies were unclassified (#135).** A module imported
+  only on another operating system, such as `mousetrap` on Windows, was in
+  neither list on a macOS or Linux host. It is now classified as production and
+  its `platforms` are reported.
+- **The module named as the p95 headline driver was arbitrary when several
+  modules had the same score.** It now follows module-path order, and
+  `tied_with` reports the tie.
+- **Maintainer data was lost for renamed GitHub repositories.** GitHub answers a
+  renamed or transferred repository with a redirect, which the scanner treated
+  as an error. It now follows one redirect on `api.github.com` and reports the
+  repository under its canonical name.
+- **The "maintainer data unavailable" warning blamed a missing token when the
+  GitHub API had returned errors.** The warning now says "GitHub API error" (or
+  "rate-limited or errored" when both happened), so a user who did set a token
+  is not sent after a fix that cannot work.
+- **A GitHub 429 without `X-RateLimit-Remaining: 0` was reported as an API
+  error.** GitHub sends some 429s, such as secondary rate limits, without that
+  header. The maintainer scanner counted a 429 as a rate limit only when the
+  header said `0`, so those responses were reported as "GitHub API error" and
+  the `GITHUB_TOKEN` hint never appeared. Any 429 now counts as rate-limited. A
+  403 still counts only with `X-RateLimit-Remaining: 0`; without it, a 403 is a
+  permission error. When a token was used, the rate-limit warning no longer
+  asks for `GITHUB_TOKEN`; it says the token's quota or a secondary rate limit
+  was reached.
+- **Standard-library vulnerabilities depended on the directory unisupply was
+  started from.** govulncheck runs with `-C <project>`, but `-C` only moves
+  package loading: the Go version it matches standard-library advisories
+  against and the GOROOT it makes standard-library file positions relative to
+  came from the launch directory. One module reported 13, 65 and 46
+  standard-library vulnerabilities from three directories using go1.26.8,
+  go1.24.1 and go1.26.0; only the run that matched the project's own toolchain
+  (46) was right. unisupply now runs `go env GOVERSION GOROOT` in the project
+  directory and passes `GOVERSION` to govulncheck, so the result follows the
+  project's toolchain wherever unisupply is run. A `GOVERSION` already set in
+  the environment is respected. Standard-library file positions in `call_trace`
+  are rebased onto the project's GOROOT (for example `src/sync/once.go`)
+  instead of being dropped. If the project's toolchain cannot be resolved,
+  govulncheck's previous behavior is kept and the report warns "could not
+  resolve the project's Go toolchain (...); standard-library vulnerabilities
+  are checked against the Go version of unisupply's working directory". Risk
+  scores are not affected: the scorer does not read standard-library
+  vulnerabilities.
+
+### Security Patches
+
+- **Built with Go 1.26.9 instead of 1.26.8**, clearing 13 standard-library
+  advisories that affect v0.6.0 binaries. govulncheck reports 9 of them as
+  reachable from unisupply's HTTP client: GO-2026-6603, GO-2026-6605,
+  GO-2026-6607, GO-2026-6608, GO-2026-6610, GO-2026-6611, GO-2026-6612,
+  GO-2026-6613, GO-2026-6617. The other 4 are imported or module-level only:
+  GO-2026-6599, GO-2026-6600, GO-2026-6604, GO-2026-6609. Building from source
+  now needs Go 1.26.9 or newer, and CI tests against Go 1.26.9 and 1.27.1.
+- Upgraded `golang.org/x/net` `v0.59.0` → `v0.60.0` (GO-2026-6603,
+  GO-2026-6610, GO-2026-6611, GO-2026-6612, GO-2026-6617). unisupply does not
+  call the affected HTTP/2 code; it is pulled in through UniPDF's use of
+  `x/net/html/charset`.
+
 ## [0.6.0] - 2026-09-29
 
 ### New Features
@@ -500,7 +1050,8 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/unidoc/unisupply/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/unidoc/unisupply/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/unidoc/unisupply/releases/tag/v0.4.0

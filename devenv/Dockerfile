@@ -7,7 +7,7 @@ FROM debian:trixie-slim
 
 # ── Build args ───────────────────────────────────────────────────────────────
 ARG CRONTAB_URL_DEPS
-ARG GO_DL=go1.26.8.linux-amd64.tar.gz
+ARG GO_DL=go1.26.9.linux-amd64.tar.gz
 ARG USER_NAME=tower
 ARG USER_UID=1000
 ARG USER_GID=1000

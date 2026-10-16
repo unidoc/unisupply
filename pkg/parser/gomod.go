@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/mod/modfile"
 )
 
 // Module represents a Go module dependency.
@@ -74,13 +76,13 @@ func ParseGoMod(path string) (*GoMod, error) {
 
 		// Module declaration.
 		if strings.HasPrefix(line, "module ") {
-			gm.ModulePath = strings.TrimSpace(strings.TrimPrefix(line, "module "))
+			gm.ModulePath = directiveValue(strings.TrimPrefix(line, "module "))
 			continue
 		}
 
 		// Go version.
 		if strings.HasPrefix(line, "go ") {
-			gm.GoVersion = strings.TrimSpace(strings.TrimPrefix(line, "go "))
+			gm.GoVersion = directiveValue(strings.TrimPrefix(line, "go "))
 			continue
 		}
 
@@ -151,7 +153,34 @@ func ParseGoMod(path string) (*GoMod, error) {
 		}
 	}
 
+	// The module path and go version are read again by the real go.mod parser, which knows the quoting and
+	// comment rules; the line scan above stays as the answer for a file it rejects.
+	if mf, perr := modfile.ParseLax(path, data, nil); perr == nil {
+		if mf.Module != nil {
+			gm.ModulePath = mf.Module.Mod.Path
+		}
+		if mf.Go != nil {
+			gm.GoVersion = mf.Go.Version
+		}
+	}
+
 	return gm, nil
+}
+
+// directiveValue returns the argument of a module or go directive line: without a trailing "// comment" and
+// without the quotes a go.mod may put around a path.
+func directiveValue(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if arg != "" && (arg[0] == '"' || arg[0] == '`') {
+		if end := strings.IndexByte(arg[1:], arg[0]); end >= 0 {
+			return arg[1 : 1+end]
+		}
+		return strings.Trim(arg, "\"`")
+	}
+	if i := strings.Index(arg, "//"); i >= 0 {
+		arg = arg[:i]
+	}
+	return strings.TrimSpace(arg)
 }
 
 func parseRequireLine(line string) *Module {
