@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -20,11 +21,13 @@ import (
 // keep them in sync when fields change here. DefaultStrictPolicy and
 // DefaultModeratePolicy below define the values mirrored by the first two.
 type Policy struct {
-	// MaxRiskScore fails if any dependency exceeds this score (0-100).
-	MaxRiskScore *int `json:"max_risk_score,omitempty"`
+	// MaxGrade is the worst letter the project may have, "A" to "F": "C" fails a D or an F. A grade that is Pending
+	// (a check the grade needs did not run) FAILS this rule unless AllowPending is set, since a gate must not pass on
+	// "no result".
+	MaxGrade string `json:"max_grade,omitempty"`
 
-	// MaxOverallScore fails if the overall project score exceeds this.
-	MaxOverallScore *int `json:"max_overall_score,omitempty"`
+	// AllowPending lets a Pending grade pass MaxGrade. The violation is then a warning, not an error.
+	AllowPending bool `json:"allow_pending,omitempty"`
 
 	// NoKnownVulns fails if any dependency has known vulnerabilities.
 	NoKnownVulns bool `json:"no_known_vulns,omitempty"`
@@ -128,12 +131,28 @@ func LoadPolicy(path string) (*Policy, error) {
 		return nil, fmt.Errorf("parsing policy file: %w", err)
 	}
 
+	if err := p.validate(); err != nil {
+		return nil, fmt.Errorf("policy file: %w", err)
+	}
 	return &p, nil
+}
+
+// validate rejects a max_grade that is not a letter from A to F.
+func (p *Policy) validate() error {
+	if p.MaxGrade == "" {
+		return nil
+	}
+	switch grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade))) {
+	case grade.LetterA, grade.LetterB, grade.LetterC, grade.LetterD, grade.LetterF:
+		return nil
+	}
+	return fmt.Errorf("max_grade %q is not one of A, B, C, D, F", p.MaxGrade)
 }
 
 // EvalInput bundles all data needed for policy evaluation.
 type EvalInput struct {
 	ProjectScore    *scorer.ProjectScore
+	Grade           *grade.Result
 	Maintainers     map[string]*scanner.MaintainerInfo
 	Typosquats      map[string]*scanner.TyposquatResult
 	CIReport        *scanner.CIReport
@@ -143,22 +162,15 @@ type EvalInput struct {
 // Evaluate checks all dependencies against the policy and returns violations.
 func (p *Policy) Evaluate(input EvalInput) *Result {
 	result := &Result{Pass: true}
+	p.evalGrade(input.Grade, result)
 	ps := input.ProjectScore
-
-	// Overall project score.
-	if p.MaxOverallScore != nil && ps.OverallScore > *p.MaxOverallScore {
-		result.addError("max_overall_score", "",
-			fmt.Sprintf("overall risk score %d exceeds maximum %d", ps.OverallScore, *p.MaxOverallScore))
+	if ps == nil {
+		// a library caller may pass only the grade: the per-dependency rules then have nothing to check
+		return result
 	}
 
 	// Per-dependency checks.
 	for _, ds := range ps.Dependencies {
-		// Max risk score.
-		if p.MaxRiskScore != nil && ds.RiskScore > *p.MaxRiskScore {
-			result.addError("max_risk_score", ds.Module,
-				fmt.Sprintf("risk score %d exceeds maximum %d", ds.RiskScore, *p.MaxRiskScore))
-		}
-
 		// No known vulns.
 		if p.NoKnownVulns && len(ds.Vulns) > 0 {
 			ids := make([]string, 0, len(ds.Vulns))
@@ -314,6 +326,10 @@ func isConfirmedOutsideBuild(ds *scorer.DependencyScore) bool {
 	return ds.InBuild != nil && !*ds.InBuild
 }
 
+func (r *Result) addWarning(rule, module, detail string) {
+	r.Violations = append(r.Violations, Violation{Rule: rule, Module: module, Detail: detail, Severity: "warning"})
+}
+
 func (r *Result) addError(rule, module, detail string) {
 	r.Pass = false
 	r.Violations = append(r.Violations, Violation{
@@ -324,32 +340,62 @@ func (r *Result) addError(rule, module, detail string) {
 	})
 }
 
-// FormatText returns a human-readable summary of violations.
+// FormatText returns a human-readable summary of violations. Errors decide PASS or FAIL and are the only ones counted
+// in the FAIL line; warnings (for example a Pending grade allowed by allow_pending) are listed separately and are
+// printed on PASS as well, so a gate that passed on "no result" is never silent.
 func (r *Result) FormatText(noColor bool) string {
-	if r.Pass {
-		if noColor {
-			return "PASS: All policies satisfied.\n"
+	var errs, warns []Violation
+	for _, v := range r.Violations {
+		if v.Severity == "warning" {
+			warns = append(warns, v)
+		} else {
+			errs = append(errs, v)
 		}
-		return "\033[32mPASS: All policies satisfied.\033[0m\n"
+	}
+
+	paint := func(code, s string) string {
+		if noColor {
+			return s
+		}
+		return code + s + "\033[0m"
+	}
+	plural := func(n int, word string) string {
+		if n == 1 {
+			return fmt.Sprintf("%d %s", n, word)
+		}
+		return fmt.Sprintf("%d %ss", n, word)
 	}
 
 	var b strings.Builder
-	if noColor {
-		fmt.Fprintf(&b, "FAIL: %d policy violation(s) found.\n\n", len(r.Violations))
-	} else {
-		fmt.Fprintf(&b, "\033[31mFAIL: %d policy violation(s) found.\033[0m\n\n", len(r.Violations))
+	if r.Pass {
+		if len(warns) == 0 {
+			b.WriteString(paint("\033[32m", "PASS: All policies satisfied.") + "\n")
+			return b.String()
+		}
+		b.WriteString(paint("\033[32m", fmt.Sprintf("PASS (%s): All policies satisfied except what is listed below.", plural(len(warns), "warning"))) + "\n\n")
+		writeViolationLines(&b, warns, 1)
+		return b.String()
 	}
 
-	for i, v := range r.Violations {
-		prefix := fmt.Sprintf("  %d. [%s]", i+1, v.Rule)
+	b.WriteString(paint("\033[31m", fmt.Sprintf("FAIL: %d policy violation(s) found.", len(errs))) + "\n\n")
+	writeViolationLines(&b, errs, 1)
+	if len(warns) > 0 {
+		fmt.Fprintf(&b, "\n%s:\n", plural(len(warns), "warning"))
+		writeViolationLines(&b, warns, 1)
+	}
+	return b.String()
+}
+
+// writeViolationLines writes numbered violation lines, numbering from start.
+func writeViolationLines(b *strings.Builder, vs []Violation, start int) {
+	for i, v := range vs {
+		prefix := fmt.Sprintf("  %d. [%s]", start+i, v.Rule)
 		if v.Module != "" {
-			fmt.Fprintf(&b, "%s %s: %s\n", prefix, v.Module, v.Detail)
+			fmt.Fprintf(b, "%s %s: %s\n", prefix, v.Module, v.Detail)
 		} else {
-			fmt.Fprintf(&b, "%s %s\n", prefix, v.Detail)
+			fmt.Fprintf(b, "%s %s\n", prefix, v.Detail)
 		}
 	}
-
-	return b.String()
 }
 
 // FormatJSON returns the result as JSON.
@@ -363,14 +409,11 @@ func (r *Result) FormatJSON() (string, error) {
 
 // DefaultStrictPolicy returns a strict policy suitable for production use.
 func DefaultStrictPolicy() *Policy {
-	maxRisk := 70
-	maxOverall := 50
 	maxUnmaintained := 24
 	maxCI := 50
 
 	return &Policy{
-		MaxRiskScore:          &maxRisk,
-		MaxOverallScore:       &maxOverall,
+		MaxGrade:              "B",
 		NoCriticalVulns:       true,
 		NoSingleMaintainer:    true,
 		NoUnmaintainedMonths:  &maxUnmaintained,
@@ -385,13 +428,59 @@ func DefaultStrictPolicy() *Policy {
 
 // DefaultModeratePolicy returns a moderate policy for general use.
 func DefaultModeratePolicy() *Policy {
-	maxRisk := 85
-	maxOverall := 70
-
 	return &Policy{
-		MaxRiskScore:    &maxRisk,
-		MaxOverallScore: &maxOverall,
+		MaxGrade:        "C",
 		NoCriticalVulns: true,
 		NoArchived:      true,
+	}
+}
+
+// evalGrade checks MaxGrade against the grade: the letter, or Pending. A letter further from A than the allowed one
+// fails; the violation names the row that decided it.
+func (p *Policy) evalGrade(g *grade.Result, result *Result) {
+	if p.MaxGrade == "" {
+		return
+	}
+	if err := p.validate(); err != nil {
+		result.addError("max_grade", "", err.Error())
+		return
+	}
+	worst := grade.Letter(strings.ToUpper(strings.TrimSpace(p.MaxGrade)))
+	if g == nil || g.Letter == "" {
+		reason := "grading did not run"
+		if g != nil && g.Pending != nil {
+			reason = g.Pending.Reason
+		}
+		detail := fmt.Sprintf("the grade is Pending (%s), so it cannot be checked against maximum %s", reason, worst)
+		if p.AllowPending {
+			result.addWarning("max_grade", "", detail)
+		} else {
+			result.addError("max_grade", "", detail)
+		}
+		return
+	}
+	if g.Letter > worst {
+		detail := fmt.Sprintf("grade %s is worse than the maximum %s", g.Letter, worst)
+		module := ""
+		if g.Deciding != nil {
+			detail += ": " + g.Deciding.Reason
+			module = g.Deciding.Module
+		}
+		result.addError("max_grade", module, detail)
+		return
+	}
+	// The letter was given without some archived flags that could change it (grade.archived_unread lists only those): a
+	// pass on that letter is not a firm pass. At the maximum itself, one band worse would fail, so it fails; further from
+	// the maximum it is a warning (like the Pending case), never silence.
+	if n := len(g.ArchivedUnread); n > 0 {
+		s := ""
+		if n != 1 {
+			s = "s"
+		}
+		if g.Letter == worst {
+			result.addError("max_grade", "", fmt.Sprintf("grade %s is the maximum %s, but it rests on %d archived flag%s that could not be read (a dependency that is archived would make it one band worse); set GITHUB_TOKEN to read them", g.Letter, worst, n, s))
+		} else {
+			result.addWarning("max_grade", "", fmt.Sprintf("grade %s was given without %d unread archived flag%s (a dependency that is archived could make it one band worse); set GITHUB_TOKEN to read them", g.Letter, n, s))
+		}
 	}
 }

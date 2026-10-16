@@ -447,7 +447,8 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		// Track missing maintainer signal. A nil entry means the scanner was
 		// not run (non-GitHub module); DataAvailable == false means it was
 		// attempted but failed (rate-limited, unauthenticated, network error).
-		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable {
+		// A repository that does not exist (404) is not a rate limit or an outage: it is neither counted here nor blamed on the API.
+		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable && m.UnavailableReason != scanner.UnavailableNotFound {
 			maintainerUnavailable++
 			if m.UnavailableReason == scanner.UnavailableAPIError {
 				maintainerErrored++

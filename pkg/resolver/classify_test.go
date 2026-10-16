@@ -634,3 +634,70 @@ replace example.com/graphonly => ../graphonly
 	wantState(t, g, "prod", "false", "true")
 	wantState(t, g, "graphonly", "nil", "false")
 }
+
+// The unknown build status of a tag-gated direct requirement spreads only to
+// modules the main go.mod lists. xerrors is required by the tag-gated
+// protobuf stub but is not in the main go.mod, so no tagged code of the main
+// module can compile it: it is graph-only. A module that is listed (listed)
+// stays unknown. The control runs the same layout with a go 1.16 main go.mod,
+// which does not list every module the build needs, and keeps the old
+// unbounded rule.
+func TestResolve_TagGatedSpreadLimitedToGoModListedModules(t *testing.T) {
+	for _, tc := range []struct {
+		goVersion   string
+		wantXerrors string
+	}{
+		{"1.21", "false"},
+		{"1.16", "nil"},
+	} {
+		t.Run("go"+tc.goVersion, func(t *testing.T) {
+			setGoEnv(t)
+			root := t.TempDir()
+			writeStub(t, root, "prod", stubOpts{})
+			writeStub(t, root, "protobuf", stubOpts{goVersion: tc.goVersion, requires: []string{"xerrors", "listed"}})
+			writeStub(t, root, "xerrors", stubOpts{})
+			writeStub(t, root, "listed", stubOpts{})
+			mainDir := filepath.Join(root, "main")
+			write(t, filepath.Join(mainDir, "go.mod"), "module example.com/main\n\ngo "+tc.goVersion+`
+
+require (
+	example.com/prod v0.0.0
+	example.com/protobuf v0.0.0
+	example.com/listed v0.0.0 // indirect
+)
+
+replace example.com/prod => ../prod
+
+replace example.com/protobuf => ../protobuf
+
+replace example.com/xerrors => ../xerrors
+
+replace example.com/listed => ../listed
+`)
+			write(t, filepath.Join(mainDir, "main.go"), "package main\n\nimport _ \"example.com/prod\"\n\nfunc main() {}\n")
+			write(t, filepath.Join(mainDir, "tagged.go"), "//go:build customtag\n\npackage main\n\nimport _ \"example.com/protobuf\"\n")
+
+			g, warnings, err := Resolve(context.Background(), filepath.Join(mainDir, "go.mod"), false)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if len(warnings) != 0 {
+				t.Errorf("unexpected warnings: %q", warnings)
+			}
+			if _, ok := g.Dependencies["example.com/xerrors"]; !ok {
+				t.Fatalf("xerrors missing from the module graph; the fixture does not test the rule")
+			}
+			wantState(t, g, "protobuf", "nil", "nil")
+			wantState(t, g, "listed", "nil", "nil")
+			wantState(t, g, "xerrors", "nil", tc.wantXerrors)
+		})
+	}
+}
+
+func TestGoVersionAtLeast(t *testing.T) {
+	for v, want := range map[string]bool{"1.16": false, "1.17": true, "1.21.3": true, "2.0": true, "": false, "x": false} {
+		if got := goVersionAtLeast(v, 1, 17); got != want {
+			t.Errorf("goVersionAtLeast(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

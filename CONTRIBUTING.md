@@ -120,10 +120,10 @@ A scanner typically:
 2. Exposes a single entry point that takes the resolved dependency graph (or
    the relevant subset) and returns a typed result struct.
 3. Records its findings on the per-dependency result so `pkg/scorer` can
-   incorporate them into the composite risk score.
+   use them in the grade (see docs/grading.md).
 4. Has a sibling `<name>_test.go` with table-driven coverage of the
    detection rules — including negative cases.
-5. Gets wired into the orchestration in `cmd/unisupply/main.go` and
+5. Gets wired into the orchestration in `pkg/runner/runner.go` and
    surfaced in every output format (`pkg/report/{text,json,pdf,sbom}.go`).
 
 If your scanner needs a network call, add a `--<name>-timeout` flag and

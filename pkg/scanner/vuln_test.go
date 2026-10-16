@@ -1309,3 +1309,170 @@ func TestParseGovulncheckJSON_CalledSymbolsAreCapped(t *testing.T) {
 		t.Errorf("the cut must keep the first 20 in sorted order: %v", v.CalledSymbols)
 	}
 }
+
+// gvcStrongSBOM is the scan root shared by the call-path strength
+// tests below: the project is example.com/app.
+const gvcStrongSBOM = `{"SBOM":{"roots":["example.com/app"]}}` + "\n"
+
+func gvcStrongParse(t *testing.T, findings ...string) Vulnerability {
+	t.Helper()
+	in := gvcTestOSV("GO-1") + gvcStrongSBOM + strings.Join(findings, "")
+	return gvcTestParse(t, in, "example.com/lib", "GO-1")
+}
+
+// A path whose sink only formats a message loses to a real one even when it is
+// shorter, whatever order govulncheck emits the findings in.
+func TestCallPath_PrefersRealSinkOverErrorFormatting(t *testing.T) {
+	main := gvcTestFrame("example.com/app", "", "example.com/app", "main", "", "main.go", 9, 2)
+	render := gvcTestFrame("github.com/gin-gonic/gin", "v1", "github.com/gin-gonic/gin", "Render", "*Context", "", 0, 0)
+	hop := gvcTestFrame("example.com/mid", "v1", "example.com/mid", "Do", "", "", 0, 0)
+	// Short but formats: main -> lib.Err.Error.
+	errPath := gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "Error", "*Err", "", 0, 0), main)
+	// Longer but a real function: main -> gin.Render -> mid.Do -> lib.Serve.
+	realPath := gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "Serve", "*Server", "", 0, 0), hop, render, main)
+	// Through fmt, sink not named Error/String.
+	fmtPath := gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "Get", "", "", 0, 0),
+		gvcTestFrame("stdlib", "", "fmt", "Sprintf", "", "", 0, 0), main)
+
+	want := "example.com/app.main > github.com/gin-gonic/gin.Context.Render > example.com/mid.Do > example.com/lib.Server.Serve"
+	for _, order := range [][]string{{errPath, realPath, fmtPath}, {fmtPath, realPath, errPath}, {realPath, errPath, fmtPath}} {
+		v := gvcStrongParse(t, order...)
+		if got := strings.Join(v.CallPath, " > "); got != want {
+			t.Errorf("CallPath = %q, want %q", got, want)
+		}
+		if want := "reached through github.com/gin-gonic/gin.Context.Render"; v.Condition != want {
+			t.Errorf("Condition = %q, want %q", v.Condition, want)
+		}
+		if len(v.CallTrace) != len(v.CallPath) {
+			t.Errorf("len(CallTrace) = %d, want %d", len(v.CallTrace), len(v.CallPath))
+		}
+	}
+}
+
+// Among real paths the shorter wins and equal lengths fall back to the old
+// deterministic tiebreak, independent of arrival order.
+func TestCallPath_RealPathsShortestThenDeterministic(t *testing.T) {
+	main := gvcTestFrame("example.com/app", "", "example.com/app", "main", "", "", 0, 0)
+	mk := func(sink, via string) string {
+		frames := []string{gvcTestFrame("example.com/lib", "v1", "example.com/lib", sink, "", "", 0, 0)}
+		if via != "" {
+			frames = append(frames, gvcTestFrame("example.com/"+via, "v1", "example.com/"+via, "Do", "", "", 0, 0))
+		}
+		return gvcTestFinding("GO-1", append(frames, main)...)
+	}
+	long, tieB, tieA := mk("Z", "mid"), mk("B", ""), mk("A", "")
+	for _, order := range [][]string{{long, tieB, tieA}, {tieA, tieB, long}, {tieB, long, tieA}} {
+		v := gvcStrongParse(t, order...)
+		if got := strings.Join(v.CallPath, " > "); got != "example.com/app.main > example.com/lib.A" {
+			t.Errorf("CallPath = %q, want the shortest, alphabetical tie", got)
+		}
+		if v.Condition != "reached through example.com/lib.A" {
+			t.Errorf("Condition = %q", v.Condition)
+		}
+	}
+}
+
+// When every path only formats a message the old choice (shortest, then
+// alphabetical) stands, and a Condition is still derived from that path.
+func TestCallPath_AllFormattingKeepsOldChoice(t *testing.T) {
+	main := gvcTestFrame("example.com/app", "", "example.com/app", "main", "", "", 0, 0)
+	str := gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "String", "T", "", 0, 0),
+		gvcTestFrame("stdlib", "", "fmt", "Sprint", "", "", 0, 0), main)
+	errf := gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "Error", "*E", "", 0, 0), main)
+	for _, order := range [][]string{{str, errf}, {errf, str}} {
+		v := gvcStrongParse(t, order...)
+		if got := strings.Join(v.CallPath, " > "); got != "example.com/app.main > example.com/lib.E.Error" {
+			t.Errorf("CallPath = %q, want the shorter formatting path", got)
+		}
+	}
+}
+
+func TestFormatsMessage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		trace []traceEntry
+		want  bool
+	}{
+		"Error method sink":      {[]traceEntry{{Package: "p", Function: "Error", Receiver: "*E"}}, true},
+		"String closure":         {[]traceEntry{{Package: "p", Function: "String$1", Receiver: "T"}}, true},
+		"intermediate String":    {[]traceEntry{{Package: "p", Function: "Do"}, {Package: "q", Function: "String", Receiver: "T"}}, true},
+		"through fmt":            {[]traceEntry{{Package: "p", Function: "Do"}, {Package: "fmt", Function: "Sprintf"}}, true},
+		"through log":            {[]traceEntry{{Package: "p", Function: "Do"}, {Package: "log", Function: "Printf"}}, true},
+		"plain function Error":   {[]traceEntry{{Package: "p", Function: "Error"}}, false},
+		"real path":              {[]traceEntry{{Package: "p", Function: "Serve", Receiver: "*S"}, {Package: "a", Function: "main"}}, false},
+		"package merely fmtlike": {[]traceEntry{{Package: "example.com/fmt", Function: "X"}}, false},
+	} {
+		if got := formatsMessage(tc.trace); got != tc.want {
+			t.Errorf("%s: formatsMessage = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+func TestCallCondition(t *testing.T) {
+	roots := map[string]bool{"example.com/app": true}
+	frame := func(pkg, fn, recv string) traceEntry { return traceEntry{Package: pkg, Function: fn, Receiver: recv} }
+	for name, tc := range map[string]struct {
+		trace []traceEntry
+		roots map[string]bool
+		want  string
+	}{
+		"first frame outside the project": {
+			[]traceEntry{frame("lib", "Serve", "*S"), frame("gin", "Render", "*Context"), frame("example.com/app", "main", "")}, roots,
+			"reached through gin.Context.Render"},
+		"project frames skipped": {
+			[]traceEntry{frame("lib", "Serve", ""), frame("example.com/app", "h", ""), frame("example.com/app", "main", "")}, roots,
+			"reached through lib.Serve"},
+		"starts in a dependency": {[]traceEntry{frame("lib", "Serve", ""), frame("other", "Run", "")}, roots, ""},
+		"no roots known":         {[]traceEntry{frame("lib", "Serve", ""), frame("example.com/app", "main", "")}, nil, ""},
+		"only project frames":    {[]traceEntry{frame("example.com/app", "f", ""), frame("example.com/app", "main", "")}, roots, ""},
+		"no trace":               {nil, roots, ""},
+	} {
+		if got := callCondition(tc.trace, tc.roots); got != tc.want {
+			t.Errorf("%s: callCondition = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// A path through a standard-library callback is not explained by the standard library: the frame named is the first
+// one in a dependency; when only the standard library follows the project, the first such frame is named.
+func TestCallCondition_SkipsStandardLibraryFrames(t *testing.T) {
+	roots := map[string]bool{"example.com/app": true}
+	std := func(pkg, fn, recv string) traceEntry {
+		return traceEntry{Module: "stdlib", Package: pkg, Function: fn, Receiver: recv}
+	}
+	app := func(fn string) traceEntry {
+		return traceEntry{Module: "example.com/app", Package: "example.com/app", Function: fn}
+	}
+	dep := func(fn string) traceEntry {
+		return traceEntry{Module: "example.com/dep", Version: "v1.0.0", Package: "example.com/dep", Function: fn}
+	}
+	// main -> net/http.ServeMux.ServeHTTP -> project handler -> dep.Func (innermost first).
+	trace := []traceEntry{dep("Func"), app("handler"), std("net/http", "ServeHTTP", "*ServeMux"), app("main")}
+	if got, want := callCondition(trace, roots), "reached through example.com/dep.Func"; got != want {
+		t.Errorf("callCondition = %q, want %q", got, want)
+	}
+	// Only the standard library follows the project: the first standard-library frame is named.
+	trace = []traceEntry{std("crypto/tls", "Dial", ""), std("net/http", "Get", ""), app("main")}
+	if got, want := callCondition(trace, roots), "reached through net/http.Get"; got != want {
+		t.Errorf("callCondition = %q, want %q when only standard-library frames follow the project", got, want)
+	}
+	trace = []traceEntry{std("net/http", "Serve", ""), std("net/http", "ListenAndServe", ""), app("main")}
+	if got, want := callCondition(trace, roots), "reached through net/http.ListenAndServe"; got != want {
+		t.Errorf("callCondition = %q, want %q", got, want)
+	}
+}
+
+// Without an SBOM no frame is a project frame, so no Condition is invented.
+func TestCallPath_NoConditionWithoutSBOM(t *testing.T) {
+	in := gvcTestOSV("GO-1") + gvcTestFinding("GO-1",
+		gvcTestFrame("example.com/lib", "v1", "example.com/lib", "Serve", "", "", 0, 0),
+		gvcTestFrame("example.com/app", "", "example.com/app", "main", "", "", 0, 0))
+	v := gvcTestParse(t, in, "example.com/lib", "GO-1")
+	if v.Condition != "" || len(v.CallPath) == 0 {
+		t.Errorf("Condition = %q, CallPath = %v; want empty Condition with a path", v.Condition, v.CallPath)
+	}
+}

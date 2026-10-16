@@ -33,12 +33,23 @@ const (
 	// UnavailableAPIError means the repository request failed for any other
 	// reason: a network error, a non-200 status, or an unusable response.
 	UnavailableAPIError = "github_api_error"
+
+	// UnavailableNotFound means GitHub answered 404 for the repository: it
+	// was deleted, made private, or renamed away without a redirect. It is a
+	// definitive answer, not a failure: it is cached and not retried.
+	UnavailableNotFound = "repo_not_found"
 )
+
+// ErrRepositoryNotFound is returned by the GitHub lookups when GitHub answers
+// 404 for a repository (or a repository endpoint). Callers treat it as the
+// answer "the repository is gone", never as a rate limit or an API failure.
+var ErrRepositoryNotFound = errors.New("GitHub repository not found (404)")
 
 // MaintainerInfo holds maintainer/ownership data for a module.
 type MaintainerInfo struct {
 	// DataAvailable is false when the GitHub API was unreachable, returned a
-	// non-200 status (e.g. 403 rate-limit or 404), or when the token was
+	// non-200 status (e.g. 403 rate-limit, or 404, which sets UnavailableReason
+	// to UnavailableNotFound), or when the token was
 	// missing for an authenticated-only endpoint. When false, all numeric
 	// fields (Stars, BusFactor, etc.) are zero-valued and MUST NOT be
 	// interpreted as real measurements.
@@ -137,6 +148,15 @@ type MaintainerScanner struct {
 	userCache map[string]*githubUser
 	diskCache *maintainerCache
 	mu        sync.Mutex
+
+	// repos, users and commits hold every per-repository (per-owner) GitHub
+	// answer for the life of the scanner, errors included: modules from one
+	// repository (golang.org/x/*, k8s.io/*, a monorepo's submodules) share one
+	// request, and a 404 or a rate limit is asked about once, not once per
+	// module. They are zero-value usable.
+	repos   onceCache[*githubRepo]
+	users   onceCache[*githubUser]
+	commits onceCache[time.Time]
 
 	// repoLocks holds one mutex per owner/repo, guarded by mu.
 	repoLocks map[string]*sync.Mutex
@@ -322,9 +342,12 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 
 	// Fetch repo info. On any failure (network error, 403, 404, etc.) we
 	// leave DataAvailable as false so callers know zero-values are not real.
-	repoData, err := ms.fetchRepo(ctx, owner, repo)
+	repoData, err := ms.repoMeta(ctx, owner, repo)
 	if err != nil {
-		if errors.Is(err, errRateLimited) {
+		switch {
+		case errors.Is(err, ErrRepositoryNotFound):
+			info.UnavailableReason = UnavailableNotFound
+		case errors.Is(err, errRateLimited):
 			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
@@ -339,7 +362,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			ms.rateLimitWarnOnce.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
-		} else {
+		default:
 			info.UnavailableReason = UnavailableAPIError
 		}
 		ms.mu.Lock()
@@ -439,6 +462,110 @@ func (ms *MaintainerScanner) fetchRepo(ctx context.Context, owner, repo string) 
 	return &result, nil
 }
 
+// repoMeta returns the GitHub repository record for owner/repo, asking GitHub
+// once per repository for the life of the scanner. Every caller (the maintainer
+// scan, the archived check) shares that one answer, and so does a failure: a
+// 404 (ErrRepositoryNotFound) or a rate limit is remembered, not retried. A
+// failure caused by the caller's own cancelled context is not remembered. Names
+// are matched case-insensitively, as GitHub does, and a repository reached
+// through a rename redirect is also remembered under its canonical name.
+func (ms *MaintainerScanner) repoMeta(ctx context.Context, owner, repo string) (*githubRepo, error) {
+	key := strings.ToLower(owner + "/" + repo)
+	r, err := ms.repos.do(ctx, key, func() (*githubRepo, error) {
+		return ms.fetchRepo(ctx, owner, repo)
+	})
+	if err == nil {
+		if o, n := canonicalRepoName(r.FullName); o != "" {
+			ms.repos.set(strings.ToLower(o+"/"+n), r)
+		}
+	}
+	return r, err
+}
+
+// RepositoryArchived reports whether the GitHub repository owner/repo is
+// archived, from the same cached repository record the maintainer scan reads,
+// so asking about a repository the scan already fetched costs no request. It
+// returns ErrRepositoryNotFound when GitHub answers 404. It implements
+// ArchiveLookup.
+func (ms *MaintainerScanner) RepositoryArchived(ctx context.Context, owner, repo string) (bool, error) {
+	r, err := ms.repoMeta(ctx, owner, repo)
+	if err != nil {
+		return false, err
+	}
+	return r.Archived, nil
+}
+
+// onceCache runs a lookup once per key and shares the result, error included,
+// with every caller, concurrent or later. The zero value is ready to use.
+type onceCache[T any] struct {
+	mu sync.Mutex
+	m  map[string]*onceEntry[T]
+}
+
+type onceEntry[T any] struct {
+	done chan struct{}
+	val  T
+	err  error
+}
+
+// do returns the cached result for key, running fn when there is none and
+// otherwise waiting for the run in progress. A result produced while ctx was
+// cancelled is returned to the caller but not kept.
+func (c *onceCache[T]) do(ctx context.Context, key string, fn func() (T, error)) (T, error) {
+	c.mu.Lock()
+	if c.m == nil {
+		c.m = make(map[string]*onceEntry[T])
+	}
+	if e, ok := c.m[key]; ok {
+		c.mu.Unlock()
+		<-e.done
+		return e.val, e.err
+	}
+	e := &onceEntry[T]{done: make(chan struct{})}
+	c.m[key] = e
+	c.mu.Unlock()
+
+	e.val, e.err = fn()
+	if e.err != nil && ctx.Err() != nil {
+		c.mu.Lock()
+		delete(c.m, key)
+		c.mu.Unlock()
+	}
+	close(e.done)
+	return e.val, e.err
+}
+
+// peek returns the finished result for key, if there is one; it never waits.
+func (c *onceCache[T]) peek(key string) (val T, err error, ok bool) {
+	c.mu.Lock()
+	e, found := c.m[key]
+	c.mu.Unlock()
+	if !found {
+		return val, nil, false
+	}
+	select {
+	case <-e.done:
+		return e.val, e.err, true
+	default:
+		return val, nil, false
+	}
+}
+
+// set records val under key unless key already has an entry.
+func (c *onceCache[T]) set(key string, val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.m == nil {
+		c.m = make(map[string]*onceEntry[T])
+	}
+	if _, ok := c.m[key]; ok {
+		return
+	}
+	e := &onceEntry[T]{done: make(chan struct{}), val: val}
+	close(e.done)
+	c.m[key] = e
+}
+
 // githubCommit is the subset of a GitHub commits API entry LatestCommit reads.
 type githubCommit struct {
 	Commit struct {
@@ -463,21 +590,31 @@ func (ms *MaintainerScanner) LatestCommit(ctx context.Context, modPath string) (
 	if owner == "" || repo == "" {
 		return time.Time{}, fmt.Errorf("%s is not a GitHub module path", modPath)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?per_page=1", owner, repo)
-	body, err := ms.githubGet(ctx, url, "maintenance:github-commits")
-	if err != nil {
+	// A repository already known to be gone has no commits to ask for.
+	if _, err, ok := ms.repos.peek(strings.ToLower(owner + "/" + repo)); ok && errors.Is(err, ErrRepositoryNotFound) {
 		return time.Time{}, err
 	}
-	var commits []githubCommit
-	if err := json.Unmarshal(body, &commits); err != nil {
-		return time.Time{}, err
-	}
-	if len(commits) == 0 || commits[0].Commit.Committer.Date.IsZero() {
-		return time.Time{}, errors.New("no commits reported")
-	}
-	return commits[0].Commit.Committer.Date, nil
+	// One answer per repository: a monorepo's modules share the default branch.
+	return ms.commits.do(ctx, strings.ToLower(owner+"/"+repo), func() (time.Time, error) {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits?per_page=1", owner, repo)
+		body, err := ms.githubGet(ctx, url, "maintenance:github-commits")
+		if err != nil {
+			return time.Time{}, err
+		}
+		var commits []githubCommit
+		if err := json.Unmarshal(body, &commits); err != nil {
+			return time.Time{}, err
+		}
+		if len(commits) == 0 || commits[0].Commit.Committer.Date.IsZero() {
+			return time.Time{}, errors.New("no commits reported")
+		}
+		return commits[0].Commit.Committer.Date, nil
+	})
 }
 
+// fetchUser returns the profile of login, or nil when it cannot be read. One
+// request per login: owners with several repositories (golang, aws) share it,
+// and a failed lookup is remembered too.
 func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githubUser {
 	ms.mu.Lock()
 	if cached, ok := ms.userCache[login]; ok {
@@ -486,21 +623,27 @@ func (ms *MaintainerScanner) fetchUser(ctx context.Context, login string) *githu
 	}
 	ms.mu.Unlock()
 
-	url := fmt.Sprintf("https://api.github.com/users/%s", login)
-	body, err := ms.githubGet(ctx, url, "maintainer:user")
+	user, err := ms.users.do(ctx, strings.ToLower(login), func() (*githubUser, error) {
+		url := fmt.Sprintf("https://api.github.com/users/%s", login)
+		body, err := ms.githubGet(ctx, url, "maintainer:user")
+		if err != nil {
+			return nil, err
+		}
+		var user githubUser
+		if err := json.Unmarshal(body, &user); err != nil {
+			return nil, err
+		}
+		return &user, nil
+	})
 	if err != nil {
-		return nil
-	}
-	var user githubUser
-	if err := json.Unmarshal(body, &user); err != nil {
 		return nil
 	}
 
 	ms.mu.Lock()
-	ms.userCache[login] = &user
+	ms.userCache[login] = user
 	ms.mu.Unlock()
 
-	return &user
+	return user
 }
 
 func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo string) []githubContributor {
@@ -519,7 +662,9 @@ func (ms *MaintainerScanner) fetchContributors(ctx context.Context, owner, repo 
 // githubGet fetches url from the disk cache when a fresh entry exists (within
 // the 24-hour TTL). On a miss or expiry it issues an HTTP GET, persists the
 // response body on HTTP 200, and returns the body. Non-200 responses are not
-// cached — the error is returned directly to the caller as before.
+// cached on disk — the error is returned directly to the caller. A 404 is
+// returned as ErrRepositoryNotFound; the per-process caches above this
+// function (repoMeta, fetchUser, LatestCommit) remember it, so it is asked once.
 func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string) ([]byte, error) {
 	// Consult the disk cache first.
 	if ms.diskCache != nil {
@@ -574,6 +719,10 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 					errRateLimited, resetAt.Format(time.RFC3339), untilReset)
 			}
 			return nil, fmt.Errorf("%w", errRateLimited)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			// A definitive answer, not a failure: the callers cache it.
+			return nil, fmt.Errorf("%w: %s", ErrRepositoryNotFound, url)
 		}
 		return nil, fmt.Errorf("GitHub API returned %d for %s", resp.StatusCode, url)
 	}

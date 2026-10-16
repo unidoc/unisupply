@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -14,46 +16,26 @@ import (
 
 // JSONReport is the top-level JSON output structure.
 type JSONReport struct {
-	Tool         string      `json:"tool"`
-	Version      string      `json:"version"`
-	GeneratedAt  string      `json:"generated_at"`
-	Project      JSONProject `json:"project"`
-	OverallRisk  int         `json:"overall_risk_score"`
-	OverallLevel string      `json:"overall_risk_level"`
+	Tool        string      `json:"tool"`
+	Version     string      `json:"version"`
+	GeneratedAt string      `json:"generated_at"`
+	Project     JSONProject `json:"project"`
 
-	// MeanDepRiskScore is the legacy weighted-mean axis (non-normative; retained
-	// for dashboards and trend lines). SeverityAdjustedVulnScore is the
-	// CVE-driven step-function axis. HeadlineDriver records which of the five
-	// candidates produced overall_risk_score: "severity_adjusted", "p95_dep_risk",
-	// "archived_floor", "cve_floor", or "integrity_floor".
-	MeanDepRiskScore          int    `json:"mean_dep_risk_score"`
-	SeverityAdjustedVulnScore int    `json:"severity_adjusted_vuln_score"`
-	HeadlineDriver            string `json:"headline_driver,omitempty"`
+	// Grade is the published grade (Grading v2): the letter, the row that decides it, every row's score and findings,
+	// and Pending when a check the grade needs did not run. null only when grading was not run (a library caller that
+	// passes no result); a consumer that gates on the letter MUST treat null and a missing "letter" as "no result".
+	Grade *grade.Result `json:"grade"`
 
-	// Headline is the structured headline risk summary. It duplicates
-	// OverallRisk/OverallLevel for convenience and adds driver attribution.
-	// Backwards-compatible addition — existing consumers may ignore this field.
-	Headline JSONHeadline `json:"headline"`
+	// Deprecated: kept for one release, derived from Grade (see json_deprecated.go). OverallRisk is the worst row's policy
+	// value, OverallLevel the coarse band of the letter (UNKNOWN without one) and Headline the deciding row in the old shape.
+	OverallRisk      *int         `json:"overall_risk_score,omitempty"`
+	OverallLevel     string       `json:"overall_risk_level"`
+	Headline         JSONHeadline `json:"headline"`
+	DeprecatedFields []string     `json:"deprecated_fields"`
 
-	// WorstCVEID + WorstCVESeverity surface the load-bearing CVE that drove the
-	// headline (post test-only downgrade). Empty when no CVEs are present.
-	WorstCVEID       string `json:"worst_cve_id,omitempty"`
-	WorstCVESeverity string `json:"worst_cve_severity,omitempty"`
-
-	// Diagnostics carries tail aggregates retained for debugging.
-	// NON-NORMATIVE: downstream consumers must not build policy gates on this
-	// field. Shape may evolve between releases.
-	Diagnostics *JSONDiagnostics `json:"diagnostics,omitempty"`
-
-	// DebugScoring is emitted only when --debug-scoring is set. NON-NORMATIVE:
-	// schema is internal and may change between releases.
-	DebugScoring *scorer.DebugScoring `json:"debug_scoring,omitempty"`
-
-	// HeadlineUnscoredReason is non-empty when overall_risk_level is "UNKNOWN":
-	// the scan could not measure enough to earn a verdict. overall_risk_score
-	// still carries a number, but it is indicative only — a consumer that gates
-	// on the level MUST treat "UNKNOWN" as "no result", not as a pass.
-	HeadlineUnscoredReason string `json:"headline_unscored_reason,omitempty"`
+	// Scan is what the vulnerability scan ran with: the platform, the Go release the standard library was matched against,
+	// the govulncheck version and the vulnerability database with its last-modified time. Absent when no scan ran.
+	Scan *scanner.ScanInfo `json:"scan,omitempty"`
 
 	// Warnings lists data-quality issues encountered during the scan, such as
 	// missing GitHub tokens that caused maintainer data to be unavailable.
@@ -77,20 +59,12 @@ type JSONReport struct {
 	CIFindings        []JSONFlatFinding    `json:"ci_findings"`
 	BuildFileFindings []JSONFlatFinding    `json:"build_file_findings"`
 	Integrity         *JSONIntegrityReport `json:"module_directives,omitempty"`
-	Takeovers         []JSONTakeover       `json:"takeover_candidates,omitempty"`
 
 	// TimeBombs lists every archived dependency and every CRITICAL CVE across
 	// all non-test dependencies, regardless of whether the headline score
 	// already reflects them. Emitted as an empty array (never null) when none
 	// are found.
 	TimeBombs []JSONTimeBomb `json:"time_bombs"`
-}
-
-// JSONDiagnostics mirrors scorer.Diagnostics in the JSON output. NON-NORMATIVE:
-// downstream consumers must not build policy gates on these fields.
-type JSONDiagnostics struct {
-	MaxDepRiskScore int `json:"max_dep_risk_score"`
-	P95DepRiskScore int `json:"p95_dep_risk_score"`
 }
 
 // JSONFlatFinding is a normalized top-level finding entry for CI/CD and build-file
@@ -119,13 +93,15 @@ type JSONProject struct {
 
 // JSONSummary holds summary statistics.
 type JSONSummary struct {
+	// Deprecated: the number of dependency rows by coarse level, derived from the grade.
 	CriticalRiskCount int `json:"critical_risk_count"`
 	HighRiskCount     int `json:"high_risk_count"`
 	MediumRiskCount   int `json:"medium_risk_count"`
 	LowRiskCount      int `json:"low_risk_count"`
-	TotalVulns        int `json:"total_vulnerabilities"`
-	Unmaintained2yr   int `json:"unmaintained_2yr"`
-	Unmaintained1yr   int `json:"unmaintained_1yr"`
+
+	TotalVulns      int `json:"total_vulnerabilities"`
+	Unmaintained2yr int `json:"unmaintained_2yr"`
+	Unmaintained1yr int `json:"unmaintained_1yr"`
 }
 
 // JSONDependency holds per-dependency info.
@@ -133,6 +109,9 @@ type JSONDependency struct {
 	Module  string `json:"module"`
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
+	// Deprecated: the row's policy value and its coarse level, derived from the grade (see json_deprecated.go).
+	RiskScore *int   `json:"risk_score,omitempty"`
+	RiskLevel string `json:"risk_level"`
 	// TestOnly is omitted when nil (classification was unavailable — go list
 	// failed or was not run). When present it reflects the main module's own
 	// go list -deps ./... and go list -deps -test ./... results: true =
@@ -148,16 +127,12 @@ type JSONDependency struct {
 	// and is present only when that is a strict subset of the platforms
 	// listed (for example a Windows-only import). Absent means all platforms
 	// or unknown.
-	Platforms      []string            `json:"platforms,omitempty"`
-	RiskScore      int                 `json:"risk_score"`
-	RiskLevel      string              `json:"risk_level"`
-	ScoreBreakdown *JSONScoreBreakdown `json:"score_breakdown"`
-	DependencyPath []string            `json:"dependency_path"`
-	Vulns          []JSONVuln          `json:"vulnerabilities,omitempty"`
-	Maintenance    *JSONMaintenance    `json:"maintenance,omitempty"`
-	Maintainer     *JSONMaintainer     `json:"maintainer,omitempty"`
-	Typosquat      *JSONTyposquat      `json:"typosquat,omitempty"`
-	RiskFactors    []string            `json:"risk_factors,omitempty"`
+	Platforms      []string         `json:"platforms,omitempty"`
+	DependencyPath []string         `json:"dependency_path"`
+	Vulns          []JSONVuln       `json:"vulnerabilities,omitempty"`
+	Maintenance    *JSONMaintenance `json:"maintenance,omitempty"`
+	Maintainer     *JSONMaintainer  `json:"maintainer,omitempty"`
+	Typosquat      *JSONTyposquat   `json:"typosquat,omitempty"`
 	// ReplaceClass mirrors scorer.DependencyScore.ReplaceClass: the severity of
 	// this dependency's go.mod replace directive ("LOW"/"MEDIUM"/"HIGH"), or
 	// omitted when the dependency is not replaced.
@@ -200,9 +175,17 @@ type JSONVuln struct {
 	// SeverityAlias is the alias ID (GHSA-* or CVE-*) whose OSV record supplied
 	// the severity, when it did not come from the advisory's own ID.
 	SeverityAlias string `json:"severity_alias,omitempty"`
-	// SeverityScored is the tier the scorer assigns: UNKNOWN is promoted to
-	// MEDIUM by default, or HIGH when reachability is confirmed "called".
-	SeverityScored string `json:"severity_scored,omitempty"`
+	// FixRequiresGo is the `go` directive of the fixed version's go.mod: the Go release the fix needs. Whether that raises the
+	// scanned module's minimum Go is in grade.rows[].findings[].response.fix_compat.
+	FixRequiresGo string `json:"fix_requires_go,omitempty"`
+	// FixReleasedAt is when the first fixed version was released (the later of the advisory's fix date and the module
+	// proxy's time for that version); FixDateSource says which ("module_proxy" or "advisory"). Absent = unknown.
+	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
+	FixDateSource string     `json:"fix_date_source,omitempty"`
+	// AffectedPackages are the import paths the advisory names; absent = the whole module.
+	AffectedPackages []string `json:"affected_packages,omitempty"`
+	// Condition is what the project must do to reach the vulnerable code, read from the call path ("reached through ...").
+	Condition string `json:"condition,omitempty"`
 	// EnrichmentErrors holds the failure summary when all enrichment tiers failed.
 	EnrichmentErrors []string `json:"enrichment_errors,omitempty"`
 	// EPSSScore is FIRST.org's exploitation probability (0.0–1.0). Absent when
@@ -243,6 +226,15 @@ type JSONMaintenance struct {
 	// DeprecationMessage is the go.mod `// Deprecated:` notice of the latest
 	// version, which usually names the successor.
 	DeprecationMessage string `json:"deprecation_message,omitempty"`
+	// Retracted is true when the pinned version is retracted by the module's own go.mod; it grades like Deprecated.
+	Retracted         bool   `json:"retracted,omitempty"`
+	RetractionMessage string `json:"retraction_message,omitempty"`
+	// RepositoryURL is the repository the module is published from; ArchivedCheck says whether its archived flag was
+	// read ("checked"), could not be read ("failed") or cannot be read for this host ("unsupported"). An unread flag
+	// is never reported as "not archived".
+	RepositoryURL      string `json:"repository_url,omitempty"`
+	ArchivedCheck      string `json:"archived_check,omitempty"`
+	RepositoryNotFound bool   `json:"repository_not_found,omitempty"`
 }
 
 // JSONMaintainer holds maintainer analysis info.
@@ -268,29 +260,6 @@ type JSONMaintainer struct {
 	Forks             *int     `json:"forks,omitempty"`
 	OpenIssues        *int     `json:"open_issues,omitempty"`
 	SubDependencies   int      `json:"sub_dependencies,omitempty"`
-}
-
-// JSONScoreBreakdown shows how the risk score was computed.
-//
-// The three optional axes are pointers so an unmeasured axis serializes as null
-// rather than 0. A consumer cannot distinguish "no vulnerabilities found" from
-// "no vulnerability scan ran" if both render as 0 — the first is a finding, the
-// second is a gap, and reporting the gap as a finding is the bug this
-// representation prevents. Depth and maturity are never unavailable.
-type JSONScoreBreakdown struct {
-	VulnScore        *float64 `json:"vuln_score"`
-	MaintenanceScore *float64 `json:"maintenance_score"`
-	DepthScore       float64  `json:"depth_score"`
-	MaintainerScore  *float64 `json:"maintainer_score"`
-	MaturityScore    float64  `json:"maturity_score"`
-
-	// MeasuredWeight is the fraction of the scoring model that was actually
-	// available: 1.0 when every axis was measured. Below 1.0 the score
-	// describes only the measured axes and is not comparable to a full scan.
-	MeasuredWeight float64 `json:"measured_weight"`
-
-	// ExcludedAxes names the axes dropped from both numerator and denominator.
-	ExcludedAxes []string `json:"excluded_axes,omitempty"`
 }
 
 // JSONTyposquat holds typosquatting analysis.
@@ -362,32 +331,6 @@ type JSONIntegrityFinding struct {
 	Remediation string `json:"remediation"`
 }
 
-// JSONHeadline holds the project-level headline risk summary, including which
-// scoring candidate drove the overall score and its key driving dependency.
-type JSONHeadline struct {
-	Score       float64 `json:"score"`
-	Level       string  `json:"level"`
-	Driver      string  `json:"driver"`
-	DrivingItem string  `json:"driving_item,omitempty"`
-	Reason      string  `json:"reason,omitempty"`
-	// Candidates contains the winning candidate only. All five candidate scores
-	// will be included here once ProjectScore stores them all; for now use
-	// Driver/DrivingItem/Reason for the headline and per-dep data for the rest.
-	Candidates []JSONCandidate `json:"candidates"`
-}
-
-// JSONCandidate represents a single scoring candidate evaluated during headline
-// score selection.
-type JSONCandidate struct {
-	Name       string  `json:"name"`
-	Score      float64 `json:"score"`
-	DrivingDep string  `json:"driving_dep,omitempty"`
-	Reason     string  `json:"reason,omitempty"`
-	// TiedWith is the number of other modules sharing the p95_dep_risk
-	// candidate's score; omitted when zero. See scorer.HeadlineCandidate.
-	TiedWith int `json:"tied_with,omitempty"`
-}
-
 // JSONTimeBomb represents a dependency with an immediate, undeniable risk
 // (archived or CRITICAL CVE). Entries are emitted even when the headline score
 // already accounts for them — the goal is undeniable visibility.
@@ -406,26 +349,22 @@ type JSONTimeBomb struct {
 	Reachability string `json:"reachability,omitempty"`
 }
 
-// JSONTakeover holds a takeover candidate.
-type JSONTakeover struct {
-	Owner           string `json:"owner"`
-	Repo            string `json:"repo"`
-	Stars           int    `json:"stars"`
-	BusFactor       int    `json:"bus_factor"`
-	ActivityPattern string `json:"activity_pattern"`
-	Reason          string `json:"reason"`
-}
-
 // JSONOptions configures JSON output.
 type JSONOptions struct {
 	GoVersion       string
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
-	Takeovers       []*scanner.MaintainerInfo
+
+	// Grade is the Grading v2 result to publish.
+	Grade *grade.Result
 
 	// StdlibVulns are the standard library vulnerabilities, already sorted by
 	// the caller. They are reported as given.
 	StdlibVulns []scanner.Vulnerability
+
+	// Scan says what the vulnerability scan ran with (platform, Go release, govulncheck version, vulnerability database and
+	// its last-modified time, and the age of the CISA catalog when it could not be refreshed). nil when no scan ran.
+	Scan *scanner.ScanInfo
 }
 
 // toJSONVuln maps a scanned vulnerability to its JSON form. Dependency and
@@ -448,7 +387,11 @@ func toJSONVuln(v *scanner.Vulnerability) JSONVuln {
 		CalledSymbols:       v.CalledSymbols,
 		SeveritySource:      v.SeveritySource,
 		SeverityAlias:       v.SeverityAlias,
-		SeverityScored:      scorer.ScoredSeverity(v),
+		FixRequiresGo:       v.FixRequiresGo,
+		FixReleasedAt:       v.FixReleasedAt,
+		FixDateSource:       v.FixDateSource,
+		AffectedPackages:    v.AffectedPackages,
+		Condition:           v.Condition,
 		EnrichmentErrors:    v.EnrichmentErrors,
 		EPSSScore:           v.EPSSScore,
 		EPSSPercentile:      v.EPSSPercentile,
@@ -470,6 +413,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	directCount := graph.DirectCount()
 	transitiveCount := graph.TransitiveCount()
 
+	crit, high, med, low := deprecatedCounts(opts.Grade)
+	headline := deprecatedHeadline(opts.Grade)
 	report := JSONReport{
 		Tool:        "unisupply",
 		Version:     version.Version,
@@ -481,44 +426,35 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			TransDeps:  transitiveCount,
 			TotalDeps:  directCount + transitiveCount,
 		},
-		OverallRisk:               ps.OverallScore,
-		OverallLevel:              string(ps.OverallLevel),
-		HeadlineUnscoredReason:    ps.HeadlineUnscoredReason,
-		Headline:                  jsonHeadline(ps),
-		MeanDepRiskScore:          ps.MeanDepRiskScore,
-		SeverityAdjustedVulnScore: ps.SeverityAdjustedVulnScore,
-		HeadlineDriver:            ps.HeadlineDriver,
-		WorstCVEID:                ps.WorstCVEID,
-		WorstCVESeverity:          ps.WorstCVESeverity,
-		DebugScoring:              ps.DebugScoring,
-		Diagnostics:               jsonDiagnostics(ps.Diagnostics),
-		Warnings:                  ps.Warnings,
-		Notes:                     ps.Notes,
-		TimeBombs:                 collectJSONTimeBombs(ps),
+		Grade:            opts.Grade,
+		OverallRisk:      gradeScore(opts.Grade),
+		OverallLevel:     headline.Level,
+		Headline:         headline,
+		DeprecatedFields: deprecatedFields,
+		Scan:             opts.Scan,
+		Warnings:         publishedWarnings(ps.Warnings),
+		Notes:            ps.Notes,
+		TimeBombs:        collectJSONTimeBombs(ps),
 		Summary: JSONSummary{
-			CriticalRiskCount: ps.CriticalRiskCount,
-			HighRiskCount:     ps.HighRiskCount,
-			MediumRiskCount:   ps.MediumRiskCount,
-			LowRiskCount:      ps.LowRiskCount,
-			TotalVulns:        ps.TotalVulns,
-			Unmaintained2yr:   ps.Unmaintained2yr,
-			Unmaintained1yr:   ps.Unmaintained1yr,
+			CriticalRiskCount: crit, HighRiskCount: high, MediumRiskCount: med, LowRiskCount: low,
+			TotalVulns:      ps.TotalVulns,
+			Unmaintained2yr: ps.Unmaintained2yr,
+			Unmaintained1yr: ps.Unmaintained1yr,
 		},
 	}
 
+	rows := deprecatedRows(opts.Grade)
 	for _, ds := range ps.Dependencies {
 		jd := JSONDependency{
 			Module:         ds.Module,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
+			RiskScore:      rowScore(opts.Grade, rows[ds.Module], hasRow(rows, ds.Module)),
+			RiskLevel:      deprecatedLevel(rows[ds.Module].Letter),
 			TestOnly:       ds.IsTestOnly,
 			InBuild:        ds.InBuild,
 			Platforms:      ds.Platforms,
-			RiskScore:      ds.RiskScore,
-			RiskLevel:      string(ds.RiskLevel),
-			ScoreBreakdown: buildScoreBreakdown(ds),
 			DependencyPath: ds.DependencyPath,
-			RiskFactors:    ds.RiskFactors,
 			ReplaceClass:   string(ds.ReplaceClass),
 			PseudoVersion:  ds.PseudoVersion,
 		}
@@ -540,6 +476,12 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 				Archived:           ds.Maintenance.Archived,
 				Deprecated:         ds.Maintenance.Deprecated,
 				DeprecationMessage: ds.Maintenance.DeprecationMessage,
+
+				Retracted:          ds.Maintenance.Retracted,
+				RetractionMessage:  ds.Maintenance.RetractionMessage,
+				RepositoryURL:      ds.Maintenance.RepositoryURL,
+				ArchivedCheck:      ds.Maintenance.ArchivedCheck,
+				RepositoryNotFound: ds.Maintenance.RepositoryNotFound,
 			}
 			if ds.Maintenance.HasActivity() {
 				months := ds.Maintenance.MonthsSinceActivity
@@ -612,9 +554,6 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		report.StdlibVulns = make([]JSONVuln, 0, len(opts.StdlibVulns))
 		for i := range opts.StdlibVulns {
 			jv := toJSONVuln(&opts.StdlibVulns[i])
-			// The scorer does not score standard library vulnerabilities, so a
-			// scored tier here would claim a measurement nobody made.
-			jv.SeverityScored = ""
 			report.StdlibVulns = append(report.StdlibVulns, jv)
 		}
 	}
@@ -714,18 +653,6 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		report.Integrity = integrityJSON
 	}
 
-	// Takeover candidates.
-	for _, t := range opts.Takeovers {
-		report.Takeovers = append(report.Takeovers, JSONTakeover{
-			Owner:           t.Owner,
-			Repo:            t.Repo,
-			Stars:           t.Stars,
-			BusFactor:       t.BusFactor,
-			ActivityPattern: t.ActivityPattern,
-			Reason:          t.TakeoverReason,
-		})
-	}
-
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(report); err != nil {
@@ -735,34 +662,6 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 	return nil
 }
 
-// buildScoreBreakdown renders the per-axis component scores, leaving an
-// unmeasured axis null rather than 0 so a gap is not read as a finding.
-func buildScoreBreakdown(ds *scorer.DependencyScore) *JSONScoreBreakdown {
-	sb := &JSONScoreBreakdown{
-		DepthScore:     ds.DepthScore,
-		MaturityScore:  ds.MaturityScore,
-		MeasuredWeight: ds.MeasuredWeight,
-	}
-	if ds.VulnWeightExcluded {
-		sb.ExcludedAxes = append(sb.ExcludedAxes, "vulnerabilities")
-	} else {
-		sb.VulnScore = &ds.VulnScore
-	}
-	if ds.MaintenanceWeightExcluded {
-		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintenance")
-	} else {
-		sb.MaintenanceScore = &ds.MaintenanceScore
-	}
-	if ds.MaintainerWeightExcluded {
-		sb.ExcludedAxes = append(sb.ExcludedAxes, "maintainer")
-	} else {
-		sb.MaintainerScore = &ds.MaintainerScore
-	}
-	return sb
-}
-
-// jsonDiagnostics maps the scorer's Diagnostics struct to its JSON form.
-// Returns nil when the source is nil so the JSON field is omitted.
 // collectJSONTimeBombs maps scorer.CollectTimeBombs output to the JSON report
 // type, always returning a non-nil slice so the JSON field serialises as []
 // rather than null.
@@ -780,36 +679,50 @@ func collectJSONTimeBombs(ps *scorer.ProjectScore) []JSONTimeBomb {
 	return out
 }
 
-// jsonHeadline builds JSONHeadline from ProjectScore. When HeadlineCandidate is
-// nil (empty-graph scan), driver and candidates are left empty.
-func jsonHeadline(ps *scorer.ProjectScore) JSONHeadline {
-	h := JSONHeadline{
-		Score:      float64(ps.OverallScore),
-		Level:      string(ps.OverallLevel),
-		Candidates: []JSONCandidate{},
-	}
-	if ps.HeadlineCandidate != nil {
-		hc := ps.HeadlineCandidate
-		h.Driver = hc.Name
-		h.DrivingItem = hc.DrivingDep
-		h.Reason = hc.Reason
-		h.Candidates = []JSONCandidate{{
-			Name:       hc.Name,
-			Score:      hc.Score,
-			DrivingDep: hc.DrivingDep,
-			Reason:     hc.Reason,
-			TiedWith:   hc.TiedWith,
-		}}
-	}
-	return h
-}
+// retiredWarningMarkers are phrases the scorer's warnings use for the retired 0-100 risk model (axis weights, score
+// comparability). The grade has no such axes, so a warning that carries one of these is not published as written.
+var retiredWarningMarkers = []string{"weight excluded", "weight is excluded", "NOT comparable"}
 
-func jsonDiagnostics(d *scorer.Diagnostics) *JSONDiagnostics {
-	if d == nil {
-		return nil
+// publishedWarnings returns the scorer's warnings as the report publishes them (text SCAN LIMITATIONS and JSON
+// "warnings"). The scorer still writes its own warnings in its retired-model language, and its own tests rely on that,
+// so the filter lives here. The rule, decided by text:
+//
+//   - A warning about data that could not be fetched is kept. If it goes on to explain what the retired model did about
+//     it ("; ... weight excluded from those scores", "... NOT comparable to a scan that checked for CVEs"), that
+//     trailing clause is cut and the data statement stays, e.g. "vulnerability scan did not run".
+//   - "maintainer data unavailable" is kept (only its retired-weight clause is cut): the grade does not read maintainer
+//     data, but the strict policy preset (no_single_maintainer) does and skips modules without it, so a report must say
+//     the data was missing.
+//   - The high-EPSS "verify reachability manually" warning is dropped: EPSS is not an input of the grade. (The KEV one
+//     stays: a KEV finding counts in the grade at once.)
+//
+// The result is de-duplicated and nil when nothing is left.
+func publishedWarnings(warnings []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range warnings {
+		if strings.HasPrefix(w, "high-EPSS CVE") {
+			continue
+		}
+		cut := -1
+		for _, m := range retiredWarningMarkers {
+			if i := strings.Index(w, m); i >= 0 && (cut < 0 || i < cut) {
+				cut = i
+			}
+		}
+		if cut >= 0 {
+			head := w[:cut]
+			i := strings.LastIndex(head, "; ")
+			if i < 0 {
+				continue // nothing but retired-model language
+			}
+			w = strings.TrimSpace(head[:i])
+		}
+		if w == "" || seen[w] {
+			continue
+		}
+		seen[w] = true
+		out = append(out, w)
 	}
-	return &JSONDiagnostics{
-		MaxDepRiskScore: d.MaxDepRiskScore,
-		P95DepRiskScore: d.P95DepRiskScore,
-	}
+	return out
 }

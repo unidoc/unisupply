@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,7 +60,40 @@ type rowMatcher struct {
 
 	// match reports whether a recorded request path belongs to this row.
 	match func(path string) bool
+
+	// matchReq, when set, is used instead of match and sees the whole request.
+	// Two rows can share a path (both OSV query rows POST to /v1/query); only
+	// the body tells them apart.
+	matchReq func(r recordedRequest) bool
 }
+
+// recordedRequest is one request the recorder saw. Body is kept for POSTs only.
+type recordedRequest struct {
+	Method string
+	Path   string
+	Body   string
+}
+
+// Module paths the response-history drive uses: the scanned module and one
+// dependency of it.
+const (
+	rhModulePath = "example.com/rhmod"
+	rhDepPath    = "example.com/rhdep"
+)
+
+// osvQueryRow matches a POST /v1/query whose body names a version (the module's
+// own advisories) or, with withVersion false, does not (response history asks
+// per dependency, without one).
+func osvQueryRow(withVersion bool) func(recordedRequest) bool {
+	return func(r recordedRequest) bool {
+		if r.Method != http.MethodPost || !strings.HasPrefix(r.Path, "/v1/query") {
+			return false
+		}
+		return strings.Contains(r.Body, `"version"`) == withVersion
+	}
+}
+
+var selfVerCounter atomic.Int64
 
 // rowMatchers declares, per documented host, one matcher per README table row.
 // Matching on the host alone would let two of the three api.github.com rows
@@ -70,7 +105,11 @@ type rowMatcher struct {
 // it. Hosts listed in undrivenRows are exempt and must not appear here.
 var rowMatchers = map[string][]rowMatcher{
 	"proxy.golang.org": {
-		{name: "maintenance and resilience version lookups", match: anyPath},
+		{name: "maintenance and resilience version lookups", match: not(contains("/fixmod/@v/", "/rhmod/@v/", "/rhdep/@v/", "/selfver/@v/"))},
+		{name: "release time of the scanned --module-version", match: contains("/selfver/@v/")},
+		{name: "fix-release date lookups", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".info") }},
+		{name: "Go requirement of each fixed version", match: func(p string) bool { return strings.Contains(p, "/fixmod/@v/") && strings.HasSuffix(p, ".mod") }},
+		{name: "response history (scanned module and dependency releases)", match: contains("/rhmod/@v/", "/rhdep/@v/")},
 	},
 	"api.github.com": {
 		{name: "maintainer scanner (contributor list)", match: hasSuffix("/contributors")},
@@ -79,7 +118,9 @@ var rowMatchers = map[string][]rowMatcher{
 		{name: "GHSA severity enrichment", match: hasPrefix("/advisories")},
 	},
 	"api.osv.dev": {
-		{name: "OSV severity enrichment (advisory and alias records)", match: anyPath},
+		{name: "OSV severity enrichment (advisory and alias records)", match: hasPrefix("/v1/vulns/")},
+		{name: "the module's own advisories", matchReq: osvQueryRow(true)},
+		{name: "response history (advisories of each dependency)", matchReq: osvQueryRow(false)},
 	},
 	"services.nvd.nist.gov": {
 		{name: "NVD severity enrichment", match: anyPath},
@@ -94,6 +135,10 @@ var rowMatchers = map[string][]rowMatcher{
 
 func anyPath(string) bool { return true }
 
+func not(m func(string) bool) func(string) bool {
+	return func(path string) bool { return !m(path) }
+}
+
 func hasPrefix(p string) func(string) bool {
 	return func(path string) bool { return strings.HasPrefix(path, p) }
 }
@@ -102,8 +147,16 @@ func hasSuffix(p string) func(string) bool {
 	return func(path string) bool { return strings.HasSuffix(path, p) }
 }
 
-func contains(p string) func(string) bool {
-	return func(path string) bool { return strings.Contains(path, p) }
+// contains matches a path holding any of ps.
+func contains(ps ...string) func(string) bool {
+	return func(path string) bool {
+		for _, p := range ps {
+			if strings.Contains(path, p) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 // hostRecorder records the host of every outbound request and then serves it
@@ -116,6 +169,10 @@ type hostRecorder struct {
 	// distinguish the three api.github.com contract rows from one another;
 	// the path can, and TestNetworkContract_NoDeadRows matches on it.
 	pathsByHost map[string][]string
+
+	// requestsByHost holds the same requests with method and POST body, for the
+	// rows a path cannot tell apart.
+	requestsByHost map[string][]recordedRequest
 
 	stub     *url.URL
 	upstream http.RoundTripper
@@ -130,6 +187,18 @@ func (r *hostRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 		r.pathsByHost = map[string][]string{}
 	}
 	r.pathsByHost[host] = append(r.pathsByHost[host], req.URL.Path)
+	if r.requestsByHost == nil {
+		r.requestsByHost = map[string][]recordedRequest{}
+	}
+	rr := recordedRequest{Method: req.Method, Path: req.URL.Path}
+	if req.Method == http.MethodPost && req.GetBody != nil {
+		if b, err := req.GetBody(); err == nil {
+			data, _ := io.ReadAll(b)
+			_ = b.Close()
+			rr.Body = string(data)
+		}
+	}
+	r.requestsByHost[host] = append(r.requestsByHost[host], rr)
 	r.mu.Unlock()
 
 	// Rewrite to the stub. The host-pin check in pkg/scanner/httpclient.go has
@@ -165,6 +234,14 @@ func (r *hostRecorder) paths(host string) []string {
 	return append([]string(nil), r.pathsByHost[host]...)
 }
 
+// requests returns the requests recorded for host, in the order seen.
+func (r *hostRecorder) requests(host string) []recordedRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]recordedRequest(nil), r.requestsByHost[host]...)
+}
+
 // stubServer serves canned responses keyed by the intended upstream host. The
 // bodies are only as real as they need to be to keep each scanner walking its
 // request chain — this suite asserts on hosts contacted, not on scan results.
@@ -181,6 +258,12 @@ func stubServer(t *testing.T) *httptest.Server {
 			case strings.HasSuffix(r.URL.Path, "/@v/list"):
 				w.Header().Set("Content-Type", "text/plain")
 				fmt.Fprint(w, "v1.0.0\nv1.0.1\n")
+			case strings.HasPrefix(r.URL.Path, "/"+rhModulePath+"/@v/") && strings.HasSuffix(r.URL.Path, ".mod"):
+				// The scanned module's go.mod requires the dependency at its
+				// fixed version, so the fix counts as adopted and the
+				// dependency's release time is looked up.
+				w.Header().Set("Content-Type", "text/plain")
+				fmt.Fprintf(w, "module %s\n\nrequire %s v1.0.1\n", rhModulePath, rhDepPath)
 			default: // /@latest and /@v/<version>.info share a shape
 				writeJSON(w, map[string]any{
 					"Version": "v1.0.1",
@@ -222,6 +305,19 @@ func stubServer(t *testing.T) *httptest.Server {
 			}
 
 		case "api.osv.dev":
+			if r.Method == http.MethodPost && r.URL.Path == "/v1/query" {
+				if body, _ := io.ReadAll(r.Body); strings.Contains(string(body), rhDepPath) {
+					// One advisory of the dependency, fixed in v1.0.1.
+					writeJSON(w, map[string]any{"vulns": []any{map[string]any{
+						"id": "GO-2026-0100",
+						"affected": []any{map[string]any{
+							"package": map[string]any{"name": rhDepPath, "ecosystem": "Go"},
+							"ranges":  []any{map[string]any{"events": []any{map[string]any{"introduced": "0"}, map[string]any{"fixed": "1.0.1"}}}},
+						}},
+					}}})
+					return
+				}
+			}
 			// Unknown to OSV, for the advisory and for its CVE alias alike, so
 			// enrichment falls through the alias lookups to NVD and then GHSA
 			// — which is how all three enrichment hosts get exercised.
@@ -339,6 +435,27 @@ func driveNetworkScanners(t *testing.T) *hostRecorder {
 	}
 	scanner.NewVulnEnricher(scanner.VulnEnricherOptions{CacheDir: t.TempDir()}).Enrich(ctx, v)
 
+	// api.osv.dev (the module's own advisories) and proxy.golang.org (fix-release
+	// dates). The stub answers OSV with 404, so the lookup is an error here;
+	// the request is what this suite records. The dated vuln drives the proxy.
+	if _, err := scanner.ScanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{CacheDir: t.TempDir()}, "example.com/fixmod", "v1.0.0"); err != nil {
+		t.Logf("module advisory lookup reported %v", err)
+	}
+	dated := []scanner.Vulnerability{{ID: "GO-2026-0002", FixedVersion: "v1.0.1"}}
+	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
+	scanner.ResolveFixGoRequirements(ctx, scanner.FixDateOptions{}, "example.com/fixmod", dated)
+
+	// proxy.golang.org (release time of the scanned --module-version). Its answers are cached per process, so each drive asks
+	// for a version no earlier drive did.
+	scanner.ModuleVersionTime(ctx, scanner.FixDateOptions{}, "example.com/selfver", fmt.Sprintf("v1.0.%d", selfVerCounter.Add(1)))
+
+	// proxy.golang.org (the scanned module's releases, the dependency's fix
+	// date) and api.osv.dev (one query per dependency, no version): response
+	// history. The stub's answers give one adopted fix, so every request kind runs.
+	if _, err := scanner.ScanResponseHistory(ctx, scanner.ResponseHistoryOptions{Timeout: timeout}, rhModulePath, []string{rhDepPath}); err != nil {
+		t.Logf("response history reported %v", err)
+	}
+
 	// api.first.org + www.cisa.gov
 	ti := scanner.NewThreatIntelClient(scanner.ThreatIntelOptions{CacheDir: t.TempDir()})
 	if _, err := ti.LookupEPSS(ctx, []string{"CVE-2026-0001"}); err != nil {
@@ -410,12 +527,22 @@ func TestNetworkContract_NoDeadRows(t *testing.T) {
 		}
 
 		paths := rec.paths(host)
+		reqs := rec.requests(host)
 		for _, m := range matchers {
 			hit := false
-			for _, path := range paths {
-				if m.match(path) {
-					hit = true
-					break
+			if m.matchReq != nil {
+				for _, r := range reqs {
+					if m.matchReq(r) {
+						hit = true
+						break
+					}
+				}
+			} else {
+				for _, path := range paths {
+					if m.match(path) {
+						hit = true
+						break
+					}
 				}
 			}
 			if !hit {
@@ -439,6 +566,44 @@ func TestNetworkContract_NoDeadRows(t *testing.T) {
 		if _, exempt := undrivenRows[host]; exempt {
 			t.Errorf("%q is in both rowMatchers and undrivenRows; a host is either driven or exempt, not both", host)
 		}
+	}
+}
+
+// TestNetworkContract_ResponseHistoryRequests pins what --response-history
+// sends, row by row, as the README states it: the scanned module's version list,
+// .info and .mod, the .info of the dependency's fixed version, and one OSV query
+// per dependency carrying the dependency's module path and no version.
+func TestNetworkContract_ResponseHistoryRequests(t *testing.T) {
+	rec := driveNetworkScanners(t)
+
+	var proxy []string
+	for _, p := range rec.paths("proxy.golang.org") {
+		if strings.Contains(p, "/rhmod/@v/") || strings.Contains(p, "/rhdep/@v/") {
+			proxy = append(proxy, p)
+		}
+	}
+	has := func(substr string) bool {
+		for _, p := range proxy {
+			if strings.Contains(p, substr) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"/rhmod/@v/list", "/rhmod/@v/v1.0.1.info", "/rhmod/@v/v1.0.1.mod", "/rhdep/@v/v1.0.1.info"} {
+		if !has(want) {
+			t.Errorf("no response-history request for %q; saw %v", want, proxy)
+		}
+	}
+
+	var queries []recordedRequest
+	for _, r := range rec.requests("api.osv.dev") {
+		if osvQueryRow(false)(r) {
+			queries = append(queries, r)
+		}
+	}
+	if len(queries) != 1 || !strings.Contains(queries[0].Body, rhDepPath) || strings.Contains(queries[0].Body, rhModulePath) {
+		t.Errorf("OSV response-history queries = %+v, want exactly one, for the dependency %s only", queries, rhDepPath)
 	}
 }
 
@@ -562,7 +727,12 @@ func TestNetworkContract_TrustIndexContactsOnlyConfiguredHost(t *testing.T) {
 func TestNetworkContract_OSVAliasBeforeNVD(t *testing.T) {
 	rec := driveNetworkScanners(t)
 
-	got := rec.paths("api.osv.dev")
+	var got []string
+	for _, p := range rec.paths("api.osv.dev") {
+		if strings.HasPrefix(p, "/v1/vulns/") { // the module's own /v1/query is a different row
+			got = append(got, p)
+		}
+	}
 	want := []string{"/v1/vulns/GO-2026-0001", "/v1/vulns/CVE-2026-0001"}
 	if len(got) != len(want) {
 		t.Fatalf("OSV paths = %v, want %v", got, want)

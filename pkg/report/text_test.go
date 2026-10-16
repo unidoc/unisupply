@@ -10,101 +10,6 @@ import (
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
-// TestWriteText_ContainsSummary tests that output contains overall risk score and level.
-func TestWriteText_ContainsSummary(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "github.com/example/pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 45,
-		OverallLevel: scorer.RiskMedium,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "github.com/example/pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 45,
-				RiskLevel: scorer.RiskMedium,
-			},
-		},
-		MediumRiskCount: 1,
-	}
-
-	opts := TextOptions{
-		NoColor: true,
-		Writer:  &bytes.Buffer{},
-	}
-
-	err := WriteText(graph, ps, &opts)
-	if err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	// Check for overall score and level
-	if !strings.Contains(output, "45/100") {
-		t.Error("Output should contain overall score '45/100'")
-	}
-
-	if !strings.Contains(output, "MEDIUM") {
-		t.Error("Output should contain overall level 'MEDIUM'")
-	}
-
-	if !strings.Contains(output, "SUPPLY-CHAIN RISK:") {
-		t.Error("Output should contain 'SUPPLY-CHAIN RISK:' header")
-	}
-}
-
-// TestWriteText_UnscoredHeadline covers the UNKNOWN headline rendering. Both
-// switches it flows through (riskColor and overallExplanation) previously fell
-// to a `default` branch meaning LOW — green, with the text "no known
-// vulnerabilities were found". On a scan that never looked for vulnerabilities
-// that is the single most misleading sentence the report could print, so this
-// test asserts it is gone as much as it asserts UNKNOWN is present.
-func TestWriteText_UnscoredHeadline(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{Path: "github.com/example/pkg", Version: "v1.0.0", Direct: true, Depth: 0},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore:           26,
-		OverallLevel:           scorer.RiskUnknown,
-		HeadlineUnscoredReason: "vulnerability scan did not run — test reason",
-		Dependencies: []*scorer.DependencyScore{
-			{Module: "github.com/example/pkg", Version: "v1.0.0", Direct: true, RiskScore: 26, RiskLevel: scorer.RiskMedium},
-		},
-		Warnings: []string{"vulnerability scan did not run"},
-	}
-
-	opts := TextOptions{NoColor: true, Writer: &bytes.Buffer{}}
-	if err := WriteText(graph, ps, &opts); err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	for _, want := range []string{"UNKNOWN — not scored", "indicative: 26/100", "test reason", "No verdict"} {
-		if !strings.Contains(output, want) {
-			t.Errorf("output missing %q", want)
-		}
-	}
-
-	// The false-assurance sentence from the LOW branch must not appear.
-	if strings.Contains(output, "no known vulnerabilities were found") {
-		t.Error("unscored headline rendered the LOW explanation claiming no vulnerabilities were found")
-	}
-	// "26/100 (UNKNOWN)" would read as a scored 26; the band must lead.
-	if strings.Contains(output, "26/100 (UNKNOWN)") {
-		t.Error("headline presented the indicative number as a scored band")
-	}
-}
-
 // TestWriteText_NoColor tests that noColor=true removes ANSI codes.
 func TestWriteText_NoColor(t *testing.T) {
 	graph := testutil.MakeGraph(
@@ -255,85 +160,6 @@ func TestWriteText_VulnSection(t *testing.T) {
 	}
 }
 
-// TestWriteText_RiskLevelGrouping tests dependencies are grouped by risk level.
-func TestWriteText_RiskLevelGrouping(t *testing.T) {
-	graph := testutil.MakeGraph(
-		testutil.DepSpec{
-			Path:    "critical-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-		testutil.DepSpec{
-			Path:    "high-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-		testutil.DepSpec{
-			Path:    "safe-pkg",
-			Version: "v1.0.0",
-			Direct:  true,
-			Depth:   0,
-		},
-	)
-
-	ps := &scorer.ProjectScore{
-		OverallScore: 55,
-		OverallLevel: scorer.RiskHigh,
-		Dependencies: []*scorer.DependencyScore{
-			{
-				Module:    "critical-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 85,
-				RiskLevel: scorer.RiskCritical,
-			},
-			{
-				Module:    "high-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 65,
-				RiskLevel: scorer.RiskHigh,
-			},
-			{
-				Module:    "safe-pkg",
-				Version:   "v1.0.0",
-				Direct:    true,
-				RiskScore: 15,
-				RiskLevel: scorer.RiskLow,
-			},
-		},
-		HighRiskCount: 2,
-		LowRiskCount:  1,
-	}
-
-	opts := TextOptions{
-		NoColor: true,
-		Writer:  &bytes.Buffer{},
-	}
-
-	err := WriteText(graph, ps, &opts)
-	if err != nil {
-		t.Fatalf("WriteText() failed: %v", err)
-	}
-
-	output := opts.Writer.(*bytes.Buffer).String()
-
-	// Check for risk level headers
-	if !strings.Contains(output, "CRITICAL RISK") {
-		t.Error("Output should contain 'CRITICAL RISK' section header")
-	}
-
-	if !strings.Contains(output, "HIGH RISK") {
-		t.Error("Output should contain 'HIGH RISK' section header")
-	}
-
-	if !strings.Contains(output, "LOW RISK") {
-		t.Error("Output should contain 'LOW RISK' section header")
-	}
-}
-
 // TestWriteText_DirectVsIndirectLabel tests that direct/indirect labels appear.
 func TestWriteText_DirectVsIndirectLabel(t *testing.T) {
 	graph := testutil.MakeGraph(
@@ -441,6 +267,8 @@ func TestWriteText_LowRiskVulnDetail(t *testing.T) {
 					Direct:    false,
 					RiskScore: 5,
 					RiskLevel: scorer.RiskLow,
+					// Verbose output expands the block: a maintenance line follows the heading.
+					Maintenance: &scanner.MaintenanceInfo{MonthsSinceRelease: 3},
 				},
 			},
 			LowRiskCount: 2,
@@ -840,7 +668,7 @@ func TestWriteDependencyDetail_OutsideBuildLabel(t *testing.T) {
 				RiskScore: 32, RiskLevel: scorer.RiskMedium, InBuild: tt.inBuild,
 			}
 			var buf bytes.Buffer
-			writeDependencyDetail(&buf, ds, noColor, false)
+			writeDependencyDetail(&buf, ds, noColor, "B", false)
 			if got := strings.Contains(buf.String(), "outside build"); got != tt.want {
 				t.Errorf("label present = %v, want %v:\n%s", got, tt.want, buf.String())
 			}
@@ -918,34 +746,6 @@ func TestWriteText_OnlyNotesHasNoLimitations(t *testing.T) {
 	}
 }
 
-// TestWriteDebugScoring_SeverityLabels verifies the per-CVE label separating a
-// failed lookup from an advisory whose severity is not published yet.
-func TestWriteDebugScoring_SeverityLabels(t *testing.T) {
-	d := &scorer.DebugScoring{
-		EnrichedCVEs: []scorer.DebugCVE{
-			{ID: "GO-2026-0001", Module: "example.com/a", OriginalTier: "UNKNOWN", EnrichmentFailed: true},
-			{ID: "GO-2026-0002", Module: "example.com/b", OriginalTier: "UNKNOWN", SeverityUnscored: true},
-		},
-	}
-	var buf bytes.Buffer
-	writeDebugScoring(&buf, func(_, s string) string { return s }, d)
-	out := buf.String()
-
-	for _, line := range strings.Split(out, "\n") {
-		switch {
-		case strings.Contains(line, "GO-2026-0001") && !strings.Contains(line, "[enrichment_failed]"):
-			t.Errorf("failed lookup line lacks [enrichment_failed]: %q", line)
-		case strings.Contains(line, "GO-2026-0002") && !strings.Contains(line, "[severity_unpublished]"):
-			t.Errorf("unscored line lacks [severity_unpublished]: %q", line)
-		case strings.Contains(line, "GO-2026-0002") && strings.Contains(line, "[enrichment_failed]"):
-			t.Errorf("unscored line must not be labelled enrichment_failed: %q", line)
-		}
-	}
-	if !strings.Contains(out, "[severity_unpublished]") {
-		t.Errorf("no [severity_unpublished] label in output:\n%s", out)
-	}
-}
-
 // renderDetailed renders one detailed dependency block holding vulns.
 func renderDetailed(vulns ...scanner.Vulnerability) string {
 	ds := &scorer.DependencyScore{
@@ -953,7 +753,7 @@ func renderDetailed(vulns ...scanner.Vulnerability) string {
 		RiskScore: 80, RiskLevel: scorer.RiskCritical, Vulns: vulns,
 	}
 	var buf bytes.Buffer
-	writeDependencyDetail(&buf, ds, func(_, s string) string { return s }, true)
+	writeDependencyDetail(&buf, ds, func(_, s string) string { return s }, "B", true)
 	return buf.String()
 }
 

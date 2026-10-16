@@ -1,5 +1,5 @@
 {
-  "max_risk_score": 85,
-  "max_overall_score": 70,
+  "max_grade": "C",
+  "allow_pending": true,
   "no_critical_vulns": true
 }

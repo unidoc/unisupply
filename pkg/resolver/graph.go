@@ -58,8 +58,9 @@ type Dependency struct {
 	//   nil    - unknown: classification was unavailable; or the module was
 	//            found by no list but the verdict is not safe to give (the
 	//            main module requires it directly, so it may be imported only
-	//            under a custom build tag; it is reachable in the module graph
-	//            from such a requirement; or a platform could not be listed).
+	//            under a custom build tag; it is listed in the main go.mod and
+	//            reachable in the module graph from such a requirement; or a
+	//            platform could not be listed).
 	//   &true  - at least one package of the module is in a production or test
 	//            package list.
 	//   &false - classification succeeded and no package of the module is in
@@ -437,12 +438,15 @@ func (p *platformList) failure() string {
 // that no list contains may be imported only under such a tag, so it gets
 // InBuild nil rather than &false. Every module reachable from such a
 // requirement in the module graph (graph.Dependencies' UsedBy edges) gets nil
-// too, since the tagged code may import it through that requirement. This is
-// "reachable from", not "reachable only through": for go 1.17 and newer,
-// `go mod tidy` lists every module the tagged code needs as a `// indirect`
-// requirement of the main module, so those modules always have a direct edge
-// from the main module as well. Other indirect modules are not guarded: the
-// main module cannot import them directly, so graph-only is the likely cause.
+// too, since the tagged code may import it through that requirement, but only
+// if the main go.mod lists it. This is "reachable from", not "reachable only
+// through": for go 1.17 and newer, `go mod tidy` lists every module the tagged
+// code needs as a `// indirect` requirement of the main module, so a module
+// not listed there cannot be compiled by the tagged code and is classified
+// from what is known (graph-only, InBuild &false). Before go 1.17 go.mod does
+// not list every needed module, so there every reachable module stays nil.
+// Other indirect modules are not guarded: the main module cannot import them
+// directly, so graph-only is the likely cause.
 //
 // A module needed only by a go 1.24 `tool` directive is in no list either: a
 // tool is built by `go tool`, not linked into the main module, so it is
@@ -544,6 +548,17 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 			}
 		}
 		belowUnknown = reachableFrom(graph, seeds)
+		// Limit the spreading to modules the main go.mod lists (see the
+		// build-tag note above). Without a readable go.mod, or for a go.mod
+		// below go 1.17 (which does not list every module the build needs),
+		// the listing proves nothing and the unbounded rule stays.
+		if listed := goModListed(dir); listed != nil {
+			for modPath := range belowUnknown {
+				if !listed[modPath] {
+					delete(belowUnknown, modPath)
+				}
+			}
+		}
 	}
 
 	for modPath, dep := range graph.Dependencies {
@@ -583,6 +598,32 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 		note = "go list reported package errors that do not affect module classification: " + strings.Join(tolerated, "; ")
 	}
 	return warning, note
+}
+
+// goModListed returns the set of module paths the main go.mod requires (direct
+// and // indirect). It returns nil when go.mod cannot be read or declares a go
+// version below 1.17: before 1.17 go.mod lists only part of the modules the
+// build needs, so absence from it proves nothing.
+func goModListed(dir string) map[string]bool {
+	gomod, err := parser.ParseGoMod(filepath.Join(dir, "go.mod"))
+	if err != nil || !goVersionAtLeast(gomod.GoVersion, 1, 17) {
+		return nil
+	}
+	listed := make(map[string]bool, len(gomod.Requirements))
+	for _, req := range gomod.Requirements {
+		listed[req.Path] = true
+	}
+	return listed
+}
+
+// goVersionAtLeast reports whether a go directive value ("1.21", "1.22.3")
+// is at least major.minor. An empty or unparsable value is not.
+func goVersionAtLeast(v string, major, minor int) bool {
+	var maj, mnr int
+	if _, err := fmt.Sscanf(v, "%d.%d", &maj, &mnr); err != nil {
+		return false
+	}
+	return maj > major || (maj == major && mnr >= minor)
 }
 
 // reachableFrom returns every module reachable from seeds in the module graph,

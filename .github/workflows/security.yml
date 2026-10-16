@@ -232,18 +232,21 @@ jobs:
             exit 0
           fi
 
-          # Only the level is read here — it is a FIRE condition. Everything
+          # Only the grade is read here — it is a FIRE condition. Everything
           # else the body reports is rendered by the shared script below.
           #
           # `-s` alone passes a non-empty malformed file; under `set -e` the
           # `jq` read would then fail the step before the renderer's
           # unreadable-output fallback ran, filing no issue at all. Validate
           # first; UNKNOWN lets the other FIRE conditions still decide.
-          RISK_LEVEL="UNKNOWN"
+          #
+          # A grade with no letter (.grade.pending set, or no letter at all,
+          # or .grade null) is PENDING and fires: "no result" is not a pass.
+          GRADE_LETTER="UNKNOWN"
           if [ -s ./unisupply.json ] && jq -e . ./unisupply.json >/dev/null 2>&1; then
-            RISK_LEVEL=$(jq -r '.overall_risk_level // "UNKNOWN"' ./unisupply.json)
+            GRADE_LETTER=$(jq -r 'if (.grade // null) == null or .grade.pending != null or (.grade.letter // "") == "" then "PENDING" else .grade.letter end' ./unisupply.json)
           else
-            echo "::warning::unisupply.json is missing, empty or not valid JSON; risk level treated as UNKNOWN."
+            echo "::warning::unisupply.json is missing, empty or not valid JSON; grade treated as UNKNOWN."
           fi
 
           FIRE=false
@@ -256,15 +259,15 @@ jobs:
           if [ "$GOVULNCHECK_RC" = "3" ]; then
             FIRE=true
           fi
-          case "$RISK_LEVEL" in
-            MEDIUM|HIGH|CRITICAL) FIRE=true ;;
+          case "$GRADE_LETTER" in
+            C|D|F|PENDING) FIRE=true ;;
           esac
           if [ "$STALE" = "true" ]; then
             FIRE=true
           fi
 
           if [ "$FIRE" != "true" ]; then
-            echo "No gate condition met (audit=$AUDIT_RESULT govulncheck_rc=$GOVULNCHECK_RC risk_level=$RISK_LEVEL stale=$STALE); not filing issue."
+            echo "No gate condition met (audit=$AUDIT_RESULT govulncheck_rc=$GOVULNCHECK_RC grade=$GRADE_LETTER stale=$STALE); not filing issue."
             exit 0
           fi
 

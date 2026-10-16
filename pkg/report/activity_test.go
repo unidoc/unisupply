@@ -101,7 +101,7 @@ func TestWriteDependencyDetail_ActivityAndDeprecation(t *testing.T) {
 	noColor := func(_, s string) string { return s }
 	render := func(ds *scorer.DependencyScore) string {
 		var buf bytes.Buffer
-		writeDependencyDetail(&buf, ds, noColor, true) // detail lines are verbose-only
+		writeDependencyDetail(&buf, ds, noColor, "B", true) // detail lines are verbose-only
 		return buf.String()
 	}
 
@@ -142,41 +142,5 @@ func TestWriteDependencyDetail_ActivityAndDeprecation(t *testing.T) {
 	}
 	if n := strings.Count(out, "Last commit"); n != 1 {
 		t.Errorf("%d \"Last commit\" lines, want only the default-branch one:\n%s", n, out)
-	}
-}
-
-func TestDepExplanation_ActivityAndDeprecation(t *testing.T) {
-	tests := []struct {
-		name string
-		ds   *scorer.DependencyScore
-		want string
-		not  string
-	}{
-		{"old release, active branch: no maintenance reason", activityScore(40, 1), "", "release"},
-		{"both old: names both ages", activityScore(40, 30), "no release in 40 months and no default-branch commit in 30 months", ""},
-		{"no activity: release-only wording", activityScore(40, -1), "no release in 40 months —", "commit"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := depExplanation(tt.ds)
-			if tt.want != "" && !strings.Contains(got, tt.want) {
-				t.Errorf("explanation %q missing %q", got, tt.want)
-			}
-			if tt.not != "" && strings.Contains(got, tt.not) {
-				t.Errorf("explanation %q must not mention %q", got, tt.not)
-			}
-		})
-	}
-
-	ds := activityScore(31, 0)
-	ds.Maintenance.Deprecated = true
-	ds.Maintenance.DeprecationMessage = "Use example.com/new instead."
-	if got := depExplanation(ds); !strings.Contains(got, "module is deprecated by its maintainers: Use example.com/new instead.") {
-		t.Errorf("deprecated explanation = %q", got)
-	}
-	// The notice need not name a successor, so the wording does not assume one.
-	ds.Maintenance.DeprecationMessage = ""
-	if got := depExplanation(ds); !strings.Contains(got, "module is deprecated by its maintainers — plan to move off it") || strings.Contains(got, "successor") {
-		t.Errorf("deprecated explanation without a message = %q", got)
 	}
 }

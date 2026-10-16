@@ -13,6 +13,7 @@ import (
 	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -25,7 +26,9 @@ type PDFOptions struct {
 	GoVersion       string
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
-	Takeovers       []*scanner.MaintainerInfo
+
+	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
+	Grade *grade.Result
 
 	// StdlibVulns are the standard library vulnerabilities, already sorted by
 	// the caller. They are listed in the order given.
@@ -61,22 +64,16 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 	})
 
 	rep.Step("cover page")
-	writeCoverPage(c, graph, ps, helvetica, helveticaBold)
+	writeCoverPage(c, graph, opts.Grade, helvetica, helveticaBold)
 
 	rep.Step("executive summary")
 	writeExecutiveSummary(c, graph, ps, opts, helvetica, helveticaBold)
 
-	rep.Step("critical risk section")
-	writeCriticalRiskSection(c, ps, helvetica, helveticaBold)
+	rep.Step("grade section")
+	writeGradeSection(c, opts.Grade, helvetica, helveticaBold)
 
-	rep.Step("high risk section")
-	writeHighRiskSection(c, ps, helvetica, helveticaBold)
-
-	rep.Step("medium risk section")
-	writeMediumRiskSection(c, ps, helvetica, helveticaBold)
-
-	rep.Step("low risk section")
-	writeLowRiskSection(c, ps, helvetica, helveticaBold)
+	rep.Step("dependency findings")
+	writeDependencyFindings(c, ps, opts.Grade, helvetica, helveticaBold)
 
 	if opts.CIReport != nil {
 		rep.Step("CI/CD section")
@@ -86,11 +83,6 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 	if opts.IntegrityReport != nil {
 		rep.Step("module directives section")
 		writeIntegritySection(c, opts.IntegrityReport, helvetica, helveticaBold)
-	}
-
-	if len(opts.Takeovers) > 0 {
-		rep.Step("takeover candidates section")
-		writeTakeoverSection(c, opts.Takeovers, helvetica, helveticaBold)
 	}
 
 	if len(opts.StdlibVulns) > 0 {
@@ -125,7 +117,7 @@ func initLicense() error {
 	return license.SetLicenseKey("", lk.CustomerName)
 }
 
-func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
+func writeCoverPage(c *creator.Creator, graph *resolver.Graph, g *grade.Result, regular, bold *model.PdfFont) {
 	c.NewPage()
 
 	// Title.
@@ -157,37 +149,8 @@ func writeCoverPage(c *creator.Creator, graph *resolver.Graph, ps *scorer.Projec
 	project.SetMargins(0, 0, 20, 10)
 	_ = c.Draw(project)
 
-	// Supply-chain risk score — large indicator.
-	scoreColor := pdfRiskColor(ps.OverallLevel)
-	scorePara := c.NewStyledParagraph()
-	sChunk := scorePara.Append("Supply-Chain Risk: " + pdfHeadlineText(ps))
-	sChunk.Style.Font = bold
-	sChunk.Style.FontSize = 24
-	sChunk.Style.Color = scoreColor
-	scorePara.SetTextAlignment(creator.TextAlignmentCenter)
-	scorePara.SetMargins(0, 0, 40, 10)
-	_ = c.Draw(scorePara)
-
-	// Headline driver + worst CVE sub-line (small, dim).
-	if ps.HeadlineDriver != "" {
-		driverPara := c.NewStyledParagraph()
-		txt := fmt.Sprintf("Driver: %s   (mean=%d, severity_adjusted=%d)",
-			ps.HeadlineDriver, ps.MeanDepRiskScore, ps.SeverityAdjustedVulnScore)
-		if ps.WorstCVEID != "" {
-			if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
-				txt += fmt.Sprintf("\nWorst CVE: %s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
-			} else {
-				txt += fmt.Sprintf("\nWorst CVE: %s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
-			}
-		}
-		dChunk := driverPara.Append(txt)
-		dChunk.Style.Font = regular
-		dChunk.Style.FontSize = 11
-		dChunk.Style.Color = creator.ColorRGBFromHex("#666666")
-		driverPara.SetTextAlignment(creator.TextAlignmentCenter)
-		driverPara.SetMargins(0, 0, 0, 10)
-		_ = c.Draw(driverPara)
-	}
+	// Supply-chain grade: the big letter, the deciding row and, for an estimated or pending grade, what that means.
+	writeGradeCoverBlock(c, g, regular, bold)
 
 	// Date.
 	datePara := c.NewStyledParagraph()
@@ -233,40 +196,29 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	addTableRow(c, table, "Direct Dependencies", fmt.Sprintf("%d", directCount), regular, bold)
 	addTableRow(c, table, "Transitive Dependencies", fmt.Sprintf("%d", transitiveCount), regular, bold)
 	addTableRow(c, table, "Total Dependencies", fmt.Sprintf("%d", total), regular, bold)
-	addTableRow(c, table, "Supply-Chain Risk", pdfHeadlineText(ps), regular, bold)
-	if ps.HeadlineUnscoredReason != "" {
-		addTableRow(c, table, "Not Scored Because", ps.HeadlineUnscoredReason, regular, bold)
-	}
-	if ps.HeadlineDriver != "" {
-		addTableRow(c, table, "Headline Driver", ps.HeadlineDriver, regular, bold)
-		addTableRow(c, table, "Mean Dep Risk", fmt.Sprintf("%d", ps.MeanDepRiskScore), regular, bold)
-		addTableRow(c, table, "Severity-Adjusted Vuln", fmt.Sprintf("%d", ps.SeverityAdjustedVulnScore), regular, bold)
-	}
-	if ps.WorstCVEID != "" {
-		worstCVEVal := fmt.Sprintf("%s (%s)", ps.WorstCVEID, ps.WorstCVESeverity)
-		if ps.WorstCVESourceSeverity != "" && !strings.EqualFold(ps.WorstCVESourceSeverity, ps.WorstCVESeverity) {
-			worstCVEVal = fmt.Sprintf("%s (scored %s, source %s)", ps.WorstCVEID, ps.WorstCVESeverity, ps.WorstCVESourceSeverity)
+	if opts.Grade == nil {
+		addTableRow(c, table, "Grade", gradeNoGradeLine, regular, bold)
+	} else {
+		addTableRow(c, table, "Grade", gradeLetterLabel(opts.Grade), regular, bold)
+		if d := opts.Grade.Deciding; d != nil && opts.Grade.Pending == nil {
+			addTableRow(c, table, "Decided by", fmt.Sprintf("%s (score %d): %s", gradeDecidingText(d), d.Score, d.Reason), regular, bold)
 		}
-		addTableRow(c, table, "Worst CVE", worstCVEVal, regular, bold)
+		if p := opts.Grade.Pending; p != nil {
+			addTableRow(c, table, "Pending because", p.Reason, regular, bold)
+		}
 	}
 	_ = c.Draw(table)
 
-	// Risk distribution.
-	subheading(c, "Risk Distribution", bold)
-
-	distTable := c.NewTable(3)
-	distTable.SetMargins(0, 0, 5, 15)
-	if err = distTable.SetColumnWidths(0.4, 0.3, 0.3); err != nil {
-		fmt.Printf("Error setting column widths: %v\n", err)
-		return
+	// Letter distribution.
+	if opts.Grade != nil && len(opts.Grade.Rows) > 0 {
+		subheading(c, "Rows by Letter", bold)
+		distP := c.NewStyledParagraph()
+		distP.SetMargins(0, 0, 5, 15)
+		dch := distP.Append(gradeLetterCounts(opts.Grade))
+		dch.Style.Font = regular
+		dch.Style.FontSize = 11
+		_ = c.Draw(distP)
 	}
-
-	addTableHeader(c, distTable, []string{"Risk Level", "Count", "Percentage"}, bold)
-	addTableRow3(c, distTable, "Critical (76-100)", fmt.Sprintf("%d", ps.CriticalRiskCount), pctStr(ps.CriticalRiskCount, total), regular)
-	addTableRow3(c, distTable, "High (51-75)", fmt.Sprintf("%d", ps.HighRiskCount), pctStr(ps.HighRiskCount, total), regular)
-	addTableRow3(c, distTable, "Medium (26-50)", fmt.Sprintf("%d", ps.MediumRiskCount), pctStr(ps.MediumRiskCount, total), regular)
-	addTableRow3(c, distTable, "Low (0-25)", fmt.Sprintf("%d", ps.LowRiskCount), pctStr(ps.LowRiskCount, total), regular)
-	_ = c.Draw(distTable)
 
 	// Vulnerability summary.
 	subheading(c, "Key Findings", bold)
@@ -281,35 +233,18 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 
 	writeTimeBombsSection(c, ps, regular, bold)
 
-	// Data-quality notes: list vulns where enrichment failed, and separately
-	// those whose severity is simply not published yet.
-	var failedVulns, unscoredVulns []*scanner.Vulnerability
+	// Data-quality note, from the grade: the advisories that were graded on an estimated severity.
+	failed := map[string]bool{}
 	for _, ds := range ps.Dependencies {
 		for i := range ds.Vulns {
-			switch {
-			case ds.Vulns[i].EnrichmentFailed:
-				failedVulns = append(failedVulns, &ds.Vulns[i])
-			case ds.Vulns[i].SeveritySource == "unscored":
-				unscoredVulns = append(unscoredVulns, &ds.Vulns[i])
+			if ds.Vulns[i].EnrichmentFailed {
+				failed[ds.Vulns[i].ID] = true
 			}
 		}
 	}
-	if len(failedVulns) > 0 || len(unscoredVulns) > 0 {
+	if intro, bullets := dataQualityNote(opts.Grade, failed); len(bullets) > 0 {
 		subheading(c, "Data-quality Notes", bold)
-	}
-	if len(failedVulns) > 0 {
-		writeDataQualityList(c, regular, failedVulns, fmt.Sprintf(
-			"%d CVE(s) have unresolved severity (severity lookup failed across OSV, NVD, and GitHub Advisory). "+
-				"These are scored conservatively: MEDIUM by default, HIGH when the vulnerable function is confirmed reachable.\n",
-			len(failedVulns),
-		), true)
-	}
-	if len(unscoredVulns) > 0 {
-		writeDataQualityList(c, regular, unscoredVulns, fmt.Sprintf(
-			"%d advisory(ies) have no published severity. "+
-				"No public CVSS severity has been published yet for these advisories; they are scored conservatively as MEDIUM (HIGH when called).\n",
-			len(unscoredVulns),
-		), false)
+		writeDataQualityList(c, regular, intro, bullets)
 	}
 
 	// Scan notes are informational and say nothing is missing, so they are
@@ -328,153 +263,52 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 	}
 }
 
-// writeDataQualityList draws one data-quality paragraph: an intro sentence
-// followed by one bullet per vulnerability. withErrors appends the first
-// enrichment error to each bullet, which only failed lookups have.
-func writeDataQualityList(c *creator.Creator, regular *model.PdfFont, vulns []*scanner.Vulnerability, intro string, withErrors bool) {
+// dataQualityNote is the data-quality note from the grade data: one bullet per finding that was graded (counted) on an
+// estimated severity. An advisory with no published severity is scored as MEDIUM whatever its reachability, and the letter
+// is marked * only when that estimate could change it. A graph-only finding is not graded, so it is not listed. failed
+// holds the advisory IDs whose severity lookup failed, which is said on their bullet. No bullets: no note.
+func dataQualityNote(g *grade.Result, failed map[string]bool) (intro string, bullets []string) {
+	if g == nil {
+		return "", nil
+	}
+	for i := range g.Rows {
+		r := &g.Rows[i]
+		for j := range r.Findings {
+			f := &r.Findings[j]
+			if !f.Estimated || !f.Counted {
+				continue
+			}
+			line := fmt.Sprintf("  • %s (%s) — scored %s", f.ID, r.Module, f.Severity)
+			if failed[f.ID] {
+				line += " (severity lookup failed across OSV, NVD and GitHub Advisory)"
+			}
+			bullets = append(bullets, line)
+		}
+	}
+	if len(bullets) == 0 {
+		return "", nil
+	}
+	intro = fmt.Sprintf("%d graded advisory(ies) have no published severity. "+
+		"An advisory with no published severity is scored as MEDIUM, whatever its reachability. "+
+		"The letter is marked * only when that estimate could change it. "+
+		"Advisories that are not graded (graph only) are not listed.\n", len(bullets))
+	return intro, bullets
+}
+
+// writeDataQualityList draws the data-quality paragraph: an intro sentence followed by one bullet per advisory.
+func writeDataQualityList(c *creator.Creator, regular *model.PdfFont, intro string, bullets []string) {
 	notePara := c.NewStyledParagraph()
 	notePara.SetMargins(0, 0, 5, 0)
 	notePara.SetLineHeight(1.6)
 	noteIntro := notePara.Append(intro)
 	noteIntro.Style.Font = regular
 	noteIntro.Style.FontSize = 11
-	for _, v := range vulns {
-		line := fmt.Sprintf("  • %s — scored %s", v.ID, scorer.ScoredSeverity(v))
-		if withErrors && len(v.EnrichmentErrors) > 0 {
-			line += fmt.Sprintf(" (%s)", v.EnrichmentErrors[0])
-		}
+	for _, line := range bullets {
 		chunk := notePara.Append(line + "\n")
 		chunk.Style.Font = regular
 		chunk.Style.FontSize = 10
 	}
 	_ = c.Draw(notePara)
-}
-
-// filterRiskBucket returns dependencies whose RiskScore is in [minScore, maxScore).
-// A maxScore of 0 means "no upper bound".
-func filterRiskBucket(deps []*scorer.DependencyScore, minScore, maxScore int) []*scorer.DependencyScore {
-	var out []*scorer.DependencyScore
-	for _, ds := range deps {
-		if ds.RiskScore < minScore {
-			continue
-		}
-		if maxScore > 0 && ds.RiskScore >= maxScore {
-			continue
-		}
-		out = append(out, ds)
-	}
-	return out
-}
-
-func writeCriticalRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	critRisk := filterRiskBucket(ps.Dependencies, 76, 0)
-
-	if len(critRisk) == 0 {
-		return
-	}
-
-	c.NewPage()
-	heading(c, fmt.Sprintf("Critical Risk Dependencies (%d)", len(critRisk)), bold)
-
-	for _, ds := range critRisk {
-		writeDependencyBlock(c, ds, regular, bold, true)
-	}
-}
-
-func writeHighRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	highRisk := filterRiskBucket(ps.Dependencies, 51, 76)
-
-	if len(highRisk) == 0 {
-		return
-	}
-
-	c.NewPage()
-	heading(c, fmt.Sprintf("High Risk Dependencies (%d)", len(highRisk)), bold)
-
-	for _, ds := range highRisk {
-		writeDependencyBlock(c, ds, regular, bold, true)
-	}
-}
-
-func writeMediumRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	medRisk := filterRiskBucket(ps.Dependencies, 26, 51)
-
-	if len(medRisk) == 0 {
-		return
-	}
-
-	c.NewPage()
-	heading(c, fmt.Sprintf("Medium Risk Dependencies (%d)", len(medRisk)), bold)
-
-	// Condensed table format.
-	table := c.NewTable(4)
-	table.SetMargins(0, 0, 10, 10)
-	if err := table.SetColumnWidths(0.45, 0.2, 0.15, 0.2); err != nil {
-		fmt.Printf("Error setting column widths: %v\n", err)
-		return
-	}
-
-	addTableHeader(c, table, []string{"Module", "Version", "Score", "Risk Factors"}, bold)
-
-	for _, ds := range medRisk {
-		factors := strings.Join(ds.RiskFactors, ", ")
-		if factors == "" {
-			factors = "-"
-		}
-		addTableRow4(c, table, ds.Module, ds.Version, fmt.Sprintf("%d/100", ds.RiskScore), factors, regular)
-	}
-
-	_ = c.Draw(table)
-
-	writeVulnDetailBlocks(c, medRisk, regular, bold)
-}
-
-func writeLowRiskSection(c *creator.Creator, ps *scorer.ProjectScore, regular, bold *model.PdfFont) {
-	lowRisk := filterRiskBucket(ps.Dependencies, 0, 26)
-
-	if len(lowRisk) == 0 {
-		return
-	}
-
-	c.NewPage()
-	heading(c, fmt.Sprintf("Low Risk Dependencies (%d)", len(lowRisk)), bold)
-
-	// Summary table.
-	table := c.NewTable(3)
-	table.SetMargins(0, 0, 10, 10)
-	if err := table.SetColumnWidths(0.55, 0.25, 0.2); err != nil {
-		fmt.Printf("Error setting column widths: %v\n", err)
-		return
-	}
-
-	addTableHeader(c, table, []string{"Module", "Version", "Score"}, bold)
-
-	for _, ds := range lowRisk {
-		addTableRow3(c, table, ds.Module, ds.Version, fmt.Sprintf("%d/100", ds.RiskScore), regular)
-	}
-
-	_ = c.Draw(table)
-
-	writeVulnDetailBlocks(c, lowRisk, regular, bold)
-}
-
-// writeVulnDetailBlocks appends full dependency blocks for the deps in
-// bucket that carry vulnerabilities. No-op when none do.
-func writeVulnDetailBlocks(c *creator.Creator, bucket []*scorer.DependencyScore, regular, bold *model.PdfFont) {
-	var vulnDeps []*scorer.DependencyScore
-	for _, ds := range bucket {
-		if len(ds.Vulns) > 0 {
-			vulnDeps = append(vulnDeps, ds)
-		}
-	}
-	if len(vulnDeps) == 0 {
-		return
-	}
-
-	subheading(c, "Vulnerability Details", bold)
-	for _, ds := range vulnDeps {
-		writeDependencyBlock(c, ds, regular, bold, true)
-	}
 }
 
 func writeCISection(c *creator.Creator, ciReport *scanner.CIReport, regular, bold *model.PdfFont) {
@@ -603,38 +437,6 @@ func writeIntegritySection(c *creator.Creator, ir *scanner.IntegrityReport, regu
 	_ = c.Draw(table)
 }
 
-func writeTakeoverSection(c *creator.Creator, takeovers []*scanner.MaintainerInfo, regular, bold *model.PdfFont) {
-	c.NewPage()
-	heading(c, "Packages Eligible for Maintenance Takeover", bold)
-
-	intro := c.NewStyledParagraph()
-	intro.SetMargins(0, 0, 5, 15)
-	ch := intro.Append("The following dependencies are candidates for stewardship — they are widely used but lack active maintenance. Consider adopting or forking these packages.")
-	ch.Style.Font = regular
-	ch.Style.FontSize = 10
-	_ = c.Draw(intro)
-
-	table := c.NewTable(4)
-	table.SetMargins(0, 0, 5, 10)
-	if err := table.SetColumnWidths(0.35, 0.15, 0.2, 0.3); err != nil {
-		fmt.Printf("Error setting column widths: %v\n", err)
-		return
-	}
-	addTableHeader(c, table, []string{"Repository", "Stars", "Activity", "Reason"}, bold)
-
-	for _, t := range takeovers {
-		addTableRow4(c, table,
-			fmt.Sprintf("%s/%s", t.Owner, t.Repo),
-			fmt.Sprintf("%d", t.Stars),
-			t.ActivityPattern,
-			t.TakeoverReason,
-			regular,
-		)
-	}
-
-	_ = c.Draw(table)
-}
-
 // writeVulnAliasAppendix renders the Go-advisory-ID → CVE/GHSA mapping. The
 // report identifies advisories by their Go advisory ID, the only identifier
 // govulncheck guarantees; this appendix is where a reader translates one into
@@ -670,21 +472,32 @@ func writeVulnAliasAppendix(c *creator.Creator, ps *scorer.ProjectScore, stdlib 
 	_ = c.Draw(table)
 }
 
+// methodologySection is one titled paragraph of the methodology page.
+type methodologySection struct {
+	title string
+	body  string
+}
+
+// methodologySections is the text of the methodology page. It restates docs/grading.md (rules version 2); the numbers are
+// policy values that pick a band.
+func methodologySections() []methodologySection {
+	return []methodologySection{
+		{"Grading", "Every row (the module itself and each dependency) gets one score: the larger of its vulnerability score and its upkeep score. The letter comes from the worst row, and the report names that row and says why. The bands are A (0 to 10), B (11 to 25), C (26 to 50), D (51 to 75) and F (76 to 100). A means nothing crossed a scoring threshold: it does not say the project is secure or supported. D and F mean a confirmed problem: a known vulnerability in code that is reached, or a checksum that does not match. The numbers are policy values that pick a band. They are shown for traceability, and they are not a measurement, a probability of compromise or a risk score."},
+		{"Vulnerabilities", "Dependencies are checked against the Go Vulnerability Database (vuln.go.dev) with govulncheck, which says how far each advisory reaches. Called: a path reaches the vulnerable function. Imported: the package is imported but no path reaches the function; this never scores above 50, so it cannot reach D. Graph only: the package with the bug is never imported, so its code is not compiled in; it is shown and not graded. Reachability that could not be determined is scored as called. Each further called high or critical advisory on a row adds 5, and a called advisory on CISA's Known Exploited Vulnerabilities list scores at least 76 (F). A row that is confirmed test-only has its vulnerability score halved, at most 50; a module confirmed not to be compiled in is graph only."},
+		{"Estimates (*)", "An advisory with no published severity is scored as MEDIUM, whatever its reachability. The letter is marked with * (for example C*) when that estimate could change it: the grade is computed again with every such severity as low and as critical, and a different letter in either run marks the result, whichever row the unknown severity is on. When rows tie, a row that does not rest on an estimate decides."},
+		{"Upkeep", "An archived module, a deprecated module or a retracted version scores 35 when it is the module itself, 20 when it is a dependency and 10 when it is test-only or not compiled in. A quiet project with nothing open scores 0: being quiet is not a finding. Upkeep alone can reach C, never D or F."},
+		{"Whole-tree rules", "These only raise the letter. Three or more called high or critical findings across the tree, any called critical finding, a called known-exploited finding or a checksum mismatch (go mod verify) give F. Five or more called or imported high or critical findings give at least D. Test-only dependencies are left out of the counts; a checksum mismatch applies in full everywhere."},
+		{"Pending", "A letter needs its checks. When a check that could change the letter did not run, the grade is PENDING: there is no letter, and the report says which check failed and what is known. The checks are: the vulnerability scan (it failed or did not run), scan_incomplete (it did not finish), the module's own status and advisories (module_status, module_advisories), a dependency's maintenance data (dependency_maintenance, when it could still beat the worst row), checksum (go mod verify could not complete, so a checksum mismatch cannot be ruled out), known_exploited (CISA's Known Exploited Vulnerabilities catalog could not be read, or its cached copy is older than 30 days, for a reached finding with a CVE) and severity_lookup (the severity of a reached finding could not be looked up and a different severity would change the letter). A dependency's archived flag that could not be read does not make the grade Pending by default: the letter is given with a note, because an archived dependency adds at most 20 to its row; it is Pending only with --strict-archived. Treat a missing letter as no result, never as a pass."},
+		{"Response window", "A fix released recently still counts: current exposure is shown at once. Each finding is labelled with the date of the fix and the end of a 14-day response window. The window never changes the letter. A known-exploited finding has no window."},
+		{"CI/CD Assessment", "GitHub Actions workflows, Dockerfiles, and build scripts are analyzed for security misconfigurations including unpinned actions, excessive permissions, and dangerous command patterns. This audit has its own 0 to 100 score and is not part of the grade."},
+	}
+}
+
 func writeMethodologyPage(c *creator.Creator, regular, bold *model.PdfFont) {
 	c.NewPage()
 	heading(c, "Methodology", bold)
 
-	content := []struct {
-		title string
-		body  string
-	}{
-		{"Risk Scoring", "Each dependency receives a score from 0-100 based on weighted factors: known vulnerabilities (40%), maintenance freshness (25%), dependency depth (15%), maintainer risk (10%), and module maturity (10%)."},
-		{"Vulnerability Scanning", "Dependencies are checked against the Go Vulnerability Database (vuln.go.dev) for known CVEs and security advisories."},
-		{"Maintenance Assessment", "Module release history and the latest commit on the repository's default branch are obtained from the Go Module Proxy (proxy.golang.org); the newer of the two sets the maintenance age. Archived and deprecated modules (including a go.mod Deprecated notice) receive the highest maintenance risk."},
-		{"Maintainer Analysis", "For GitHub-hosted modules, contributor data is analyzed to determine bus factor and activity patterns."},
-		{"CI/CD Assessment", "GitHub Actions workflows, Dockerfiles, and build scripts are analyzed for security misconfigurations including unpinned actions, excessive permissions, and dangerous command patterns."},
-		{"Risk Levels", "LOW (0-25): Minimal risk, well-maintained. MEDIUM (26-50): Some concerns, monitor. HIGH (51-75): Significant risk, action recommended. CRITICAL (76-100): Immediate action required."},
-	}
+	content := methodologySections()
 
 	for _, section := range content {
 		subheading(c, section.title, bold)
@@ -840,24 +653,72 @@ func addTableRow4(cr *creator.Creator, table *creator.Table, c1, c2, c3, c4 stri
 	}
 }
 
-// addVulnBullets appends the bullet lines describing one vulnerability: its
-// ID, severity, reachability tag and threat-intel badges, the fix, the call
-// path and the vulnerable symbols called. withSummary adds the advisory
-// summary after the first line; dependency blocks omit it.
-func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, withSummary bool, font *model.PdfFont) {
-	// Append an inline reachability tag when the tier is not "called" (the
-	// most-severe tier).  Empty Reachability is treated as called for
-	// backward compatibility with non-govulncheck CVE sources.
-	reachTag := ""
+// gradeFindingByID is the row's finding for an advisory ID, or nil when the row or the finding is not there.
+func gradeFindingByID(r *grade.RowResult, id string) *grade.FindingResult {
+	if r == nil {
+		return nil
+	}
+	for i := range r.Findings {
+		if r.Findings[i].ID == id {
+			return &r.Findings[i]
+		}
+	}
+	return nil
+}
+
+// vulnTierText names a tier in Grading v2 words.
+func vulnTierText(tier string) string {
+	switch tier {
+	case grade.TierCalled:
+		return "called"
+	case grade.TierImported:
+		return "imported"
+	case grade.TierGraphOnly:
+		return "graph only: shown, not graded"
+	}
+	return tier
+}
+
+// vulnLine is the first line of a vulnerability: its ID and, from the grade's finding when there is one, the tier, the
+// VEX status and the severity as scored. Without a finding (grading did not cover it, e.g. the standard library row when the caller did not grade it) it says
+// what the scanner reported, in the same words, and does not claim it was graded.
+func vulnLine(v *scanner.Vulnerability, f *grade.FindingResult) string {
+	if f != nil {
+		tier := vulnTierText(f.Tier)
+		if f.TierAssumed {
+			tier += " (assumed)"
+		}
+		return fmt.Sprintf("Vulnerability: %s (%s; VEX %s; severity %s)", v.ID, tier, gradeVEXText(f.VEX), gradeFindingSeverity(f))
+	}
+	var tier string
 	switch v.Reachability {
-	case "imported", "required":
-		reachTag = fmt.Sprintf(" (%s)", v.Reachability)
+	case "called":
+		tier = "called"
+	case "imported":
+		tier = "imported"
+	case "required":
+		tier = "graph only: shown, not graded"
+	default:
+		tier = "reachability not determined"
 	}
-	ti := epssBadge(v)
+	sev := v.Severity
+	if sev == "" || strings.EqualFold(sev, "UNKNOWN") {
+		sev = "not published"
+	}
+	return fmt.Sprintf("Vulnerability: %s (%s; severity %s)", v.ID, tier, sev)
+}
+
+// addVulnBullets appends the bullet lines describing one vulnerability: its
+// ID, tier, VEX status, severity as scored and threat-intel badges, the fix,
+// the call path and the vulnerable symbols called. f is the grade's finding
+// for it (nil when there is none). withSummary adds the advisory summary after
+// the first line; dependency blocks omit it.
+func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *grade.FindingResult, withSummary bool, font *model.PdfFont) {
+	ti := ""
 	if v.InKEV {
-		ti += " [KEV — exploited in the wild]"
+		ti = " [KEV — exploited in the wild]"
 	}
-	addBullet(p, fmt.Sprintf("Vulnerability: %s (%s)%s%s", v.ID, v.Severity, reachTag, ti), font)
+	addBullet(p, vulnLine(v, f)+ti, font)
 	if withSummary && v.Summary != "" {
 		addBullet(p, "  Summary: "+v.Summary, font)
 	}
@@ -894,13 +755,13 @@ func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, r
 		details := c.NewStyledParagraph()
 		details.SetMargins(20, 0, 0, 6)
 		details.SetLineHeight(1.5)
-		addVulnBullets(details, &vulns[i], true, regular)
+		addVulnBullets(details, &vulns[i], nil, true, regular)
 		_ = c.Draw(details)
 	}
 }
 
-func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regular, bold *model.PdfFont, detailed bool) {
-	color := pdfRiskColor(ds.RiskLevel)
+func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, row *grade.RowResult, letter string, regular, bold *model.PdfFont, detailed bool) {
+	color := pdfLetterColor(letter)
 
 	// Build the classification label for the module header.
 	classLabel := "transitive"
@@ -921,7 +782,7 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	// Module header.
 	header := c.NewStyledParagraph()
 	header.SetMargins(0, 0, 5, 3)
-	ch := header.Append(fmt.Sprintf("%s %s — Risk: %d/100 (%s)", ds.Module, ds.Version, ds.RiskScore, classLabel))
+	ch := header.Append(fmt.Sprintf("%s %s — Grade: %s (%s)", ds.Module, ds.Version, letter, classLabel))
 	ch.Style.Font = bold
 	ch.Style.FontSize = 11
 	ch.Style.Color = color
@@ -935,18 +796,17 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 	details.SetMargins(20, 0, 0, 10)
 	details.SetLineHeight(1.5)
 
-	// Vulnerabilities, sorted KEV-first then EPSS descending — highest
-	// threat-intel risk at the top of the listing.
+	// Vulnerabilities, known-exploited (KEV) first.
 	vulns := make([]scanner.Vulnerability, len(ds.Vulns))
 	copy(vulns, ds.Vulns)
 	sort.SliceStable(vulns, func(i, j int) bool {
 		if vulns[i].InKEV != vulns[j].InKEV {
 			return vulns[i].InKEV
 		}
-		return epssOrZero(&vulns[i]) > epssOrZero(&vulns[j])
+		return false
 	})
 	for i := range vulns {
-		addVulnBullets(details, &vulns[i], false, regular)
+		addVulnBullets(details, &vulns[i], gradeFindingByID(row, vulns[i].ID), false, regular)
 	}
 
 	// Maintenance.
@@ -965,51 +825,12 @@ func writeDependencyBlock(c *creator.Creator, ds *scorer.DependencyScore, regula
 		}
 	}
 
-	// Risk factors.
-	if len(ds.RiskFactors) > 0 {
-		addBullet(details, fmt.Sprintf("Risk factors: %s", strings.Join(ds.RiskFactors, ", ")), regular)
-	}
-
 	// Dependency path.
 	if len(ds.DependencyPath) > 0 {
 		addBullet(details, fmt.Sprintf("Used by: %s", strings.Join(ds.DependencyPath, " → ")), regular)
 	}
 
 	_ = c.Draw(details)
-}
-
-// epssOrZero returns the vuln's EPSS score, treating absent as 0 for sorting.
-func epssOrZero(v *scanner.Vulnerability) float64 {
-	if v.EPSSScore == nil {
-		return 0
-	}
-	return *v.EPSSScore
-}
-
-// epssBadge renders the " [EPSS NN%]" badge from the vuln's EPSS score — the
-// estimated exploitation probability, the same signal the scorer acts on (not
-// the percentile). Empty when no score is available. Scores that would round
-// to 0% render as "<1%" so a real, tiny probability is not shown as zero.
-func epssBadge(v *scanner.Vulnerability) string {
-	if v.EPSSScore == nil {
-		return ""
-	}
-	pct := *v.EPSSScore * 100
-	if pct > 0 && pct < 1 {
-		return " [EPSS <1%]"
-	}
-	return fmt.Sprintf(" [EPSS %.0f%%]", pct)
-}
-
-// pdfHeadlineText renders the headline for both the cover indicator and the
-// summary table. An unscored headline leads with UNKNOWN and labels the number
-// as indicative — a PDF gets forwarded to people who never ran the scan, so
-// "26/100 (UNKNOWN)" would be read as a scored 26.
-func pdfHeadlineText(ps *scorer.ProjectScore) string {
-	if ps.OverallLevel == scorer.RiskUnknown {
-		return fmt.Sprintf("UNKNOWN — not scored (indicative: %d/100)", ps.OverallScore)
-	}
-	return fmt.Sprintf("%d/100 (%s)", ps.OverallScore, ps.OverallLevel)
 }
 
 func pdfRiskColor(level scorer.RiskLevel) creator.Color {
@@ -1027,11 +848,4 @@ func pdfRiskColor(level scorer.RiskLevel) creator.Color {
 	default:
 		return creator.ColorRGBFromHex("#009900")
 	}
-}
-
-func pctStr(count, total int) string {
-	if total == 0 {
-		return "0%"
-	}
-	return fmt.Sprintf("%.1f%%", float64(count)/float64(total)*100)
 }

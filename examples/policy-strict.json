@@ -1,6 +1,5 @@
 {
-  "max_risk_score": 70,
-  "max_overall_score": 50,
+  "max_grade": "B",
   "no_critical_vulns": true,
   "no_single_maintainer": true,
   "no_unmaintained_months": 24,
