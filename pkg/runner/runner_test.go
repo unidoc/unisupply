@@ -330,3 +330,39 @@ func TestResolveAllFixDates_OneSharedDeadline(t *testing.T) {
 		}
 	}
 }
+
+// F37: a scan refused by the toolchain check comes back as an error, not a warning. The published warnings carry its text
+// (the JSON report has no stderr), once, with and without dependencies.
+func TestRun_NoDependencies_ToolchainErrorIsAPublishedWarning(t *testing.T) {
+	dir := writeEmptyModule(t)
+	const msg = "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27; rebuild unisupply with go1.27 or newer"
+	stubScan(t, nil, nil, false, errors.New(msg))
+	res, err := Run(context.Background(), Options{Path: dir, Now: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, w := range res.ProjectScore.Warnings {
+		if strings.Contains(w, msg) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the refusal must be in the report warnings once, found %d: %v", n, res.ProjectScore.Warnings)
+	}
+}
+
+func TestAppendScanFailure(t *testing.T) {
+	if got := appendScanFailure(nil, nil, nil); len(got) != 0 {
+		t.Errorf("no failure, no warning: %v", got)
+	}
+	got := appendScanFailure([]string{"a"}, nil, errors.New("boom\nsecond line"))
+	if len(got) != 2 || got[1] != "Vulnerability scan failed: boom" {
+		t.Errorf("%v", got)
+	}
+	// the failure derived from a warning is not said twice
+	got = appendScanFailure(nil, []string{"govulncheck: x\ndetail"}, errors.New("govulncheck: x"))
+	if len(got) != 1 {
+		t.Errorf("%v", got)
+	}
+}

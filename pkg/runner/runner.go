@@ -267,7 +267,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		})
 		if emptyVulnErr != nil {
 			// not graded (no --grade-stdlib): the failed scan is said, but the letter is the module's own row
-			projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
+			projectScore.Warnings = appendScanFailure(projectScore.Warnings, vulnWarnings, emptyVulnErr)
 		}
 		// a failed scan is a missing check only when its result takes part in the grade
 		scanMissing := emptyVulnErr
@@ -422,7 +422,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		projectScore.Warnings = append(projectScore.Warnings, tokenStatus.warning)
 	}
 	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
-	projectScore.Warnings = append(projectScore.Warnings, vulnWarnings...)
+	projectScore.Warnings = appendScanFailure(projectScore.Warnings, vulnWarnings, vulnScanErr)
 	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
 	// Resolver notes are informational and kept apart from the warnings, so a
 	// report does not present them as a limitation of the results.
@@ -516,6 +516,22 @@ func vulnScanFailure(err error, scanned bool, warnings []string) error {
 		return errors.New(line)
 	}
 	return errors.New("vulnerability scan did not run")
+}
+
+// appendScanFailure adds the scanner's warnings to the report warnings, and the text of the failure itself when no
+// warning carries it: a refused toolchain check is an error, not a warning, and would otherwise reach stderr only.
+func appendScanFailure(dst, warnings []string, failure error) []string {
+	dst = append(dst, warnings...)
+	if failure == nil {
+		return dst
+	}
+	line := errString(failure)
+	for _, w := range warnings {
+		if first, _, _ := strings.Cut(w, "\n"); first == line {
+			return dst
+		}
+	}
+	return append(dst, "Vulnerability scan failed: "+line)
 }
 
 // takeStdlibVulns removes the Go standard library's vulnerabilities from vulns

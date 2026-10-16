@@ -61,7 +61,7 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   build info, never unisupply's own.
 - **Toolchain check**: govulncheck runs in-process with the Go unisupply was built with. `scanner.CheckToolchain(scanGo)`
   (exported; gorisk calls it at startup) returns "this unisupply was built with go1.26.9 and cannot scan code that needs
-  go1.27.2; rebuild unisupply with go1.27.2 or newer" when `scanGo` is newer (compared with `go/version`, so rc and beta forms
+  go1.27; rebuild unisupply with go1.27 or newer" when `scanGo` is a newer Go minor (language) version (patch and rc releases of the same minor pass; compared with `go/version`, so rc and beta forms
   order correctly). `ScanVulnsWithOptions` runs it on the project's resolved Go before starting, and rewrites the loader's "file
   requires newer Go version" error to the same sentence; it becomes the `vulnerability_scan` Pending reason. Tests inject
   `builtWithGo`.

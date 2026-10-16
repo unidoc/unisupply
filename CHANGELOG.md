@@ -421,9 +421,15 @@ breaks consumers that read the old fields.**
   still unknown.
 - **A scan that needs a newer Go than unisupply was built with now says so.** govulncheck runs in-process, and the loader's
   "file requires newer Go version go1.27 (application built with go1.26)" error was all a user saw. The scan now stops with
-  "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27.2; rebuild unisupply with go1.27.2 or
+  "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27; rebuild unisupply with go1.27 or
   newer", which is the `vulnerability_scan` Pending reason. New exported `scanner.CheckToolchain(scanGo)` lets gorisk check
-  at startup.
+  at startup. Only a newer Go minor (language) version is refused: a newer patch release or release candidate of the same
+  minor version (go1.27.1 to go1.27.2) loads fine and is scanned.
+  A scan that failed (including this refusal) is also named in the report `warnings`, for a module with no dependencies
+  too, not only on stderr.
+- **The module's own advisories count toward the known-exploited check.** With no CISA catalog (not even a copy under 30
+  days old), a called advisory on the module itself with a CVE is now Pending `known_exploited`, like a dependency's, instead
+  of a D.
 
 - **`--require-github-token` now fails (exit 3) when GitHub rejects the
   token, and a rejected token is reported as such.** The flag used to check

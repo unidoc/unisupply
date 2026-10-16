@@ -9,7 +9,7 @@ import (
 )
 
 func TestCheckToolchain(t *testing.T) {
-	const sentence = "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27.2; rebuild unisupply with go1.27.2 or newer"
+	const sentence = "this unisupply was built with go1.26.9 and cannot scan code that needs go1.27; rebuild unisupply with go1.27 or newer"
 	if err := checkToolchain("go1.26.9", "go1.27.2"); err == nil || err.Error() != sentence {
 		t.Errorf("got %v", err)
 	}
@@ -22,13 +22,17 @@ func TestCheckToolchain(t *testing.T) {
 		{"go1.26.9", "go1.27", true},      // the language version of the next release
 		{"go1.26.9", "go1.27rc1", true},   // a release candidate of the next release
 		{"go1.26.9", "go1.27beta1", true}, // so is a beta
-		{"go1.26.9", "go1.26.10", true},
+		{"go1.26.9", "go1.26.10", false},  // a newer patch of the same minor version loads fine
+		{"go1.27.1", "go1.27.2", false},
+		{"go1.27", "go1.26.9", false},
+		{"go1.26.9", "go1.27.1", true},
+		{"go1.26.9", "go1.28.0", true},
 		{"go1.26.9", "go1.26.9", false},
 		{"go1.26.9", "go1.26.8", false},
 		{"go1.26.9", "go1.26", false},
 		{"go1.26.9", "go1.25.1", false},
 		{"go1.27rc1", "go1.27rc1", false},
-		{"go1.27rc1", "go1.27rc2", true},
+		{"go1.27rc1", "go1.27rc2", false},
 		{"go1.27rc1", "go1.26.9", false},
 		{"go1.26.9 X:nocoverageredesign", "go1.26.9", false},
 		{"devel go1.28-abc Mon", "go1.27", false}, // not a release: cannot tell, scan goes on
@@ -79,7 +83,7 @@ func TestScanVulns_ToolchainTooOld(t *testing.T) {
 	builtWithGo = func() string { return "go1.26.9" }
 
 	vulns, _, scanned, err := ScanVulnsWithOptions(context.Background(), t.TempDir(), VulnScanOptions{})
-	want := "this unisupply was built with go1.26.9 and cannot scan code that needs go1.99.1; rebuild unisupply with go1.99.1 or newer"
+	want := "this unisupply was built with go1.26.9 and cannot scan code that needs go1.99; rebuild unisupply with go1.99 or newer"
 	if err == nil || err.Error() != want || scanned || vulns != nil {
 		t.Errorf("err = %v scanned = %v", err, scanned)
 	}

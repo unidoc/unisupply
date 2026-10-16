@@ -492,3 +492,77 @@ func TestGradeAll_ToolchainMismatchIsThePendingReason(t *testing.T) {
 		t.Fatalf("%+v", res.Pending)
 	}
 }
+
+// The module's own advisories come in through assessSelf, not r.Vulns: with no catalog check they could be a known-exploited
+// F, so they count into Checks.KEVUnchecked like a dependency's finding.
+func TestAssessSelf_CountsOwnAdvisoriesUnderKEVUnchecked(t *testing.T) {
+	offline.Enable() // the status lookups fail at once; only the advisory lookup is stubbed
+	t.Cleanup(offline.Disable)
+	stale := time.Now().Add(-10 * 24 * time.Hour)
+	own := []scanner.Vulnerability{
+		{ID: "GHSA-1", Aliases: []string{"CVE-2026-1"}},                                                 // unchecked: counts
+		{ID: "GHSA-2", Aliases: []string{"CVE-2026-2"}, KEVChecked: true},                               // checked
+		{ID: "GHSA-3", Aliases: []string{"CVE-2026-3"}, KEVChecked: true, KEVCatalogStaleSince: &stale}, // stale copy within the age cap: checked
+		{ID: "GHSA-4", Aliases: []string{"GHSA-zzzz"}},                                                  // no CVE: cannot be listed
+		{ID: "GHSA-5", Aliases: []string{"CVE-2026-5"}, Reachability: "required"},                       // not reached
+	}
+	prev := scanModuleAdvisories
+	t.Cleanup(func() { scanModuleAdvisories = prev })
+	var list []scanner.Vulnerability
+	scanModuleAdvisories = func(context.Context, scanner.SelfAdvisoryOptions, string, string) ([]scanner.Vulnerability, error) {
+		return list, nil
+	}
+	run := func(opts Options) grade.Checks {
+		var checks grade.Checks
+		assessSelf(t.Context(), &gradeRun{Opts: opts, GoMod: &parser.GoMod{ModulePath: "example.com/app"}, ScanStart: time.Now()}, &checks)
+		return checks
+	}
+	list = own
+	if got := run(Options{SelfVersion: "v1.0.0"}).KEVUnchecked; got != 1 {
+		t.Errorf("KEVUnchecked = %d, want 1 (only the finding whose catalog check did not run)", got)
+	}
+	list = own[1:]
+	if got := run(Options{SelfVersion: "v1.0.0"}).KEVUnchecked; got != 0 {
+		t.Errorf("negative control: every own finding checked or unlistable, KEVUnchecked = %d, want 0", got)
+	}
+	list = own[:1]
+	if got := run(Options{}).KEVUnchecked; got != 0 {
+		t.Errorf("no version, no own advisories: %d", got)
+	}
+}
+
+// With a CVE advisory on the module itself and no catalog, the grade is Pending known_exploited, not D; with the catalog
+// listing it, F.
+func TestSelfAdvisory_KEVGrade(t *testing.T) {
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	prev := scanModuleAdvisories
+	t.Cleanup(func() { scanModuleAdvisories = prev })
+	run := func(v scanner.Vulnerability) *grade.Result {
+		scanModuleAdvisories = func(context.Context, scanner.SelfAdvisoryOptions, string, string) ([]scanner.Vulnerability, error) {
+			return []scanner.Vulnerability{v}, nil
+		}
+		var checks grade.Checks
+		row := assessSelf(t.Context(), &gradeRun{Opts: Options{SelfVersion: "v1.0.0"}, GoMod: &parser.GoMod{ModulePath: "example.com/app"}, ScanStart: time.Now()}, &checks)
+		// the own status lookups cannot run offline; this test is about the advisory
+		checks.SelfStatusFailed, checks.SelfStatusReason = false, ""
+		row.Upkeep = grade.Upkeep{}
+		gi := buildGradeInput(&gradeInputs{Self: row, Graph: &resolver.Graph{}, Now: time.Now(), Checks: checks})
+		res := grade.Grade(&gi)
+		return &res
+	}
+	base := scanner.Vulnerability{ID: "GHSA-1", Aliases: []string{"CVE-2026-1"}, Severity: "HIGH"}
+	if res := run(base); res.Pending == nil || res.Pending.Check != "known_exploited" {
+		t.Errorf("no catalog: want Pending known_exploited, got %+v %s", res.Pending, res.Letter)
+	}
+	checked := base
+	checked.KEVChecked = true
+	if res := run(checked); res.Pending != nil || res.Letter == grade.LetterF {
+		t.Errorf("catalog checked, not listed: want a letter below F, got %+v %s", res.Pending, res.Letter)
+	}
+	listed := checked
+	listed.InKEV = true
+	if res := run(listed); res.Letter != grade.LetterF {
+		t.Errorf("catalog lists it: want F, got %+v %s", res.Pending, res.Letter)
+	}
+}

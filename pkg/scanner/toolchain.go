@@ -14,7 +14,8 @@ var builtWithGo = runtime.Version
 // CheckToolchain reports whether this binary can scan code that needs the Go release scanGo ("go1.27.2", "1.27.2",
 // "go1.27", "go1.27rc1"). govulncheck runs inside unisupply, compiled with unisupply's own Go, and the Go loader refuses
 // code that needs a newer one with a confusing "file requires newer Go version" error. CheckToolchain turns that into a
-// clear one: nil when scanGo is not newer than the Go that built unisupply, or when either version cannot be read (the
+// clear one: nil when scanGo is not a newer Go minor (language) version than the Go that built unisupply (a newer patch
+// release or release candidate of the same minor version is fine, the loader accepts it), or when either version cannot be read (the
 // scan is then left to try). A caller such as gorisk can call it at startup with the Go release the scan will use.
 func CheckToolchain(scanGo string) error {
 	return checkToolchain(builtWithGo(), scanGo)
@@ -22,10 +23,11 @@ func CheckToolchain(scanGo string) error {
 
 func checkToolchain(built, scanGo string) error {
 	b, s := normalizeGoRelease(built), normalizeGoRelease(scanGo)
-	if !version.IsValid(b) || !version.IsValid(s) || version.Compare(s, b) <= 0 {
+	if !version.IsValid(b) || !version.IsValid(s) || version.Compare(version.Lang(s), version.Lang(b)) <= 0 {
 		return nil
 	}
-	return toolchainMismatch(b, s)
+	// The loader refuses only a newer language version (go1.N), never a newer patch or rc of the same one.
+	return toolchainMismatch(b, version.Lang(s))
 }
 
 func toolchainMismatch(built, need string) error {
@@ -55,5 +57,9 @@ func toolchainErrorFrom(msg string) error {
 	if m == nil {
 		return nil
 	}
-	return toolchainMismatch(normalizeGoRelease(builtWithGo()), m[1])
+	need := m[1]
+	if l := version.Lang(need); l != "" {
+		need = l
+	}
+	return toolchainMismatch(normalizeGoRelease(builtWithGo()), need)
 }

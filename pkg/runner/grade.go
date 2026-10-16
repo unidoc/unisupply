@@ -363,7 +363,7 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	if !r.ScanStart.IsZero() {
 		now = func() time.Time { return r.ScanStart }
 	}
-	own, err := scanner.ScanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{
+	own, err := scanModuleAdvisories(ctx, scanner.SelfAdvisoryOptions{
 		GitHubToken: r.Token, NVDAPIKey: r.Opts.NVDAPIKey, Timeout: r.Timeout, Now: now,
 		OnWarning: func(w string) { warn = append(warn, w) },
 	}, r.GoMod.ModulePath, r.Opts.SelfVersion)
@@ -374,8 +374,14 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	}
 	scanner.ResolveFixDates(ctx, scanner.FixDateOptions{Timeout: r.Timeout, Now: now}, r.GoMod.ModulePath, own)
 	row.Findings = findingsOf(r.GoMod.ModulePath, own)
+	// The module's own advisories are graded as called, so one with a CVE whose catalog check did not run could be a
+	// known-exploited F, exactly like a dependency's (kevUnchecked cannot see them: they are not in r.Vulns).
+	checks.KEVUnchecked += kevUnchecked(map[string][]scanner.Vulnerability{r.GoMod.ModulePath: own}, nil, nil)
 	return row
 }
+
+// scanModuleAdvisories looks up the module's own advisories; tests replace it.
+var scanModuleAdvisories = scanner.ScanModuleAdvisories
 
 // gradedStdlib is the standard library advisories that take part in the grade.
 func gradedStdlib(opts *Options, vulns []scanner.Vulnerability) []scanner.Vulnerability {
