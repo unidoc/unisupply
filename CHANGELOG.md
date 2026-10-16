@@ -3,6 +3,10 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+<!-- Add new entries here as they land on `development`. -->
+
 ## [0.7.0] - 2026-10-16
 
 Grading release. The published result is now one letter, A to F, with the row
