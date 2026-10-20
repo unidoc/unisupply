@@ -37,8 +37,16 @@ type Options struct {
 	// upward from here to locate go.mod.
 	Path string
 
-	// Timeout bounds each scanner's outbound HTTP calls (Go Module Proxy,
-	// GitHub API, Trust Index). Zero means the scanners' own default.
+	// Timeout bounds each outbound HTTP request of the scanners (Go Module Proxy,
+	// GitHub API, Trust Index), one request at a time. It is never the scan's
+	// limit: pass that as the deadline of the context given to Run. A scan limit
+	// passed here lets one stalled request use the whole scan time, and a request
+	// still ends at the context's deadline when that comes first. Zero means the
+	// scanners' own default.
+	//
+	// Two things are bounded only by the context: govulncheck's own fetch of the
+	// vulnerability database (it uses http.DefaultClient) and the module
+	// downloads of the go command.
 	Timeout time.Duration
 
 	DirectOnly bool
