@@ -7,6 +7,51 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### New Features
+
+#### Typed scan failures with stable reason codes
+
+- **A failed scan now comes back as a `*scanner.ScanError`** (use `errors.As`) with a `Kind` that says whether a retry
+  can help (`FailTransient`: network, timeout, rate limit; `FailPermanent`: the project cannot be scanned as it is;
+  `FailTooLarge`: a limit was exceeded), a stable `Reason` code, and `Err`, the tail of govulncheck's or the go
+  command's own output (the last 40 lines or 4 KiB). `Error()` is `reason: cause`, `Summary()` is the same on one line,
+  and `Kind.String()` gives `transient`, `permanent` or `too_large`.
+- **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`,
+  `no_packages`, `cgo_only`, `missing_gosum`, `module_fetch`, `rate_limited`, `vulndb_unreachable`, `scan_deadline`
+  (never set by unisupply: a caller whose scan ran out of time uses it), `internal_panic` and `unknown`. An unknown
+  failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module imports `"C"`;
+  without that, "no packages matched" is `no_packages`.
+- **Where it appears:** `Result.VulnScanErr` (still typed `error`) when the vulnerability scan fails, the error of
+  `scanner.ScanVulnsWithOptions`, and the early failures of `runner.Run` (no go.mod, an unreadable go.mod, dependency
+  resolution). Report warnings are unchanged, and so is `scanner.CheckToolchain`. The CLI prints only the cause, as
+  before.
+
+### Improvements
+
+#### The published reason for a failed scan names the cause
+
+- `grade.pending.reason`, the text and PDF reports and the progress line used to end at `govulncheck: loading packages:`
+  when the packages could not be loaded, because only the first line of the error was kept and the cause is on the
+  following lines. They now give the reason code and the first real error, for example
+  `multiple_mains: b.go:3:6: main redeclared in this block`.
+
+#### `Options.Timeout` is a per-request limit
+
+- `runner.Options.Timeout` bounds each outbound HTTP request of the scanners, never the scan. Give the scan its limit
+  as the deadline of the context passed to `Run`; passing it as `Timeout` lets one stalled request use all of it. The
+  documentation now says so, and tests pin it: the timeout fires without a context deadline, and a shorter context
+  deadline wins. govulncheck's fetch of the vulnerability database and the go command's module downloads are bounded
+  only by the context.
+
+### Bug Fixes
+
+- **A panic in one of the scanners no longer ends the calling process.** A panic in a worker goroutine of the dependency
+  resolver or of the maintenance, maintainer, activity, resilience, fix-date and response-history scans was not
+  recoverable by the caller, and ended a service that embeds `runner.Run`. The worker's panic is now carried back to
+  `Run`, which returns a nil `Result` and a `*scanner.ScanError` with reason `internal_panic` (permanent) whose `Err`
+  is the panic value and the stack of the goroutine it happened in. Panics inside govulncheck's own goroutines, fatal
+  runtime errors such as concurrent map writes, and the process being killed are not covered.
+
 ## [0.7.0] - 2026-10-16
 
 Grading release. The published result is now one letter, A to F, with the row
