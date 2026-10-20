@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -349,6 +350,111 @@ func TestRun_NoDependencies_ToolchainErrorIsAPublishedWarning(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("the refusal must be in the report warnings once, found %d: %v", n, res.ProjectScore.Warnings)
+	}
+}
+
+// packageErrorScan is a scan error shaped like a package-loading failure: the text starts with a blank line and a header,
+// and the cause is on a line of its own.
+func packageErrorScan() (*scanner.ScanError, []string) {
+	text := "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"/p/b.go:3:6: main redeclared in this block\n/p/a.go:3:6: \tother declaration of main\n\nFor details, see https://pkg.go.dev/cmd/go.\n"
+	return &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonMultipleMains, Err: errors.New(text)}, []string{text}
+}
+
+// A failed scan reaches the caller as the scanner's own error, with the whole cause, and the published reason is one line.
+func TestRun_ScanErrorReachesTheCaller(t *testing.T) {
+	dir := writeEmptyModule(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	stubGitHub(t, http.StatusOK)
+	scanErr, warnings := packageErrorScan()
+	stubScan(t, nil, warnings, false, scanErr)
+
+	res, err := Run(context.Background(), Options{Path: dir, Now: now, GradeStdlib: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *scanner.ScanError
+	if !errors.As(res.VulnScanErr, &got) || got != scanErr {
+		t.Fatalf("VulnScanErr = %v, want the scanner's *ScanError", res.VulnScanErr)
+	}
+	if got.Reason != scanner.ReasonMultipleMains || got.Kind != scanner.FailPermanent || !strings.Contains(got.Err.Error(), "b.go:3:6: main redeclared") {
+		t.Errorf("the cause was lost: %+v", got)
+	}
+	if res.Grade.Pending == nil || res.Grade.Pending.Check != "vulnerability_scan" {
+		t.Fatalf("Grade = %+v, want Pending (vulnerability_scan)", res.Grade)
+	}
+	if want := "the vulnerability scan did not run: multiple_mains: /p/b.go:3:6: main redeclared in this block"; res.Grade.Pending.Reason != want {
+		t.Errorf("pending reason = %q, want %q", res.Grade.Pending.Reason, want)
+	}
+	// the scanner's warning is in the report whole, and the failure is not said a second time
+	var said, failed int
+	for _, w := range res.ProjectScore.Warnings {
+		if w == warnings[0] {
+			said++
+		}
+		if strings.HasPrefix(w, "Vulnerability scan failed") {
+			failed++
+		}
+	}
+	if said != 1 || failed != 0 {
+		t.Errorf("report warnings = %q, want the scanner's warning once and no second line for the failure", res.ProjectScore.Warnings)
+	}
+}
+
+// The same on the path with dependencies, where the scan runs after the dependency graph is resolved.
+func TestRun_ScanErrorWithDependencies(t *testing.T) {
+	dir := t.TempDir()
+	gomod := "module github.com/example/app\n\ngo 1.25\n\nrequire github.com/example/dep v1.0.0\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubGitHub(t, http.StatusOK)
+	scanErr, warnings := packageErrorScan()
+	stubScan(t, nil, warnings, false, scanErr)
+
+	res, err := Run(context.Background(), Options{Path: dir, DirectOnly: true, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *scanner.ScanError
+	if !errors.As(res.VulnScanErr, &got) || got != scanErr {
+		t.Fatalf("VulnScanErr = %v, want the scanner's *ScanError", res.VulnScanErr)
+	}
+	if res.Grade.Pending == nil || !strings.HasSuffix(res.Grade.Pending.Reason, "multiple_mains: /p/b.go:3:6: main redeclared in this block") || strings.Contains(res.Grade.Pending.Reason, "\n") {
+		t.Errorf("Pending = %+v, want one line naming the cause", res.Grade.Pending)
+	}
+}
+
+// A scan error that carries no warning (a refused toolchain) is still said once in the report warnings, in one line.
+func TestRun_ScanErrorWithoutWarning(t *testing.T) {
+	dir := writeEmptyModule(t)
+	stubGitHub(t, http.StatusOK)
+	stubScan(t, nil, nil, false, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNeedsNewerGo, Err: errors.New("this unisupply was built with go1.26.9 and cannot scan code that needs go1.99")})
+
+	res, err := Run(context.Background(), Options{Path: dir, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Vulnerability scan failed: needs_newer_go: this unisupply was built with go1.26.9 and cannot scan code that needs go1.99"
+	if len(res.ProjectScore.Warnings) != 1 || res.ProjectScore.Warnings[0] != want {
+		t.Errorf("report warnings = %q, want %q", res.ProjectScore.Warnings, want)
+	}
+}
+
+// Run's own early failures are scan errors too, so a caller has one type to branch on, and what they wrap is still there.
+func TestRun_EarlyFailuresAreScanErrors(t *testing.T) {
+	_, err := Run(context.Background(), Options{Path: t.TempDir()})
+	var se *scanner.ScanError
+	if !errors.As(err, &se) || se.Reason != scanner.ReasonNoGoMod || se.Kind != scanner.FailPermanent {
+		t.Errorf("no go.mod: err = %v, want a permanent no_go_mod ScanError", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "no go.mod found in") {
+		t.Errorf("err = %q, want FindGoMod's text kept", err)
+	}
+
+	_, err = Run(context.Background(), Options{Path: filepath.Join(t.TempDir(), "missing")})
+	if !errors.As(err, &se) || se.Reason != scanner.ReasonNoGoMod || !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing path: err = %v, want a no_go_mod ScanError that still wraps fs.ErrNotExist", err)
 	}
 }
 

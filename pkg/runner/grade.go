@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"sort"
@@ -245,9 +246,14 @@ type gradeRun struct {
 	KEVStaleSince time.Time
 }
 
+// errString is err on one line: a scan error's summary, otherwise the first line of its text.
 func errString(err error) string {
 	if err == nil {
 		return ""
+	}
+	var se *scanner.ScanError
+	if errors.As(err, &se) {
+		return se.Summary()
 	}
 	line, _, _ := strings.Cut(err.Error(), "\n")
 	return line

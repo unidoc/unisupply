@@ -195,11 +195,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Stage("Parsing go.mod")
 	gomodPath, err := parser.FindGoMod(opts.Path)
 	if err != nil {
-		return nil, err
+		return nil, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoGoMod, Err: err}
 	}
 	gomod, err := parser.ParseGoMod(gomodPath)
 	if err != nil {
-		return nil, err
+		return nil, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonUnknown, Err: err}
 	}
 	projectDir := filepath.Dir(gomodPath)
 	rep.Done("%s", gomodPath)
@@ -214,7 +214,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Stage("Resolving dependency graph")
 	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
 	if err != nil {
-		return nil, fmt.Errorf("resolving dependencies: %w", err)
+		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err())
 	}
 	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)
@@ -248,7 +248,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		var scanInfo scanner.ScanInfo
 		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
 		if verr != nil {
-			rep.Warn("Vulnerability scan failed: %v", verr)
+			rep.Warn("Vulnerability scan failed: %s", errString(verr))
 		}
 		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
 		for _, w := range vulnWarnings {
@@ -299,11 +299,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	var scanInfo scanner.ScanInfo
 	vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
-	// The scanner reports availability directly: govulncheck failures come back
-	// as a warning with a nil error, so err alone reads a failed scan as clean.
+	// The scanner reports availability directly: a scan that did not run must
+	// not read as clean, whether it came back with an error or only a warning.
 	vulnScanUnavailable := !vulnScanned
 	if err != nil {
-		rep.Warn("Vulnerability scan failed: %v", err)
+		rep.Warn("Vulnerability scan failed: %s", errString(err))
 	}
 	vulnScanErr := vulnScanFailure(err, vulnScanned, vulnWarnings)
 	for _, w := range vulnWarnings {
@@ -501,9 +501,10 @@ func activityFallback(githubToken string, offlineMode bool, maintainers *scanner
 }
 
 // vulnScanFailure reports whether a ScanVulns outcome means the vulnerability
-// scan did not complete: it returned an error, or it reports itself as not
-// having run (the scanner downgrades govulncheck failures to a warning and
-// carries on with an empty result).
+// scan did not complete: it returned an error (a *scanner.ScanError, passed on
+// as it is, with its whole cause), or it reports itself as not having run
+// without one (offline mode skips the scan with a warning, and tests stub it):
+// the fallback then is the first line of its first warning.
 func vulnScanFailure(err error, scanned bool, warnings []string) error {
 	if err != nil {
 		return err
@@ -526,8 +527,14 @@ func appendScanFailure(dst, warnings []string, failure error) []string {
 		return dst
 	}
 	line := errString(failure)
+	// A scan error's summary is not the first line of its warning, but its detail line is somewhere in it.
+	var se *scanner.ScanError
+	detail := line
+	if errors.As(failure, &se) {
+		detail = strings.TrimPrefix(line, se.Reason+": ")
+	}
 	for _, w := range warnings {
-		if first, _, _ := strings.Cut(w, "\n"); first == line {
+		if first, _, _ := strings.Cut(w, "\n"); first == line || (detail != line && strings.Contains(w, detail)) {
 			return dst
 		}
 	}
