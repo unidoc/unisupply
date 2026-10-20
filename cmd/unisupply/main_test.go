@@ -523,3 +523,26 @@ func TestFormatAndPresetAreCheckedBeforeScanning(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// TestNoGoMod_PrintsTheCauseOnly pins what a CLI user sees when there is no go.mod: Run's failure is a scanner.ScanError,
+// whose own text starts with a reason code for library callers, and the CLI prints the cause alone, as it always did.
+func TestNoGoMod_PrintsTheCauseOnly(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir() // no go.mod written
+
+	cmd := exec.Command(bin, "--progress", "none", dir)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+
+	exitCode := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode = exitErr.ExitCode()
+	}
+	if exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", exitCode)
+	}
+	if want := "Error: no go.mod found in " + dir + "\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}

@@ -154,12 +154,22 @@ func main() {
 		}
 		// Token precondition failure exits with code 3.
 		if errors.Is(err, errTokenPrecondition) {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: %v\n", cliError(err))
 			os.Exit(3)
 		}
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", cliError(err))
 		os.Exit(1)
 	}
+}
+
+// cliError is what the CLI prints for a failure. A scan error leads with a reason code for library callers (gorisk), so
+// the CLI prints the cause alone, as it did before the code existed.
+func cliError(err error) error {
+	var se *scanner.ScanError
+	if errors.As(err, &se) && se.Err != nil {
+		return se.Err
+	}
+	return err
 }
 
 type runConfig struct {

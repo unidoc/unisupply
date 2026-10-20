@@ -627,7 +627,7 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	// and GOROOT for the standard library in this process's working directory.
 	// Resolve the project's own so the result does not depend on where
 	// unisupply was launched from.
-	projectGoVersion, projectGoRoot, projectErr := resolveGoEnv(ctx, projectDir)
+	projectGoVersion, projectGoRoot, projectCgo, projectErr := resolveGoEnv(ctx, projectDir)
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
@@ -638,7 +638,7 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		}
 	}
 	// A failure here only costs stdlib file positions, so it is not reported.
-	_, scannerGoRoot, scannerErr := resolveGoEnv(ctx, "")
+	_, scannerGoRoot, _, scannerErr := resolveGoEnv(ctx, "")
 	parseOpts := gvcParseOptions{}
 	if projectErr == nil && scannerErr == nil {
 		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
@@ -680,6 +680,11 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		}
 		warnings = append(warnings, msg)
 		scanErr = classifyScanFailure(msg, ctx.Err())
+		// "no packages matched" is also what a module whose files all need cgo gives when cgo is off: say so, but only
+		// when the go command confirms cgo is off and a file of the module imports "C".
+		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectCgo == "0" && hasCgoImport(projectDir) {
+			scanErr.Reason = ReasonCgoOnly
+		}
 	}
 
 	if stdout.Len() == 0 {

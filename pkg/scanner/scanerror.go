@@ -2,7 +2,13 @@ package scanner
 
 import (
 	"errors"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -34,7 +40,8 @@ const (
 	ReasonNeedsNewerGo      = "needs_newer_go"     // the project needs a newer Go than this unisupply was built with
 	ReasonNoGoMod           = "no_go_mod"          // no go.mod to scan
 	ReasonMultipleMains     = "multiple_mains"     // several package main files in one directory
-	ReasonCgoOnly           = "cgo_only"           // every file is excluded without cgo
+	ReasonNoPackages        = "no_packages"        // the scan found no package to load
+	ReasonCgoOnly           = "cgo_only"           // no package to load: cgo is off and the module's files import "C"
 	ReasonMissingGoSum      = "missing_gosum"      // a go.sum entry is missing and -mod=readonly forbids adding it
 	ReasonModuleFetch       = "module_fetch"       // a module download failed
 	ReasonRateLimited       = "rate_limited"       // a service refused the request for rate limiting
@@ -139,7 +146,9 @@ var scanFailureRules = []struct {
 	{ReasonNeedsNewerGo, FailPermanent, regexp.MustCompile(`requires go >= ?\d|requires newer Go version|cannot scan code that needs go\d|mismatch between the Go version\s+used to build govulncheck`)},
 	{ReasonNoGoMod, FailPermanent, regexp.MustCompile(`no go\.mod file|go\.mod file not found|no go\.mod found in|cannot find main module`)},
 	{ReasonMultipleMains, FailPermanent, regexp.MustCompile(`main redeclared in this block|found packages main \(`)},
-	{ReasonCgoOnly, FailPermanent, regexp.MustCompile(`build constraints exclude all Go files`)},
+	// x/vuln's errNoPackagesMatched, which a module with no Go files gives as well as one whose files all need cgo; the
+	// caller tells them apart (ReasonCgoOnly) by looking at the files, since the message cannot.
+	{ReasonNoPackages, FailPermanent, regexp.MustCompile(`no packages matched the provided patterns`)},
 	{ReasonMissingGoSum, FailPermanent, regexp.MustCompile(`missing go\.sum entry`)},
 	{ReasonRateLimited, FailTransient, regexp.MustCompile(`(?i)too many requests|rate.?limit|(?:status|code|http|returned)[: ]+429\b`)},
 	{ReasonVulnDBUnreachable, FailTransient, regexp.MustCompile(`vuln\.go\.dev|GOVULNDB|HTTP (?:GET|POST) \S+ returned unexpected status`)},
@@ -178,4 +187,45 @@ func tailOf(err error) error {
 		return &tailError{text: tail, err: err}
 	}
 	return err
+}
+
+// hasCgoImport reports whether a non-test Go file of the module in dir imports "C". It reads the import clauses only, and
+// skips what the go command does not build with the module: testdata, vendor, hidden and underscore-prefixed
+// directories, and nested modules. It stops at the first hit. A scan calls it only after a failure that could be a
+// cgo-only module, never on a normal scan.
+func hasCgoImport(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // an unreadable entry is skipped
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path == dir {
+				return nil
+			}
+			if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil && f == nil {
+			return nil
+		}
+		for _, imp := range f.Imports {
+			if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == "C" {
+				found = true
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return found
 }

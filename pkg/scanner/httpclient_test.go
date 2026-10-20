@@ -182,7 +182,7 @@ func TestHTTPClient_TimeoutIsPerRequestAndTheContextDeadlineStillWins(t *testing
 	host := mustHost(t, srv.URL)
 
 	// get runs the request off the test goroutine, so a client with no limit fails the test instead of hanging it.
-	get := func(ctx context.Context, c *Client) (time.Duration, error) {
+	get := func(t *testing.T, ctx context.Context, c *Client) (time.Duration, error) {
 		type result struct{ err error }
 		done := make(chan result, 1)
 		start := time.Now()
@@ -201,8 +201,10 @@ func TestHTTPClient_TimeoutIsPerRequestAndTheContextDeadlineStillWins(t *testing
 
 	t.Run("client timeout fires without a context deadline", func(t *testing.T) {
 		c := NewClient(ClientOptions{Timeout: 200 * time.Millisecond})
-		_, err := get(context.Background(), c)
-		if err == nil || !strings.Contains(err.Error(), "Client.Timeout") {
+		_, err := get(t, context.Background(), c)
+		// The context has no deadline, so a deadline error can only be the client's own timeout. net/http words it
+		// either way ("... (Client.Timeout exceeded ...)" or a plain "context deadline exceeded"), so match the error.
+		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("err = %v, want the client's own timeout", err)
 		}
 	})
@@ -211,7 +213,7 @@ func TestHTTPClient_TimeoutIsPerRequestAndTheContextDeadlineStillWins(t *testing
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		c := NewClient(ClientOptions{Timeout: 10 * time.Second})
-		_, err := get(ctx, c)
+		_, err := get(t, ctx, c)
 		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "Client.Timeout") {
 			t.Errorf("err = %v, want the context's deadline, not the client's timeout", err)
 		}

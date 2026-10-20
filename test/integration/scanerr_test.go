@@ -55,10 +55,14 @@ func TestScanErr_Fixtures(t *testing.T) {
 			text: "no go.mod found in",
 		},
 		{
-			// Known gap: with CGO_ENABLED=0 a package whose only file needs cgo gives x/vuln's generic
-			// "govulncheck: no packages matched the provided patterns", which a module with no Go files at all gives
-			// as well. The cause cannot be read from the message, so it is not called cgo_only.
-			name: "cgo_only", reason: scanner.ReasonUnknown, kind: scanner.FailPermanent,
+			// govulncheck: no packages matched the provided patterns. With CGO_ENABLED=0 and a non-test file that
+			// imports "C", the scan says cgo_only instead (the next case).
+			name: "no_packages", reason: scanner.ReasonNoPackages, kind: scanner.FailPermanent,
+			text: "no packages matched the provided patterns",
+		},
+		{
+			// the same message, but cgo is off for the scan and the only file imports "C"
+			name: "cgo_only", reason: scanner.ReasonCgoOnly, kind: scanner.FailPermanent,
 			text: "no packages matched the provided patterns",
 		},
 	}

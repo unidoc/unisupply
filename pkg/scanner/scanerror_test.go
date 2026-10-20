@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,15 +67,14 @@ func TestClassifyScanFailure(t *testing.T) {
 		{"module fetch (go command)", msgGoCmdDial, ReasonModuleFetch, FailTransient},
 		{"no go.mod", msgNoGoMod, ReasonNoGoMod, FailPermanent},
 		{"no go.mod (runner)", "no go.mod found in /tmp/x", ReasonNoGoMod, FailPermanent},
-		{"cgo only (constructed)", "go: build constraints exclude all Go files in /p/c", ReasonCgoOnly, FailPermanent},
 		{"rate limited", msgRateLimited, ReasonRateLimited, FailTransient},
 		{"vulndb status", msgVulnDB, ReasonVulnDBUnreachable, FailTransient},
 		// the database host wins over the generic network text it also carries
 		{"vulndb dial", msgVulnDBDial, ReasonVulnDBUnreachable, FailTransient},
 		// a permanent cause wins over network text elsewhere in the message
 		{"missing go.sum and a dial", msgMissingGoSum + "dial tcp 1.1.1.1:443: i/o timeout", ReasonMissingGoSum, FailPermanent},
-		// recorded: the same text for a module with no Go files, so it is not a cause (see TestScanErr_Fixtures)
-		{"no packages matched", msgNoPackages, ReasonUnknown, FailPermanent},
+		// recorded; a cgo-only module gives the same text, which ScanVulnsWithOptions tells apart by looking at the files
+		{"no packages matched", msgNoPackages, ReasonNoPackages, FailPermanent},
 		{"unknown", "govulncheck: something nobody planned for", ReasonUnknown, FailPermanent},
 		{"empty", "", ReasonUnknown, FailPermanent},
 		// a line number is not a status code
@@ -223,5 +224,45 @@ func TestWrapScanFailure_KeepsTheChain(t *testing.T) {
 	plain := &ScanError{Reason: ReasonUnknown, Err: fs.ErrPermission}
 	if !errors.Is(plain, fs.ErrPermission) || errors.Unwrap(plain) != fs.ErrPermission {
 		t.Error("Unwrap must return Err")
+	}
+}
+
+func TestHasCgoImport(t *testing.T) {
+	const cgoFile = "package p\n\n// #include <stdlib.h>\nimport \"C\"\n\nfunc F() {}\n"
+	const plainFile = "package p\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"cgo file in the module root", map[string]string{"go.mod": "module m\n", "c.go": cgoFile}, true},
+		{"cgo file in a subdirectory", map[string]string{"go.mod": "module m\n", "pkg/c.go": cgoFile}, true},
+		{"cgo file behind a build constraint", map[string]string{"c.go": "//go:build cgo\n\n" + cgoFile}, true},
+		{"no cgo anywhere", map[string]string{"go.mod": "module m\n", "a.go": plainFile}, false},
+		{"only a test file imports C", map[string]string{"c_test.go": cgoFile, "a.go": plainFile}, false},
+		{"only testdata imports C", map[string]string{"testdata/c.go": cgoFile, "a.go": plainFile}, false},
+		{"only vendor imports C", map[string]string{"vendor/x/c.go": cgoFile}, false},
+		{"only a hidden directory imports C", map[string]string{".hidden/c.go": cgoFile}, false},
+		{"only an underscore directory imports C", map[string]string{"_old/c.go": cgoFile}, false},
+		{"only a nested module imports C", map[string]string{"go.mod": "module m\n", "sub/go.mod": "module m/sub\n", "sub/c.go": cgoFile}, false},
+		{"a file that does not parse is skipped", map[string]string{"bad.go": "package", "c.go": cgoFile}, true},
+		{"empty directory", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				path := filepath.Join(dir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := hasCgoImport(dir); got != tc.want {
+				t.Errorf("hasCgoImport = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
