@@ -472,3 +472,61 @@ func TestAppendScanFailure(t *testing.T) {
 		t.Errorf("%v", got)
 	}
 }
+
+// A panic on Run's own goroutine is a scan failure for the caller, not the end of its process.
+func TestRun_PanicInTheScanIsAScanError(t *testing.T) {
+	dir := writeEmptyModule(t)
+	stubGitHub(t, http.StatusOK)
+	prev := scanVulns
+	t.Cleanup(func() { scanVulns = prev })
+	scanVulns = func(context.Context, string, scanner.VulnScanOptions) (map[string][]scanner.Vulnerability, []string, bool, error) {
+		panic("boom in the scan")
+	}
+
+	res, err := Run(context.Background(), Options{Path: dir, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if res != nil {
+		t.Errorf("Result = %+v, want nil", res)
+	}
+	var se *scanner.ScanError
+	if !errors.As(err, &se) || se.Reason != scanner.ReasonInternalPanic || se.Kind != scanner.FailPermanent {
+		t.Fatalf("err = %v, want a permanent internal_panic ScanError", err)
+	}
+	if got, want := se.Summary(), "internal_panic: panic: boom in the scan"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+	// the stack is kept whole, top frames included: it names the function that panicked
+	if text := se.Err.Error(); !strings.HasPrefix(text, "panic: boom in the scan\n") || !strings.Contains(text, "TestRun_PanicInTheScanIsAScanError") {
+		t.Errorf("Err = %q, want the panic value and the stack of the panic site", text)
+	}
+}
+
+// A panic in one of the scanners' worker goroutines, which no recover in Run could catch, fails the scan the same way,
+// and the error carries the worker's stack. The panic comes from the HTTP transport the module-proxy lookups use.
+func TestRun_PanicInAWorkerGoroutineIsAScanError(t *testing.T) {
+	dir := t.TempDir()
+	gomod := "module github.com/example/app\n\ngo 1.25\n\nrequire github.com/example/dep v1.0.0\n"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubScan(t, nil, nil, true, nil)
+	original := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		panic("boom in a lookup")
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	res, err := Run(context.Background(), Options{Path: dir, DirectOnly: true, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if res != nil {
+		t.Errorf("Result = %+v, want nil", res)
+	}
+	var se *scanner.ScanError
+	if !errors.As(err, &se) || se.Reason != scanner.ReasonInternalPanic {
+		t.Fatalf("err = %v, want an internal_panic ScanError", err)
+	}
+	if got, want := se.Summary(), "internal_panic: panic: boom in a lookup"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+	if text := se.Err.Error(); !strings.Contains(text, "MaintenanceScanner") {
+		t.Errorf("Err = %q, want the stack of the worker goroutine", text)
+	}
+}

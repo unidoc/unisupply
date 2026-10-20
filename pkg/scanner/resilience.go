@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -188,16 +189,19 @@ func (rs *ResilienceScanner) ScanAll(ctx context.Context, graph *resolver.Graph,
 func runBounded(limit, n int, fn func(i int)) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, limit)
+	var panics safego.Catcher
 	for i := range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			fn(i)
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 }
 
 // resilienceWork carries one module between the phases of ScanAll.
@@ -394,16 +398,19 @@ func (rs *ResilienceScanner) reserveInfoRequests(n int) int {
 func (rs *ResilienceScanner) fetchVersionTimes(ctx context.Context, modPath string, sample []string, oldest string) (times []time.Time, oldestFound bool) {
 	got := make([]time.Time, len(sample))
 	var wg sync.WaitGroup
+	var panics safego.Catcher
 	for i, ver := range sample {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			rs.infoSem <- struct{}{}
 			defer func() { <-rs.infoSem }()
 			got[i] = rs.fetchVersionTime(ctx, modPath, ver)
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 	for i, t := range got {
 		if t.IsZero() {
 			continue

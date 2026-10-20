@@ -12,6 +12,7 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/offline"
 )
 
@@ -71,6 +72,7 @@ func ResolveFixGoRequirements(ctx context.Context, opts FixDateOptions, modulePa
 		got = map[string]string{}
 		sem = make(chan struct{}, fixDateMaxConcurrency)
 	)
+	var panics safego.Catcher
 loop:
 	for _, v := range versions {
 		select {
@@ -81,6 +83,7 @@ loop:
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			defer func() { <-sem }()
 			escVer, err := module.EscapeVersion(v)
 			if err != nil {
@@ -104,6 +107,7 @@ loop:
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 	for i := range vulns {
 		vulns[i].FixRequiresGo = got[canonicalVersion(vulns[i].FixedVersion)]
 	}

@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -680,16 +681,19 @@ func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, 
 	results := make([]listResult, len(runs))
 	sem := make(chan struct{}, maxParallelLists)
 	var wg sync.WaitGroup
+	var panics safego.Catcher
 	for i, run := range runs {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			defer func() { <-sem }()
 			results[i] = listPackages(ctx, dir, run)
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 
 	byTarget := make(map[string]*platformList, len(listGOOS)*len(listGOARCH))
 	platforms = make([]*platformList, 0, len(listGOOS)*len(listGOARCH))

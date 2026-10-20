@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -181,7 +183,18 @@ var scanVulns = scanner.ScanVulnsWithOptions
 // with progress.WithReporter for CLI-style stage output; a plain context
 // (as any library caller will pass) gets progress.From's built-in no-op
 // reporter, so Run is silent by default.
-func Run(ctx context.Context, opts Options) (*Result, error) {
+//
+// A panic on Run's own goroutine, or in one of unisupply's worker goroutines (their panics are carried back to this
+// goroutine), fails the scan: Run returns a nil Result and a *scanner.ScanError with Reason internal_panic whose Err
+// is the panic value and the stack of the goroutine it happened in. It does not catch panics inside govulncheck's own
+// goroutines, fatal runtime errors such as "concurrent map writes", or the process being killed (out of memory): a
+// caller that must survive those has to do so itself.
+func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, runErr = nil, panicScanError(r)
+		}
+	}()
 	// Timeout is passed through unchanged: the scanner clients map 0 to their
 	// own default, exactly as the CLI's --timeout 0 always has.
 	timeout := opts.Timeout
@@ -496,6 +509,17 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Maintainers:         maintainers,
 		Typosquats:          typosquats,
 	}, nil
+}
+
+// panicScanError is the failure for a recovered panic. A panic from a worker goroutine arrives as a *safego.Panic that
+// has its own stack, which is the one that shows where it happened; the stack of this goroutine would only show Run.
+// The text is not cut to a tail: the top frames are the ones that matter.
+func panicScanError(r any) *scanner.ScanError {
+	p, ok := r.(*safego.Panic)
+	if !ok {
+		p = &safego.Panic{Value: r, Stack: debug.Stack()}
+	}
+	return &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonInternalPanic, Err: errors.New(p.Error())}
 }
 
 // activityFallback returns the GitHub commits lookup the activity scan may ask

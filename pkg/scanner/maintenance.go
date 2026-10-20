@@ -17,6 +17,7 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -234,11 +235,13 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 	var errOnce sync.Once
 	var failCount atomic.Int64
 	var done int64
+	var panics safego.Catcher
 
 	for _, dep := range graph.Dependencies {
 		wg.Add(1)
 		go func(d *resolver.Dependency) {
 			defer wg.Done()
+			defer panics.Recover()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -259,6 +262,7 @@ func (ms *MaintenanceScanner) ScanAll(ctx context.Context, graph *resolver.Graph
 	}
 
 	wg.Wait()
+	panics.Repanic()
 	if n := failCount.Load(); n > 0 {
 		if errors.Is(firstErr, offline.ErrOffline) {
 			// Report the shape of the degradation, not the wrapped error. The
@@ -670,12 +674,14 @@ func (ms *MaintenanceScanner) ScanArchived(ctx context.Context, maintenance map[
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 5)
 	var failed, done atomic.Int64
+	var panics safego.Catcher
 	for _, modPath := range todo {
 		info := maintenance[modPath]
 		owner, repo, _ := githubRepoFromURL(info.RepositoryURL)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -698,6 +704,7 @@ func (ms *MaintenanceScanner) ScanArchived(ctx context.Context, maintenance map[
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 
 	if n := failed.Load(); n > 0 {
 		return fmt.Errorf("archived status could not be read for %d of %d module(s) (GitHub API rate-limited or erroring); they are reported as unchecked, not as not archived", n, total)
