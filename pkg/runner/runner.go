@@ -114,6 +114,13 @@ type Options struct {
 	// is empty). It is only recorded, in Analysis.Identity: unisupply does not read it from git.
 	Commit string
 
+	// PrivatePatterns are the module path patterns of private modules, Go's GOPRIVATE syntax (comma-separated globs matched
+	// with module.MatchPrefixPatterns): modules the customer owns. When it has any entry it replaces the environment (GOPRIVATE
+	// and GONOPROXY, which are read when it is empty). A private module's path appears in no request to any host (module
+	// proxy, GitHub, Trust Index, OSV) and no facts store call; its upkeep is not assessed, and it is marked private in the
+	// grade. The go command's own downloads follow GOPRIVATE by themselves. The CLI flag is --private-modules.
+	PrivatePatterns []string
+
 	// Facts is the store Run and RunAnalysed read facts through when they grade (see Grade). Nil looks everything up. Analyse
 	// does not read it.
 	Facts facts.Store

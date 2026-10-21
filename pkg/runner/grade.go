@@ -22,7 +22,7 @@ var selfReleaseTime = scanner.ModuleVersionTime
 // lookupSelfRelease is when the scanned module version was published, or nil. Context only: an unknown release time just
 // leaves the "before this version was released" figure out of the findings.
 func lookupSelfRelease(ctx context.Context, r *gradeRun) *time.Time {
-	if r.Opts.SelfVersion == "" || offline.Enabled() {
+	if r.Opts.SelfVersion == "" || offline.Enabled() || r.Private.Match(r.GoMod.ModulePath) {
 		return nil
 	}
 	t, ok := selfReleaseTime(ctx, scanner.FixDateOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, r.Opts.SelfVersion)
@@ -66,6 +66,9 @@ type gradeInputs struct {
 	// LocalReplaced holds the modules a replace directive points at a local directory: they are the project's own code, so
 	// there is no published module to look up.
 	LocalReplaced map[string]bool
+
+	// Private holds the modules matched by the private patterns: not looked up, not graded on upkeep.
+	Private map[string]bool
 }
 
 // buildGradeInput maps the scanner outputs onto the rows of the grade.
@@ -84,6 +87,10 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 		for _, path := range in.Graph.SortedPaths() {
 			d := in.Graph.Dependencies[path]
 			upkeep := upkeepOfRule(in.Maintenance[path], in.StrictArchived)
+			if in.Private[path] {
+				// the customer's own code, never looked up: not assessed, never missing, never "not archived"
+				upkeep = grade.Upkeep{NotAssessed: true}
+			}
 			if in.LocalReplaced[path] {
 				// the project's own code: nobody to ask (the proxy has no such module), so not assessed, never Missing
 				upkeep = grade.Upkeep{NotAssessed: true}
@@ -96,6 +103,7 @@ func buildGradeInput(in *gradeInputs) grade.Input {
 				InBuild:  d.InBuild,
 				Findings: findingsOf(path, in.Vulns[path]),
 				Upkeep:   upkeep,
+				Private:  in.Private[path],
 			}
 			out.Deps = append(out.Deps, row)
 		}
@@ -201,13 +209,13 @@ func archiveUnchecked(maintenance map[string]*scanner.MaintenanceInfo, local map
 }
 
 // moduleDependencies lists the dependency module paths worth a response-history lookup: the direct ones, sorted.
-func moduleDependencies(g *resolver.Graph) []string {
+func moduleDependencies(g *resolver.Graph, private *scanner.PrivateModules) []string {
 	if g == nil {
 		return nil
 	}
 	var out []string
 	for p, d := range g.Dependencies {
-		if d.Direct {
+		if d.Direct && !private.Match(p) {
 			out = append(out, p)
 		}
 	}
@@ -226,6 +234,9 @@ type gradeRun struct {
 	ScanStart time.Time
 	// Toolchain is the Go release the scan ran with (Analysis.ToolchainVersion): the standard library was graded at it.
 	Toolchain string
+
+	// Private matches the private modules; nil matches nothing.
+	Private *scanner.PrivateModules
 
 	// Facts is where the module's own status is read first and written back; nil without a store.
 	Facts *factReader
@@ -277,7 +288,9 @@ func scanFailureCode(err error) (code, kind string) {
 // grade depends on. It never fails: a lookup that did not work is recorded in Checks, and the grade says Pending.
 func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 	local := localReplaced(r.GoMod, r.Graph)
+	privSet, privList := privateModules(r.Graph, r.Private)
 	in := gradeInputs{
+		Private:        privSet,
 		LocalReplaced:  local,
 		ProjectGo:      goDirective(r.GoMod),
 		StrictArchived: r.Opts.StrictArchivedStatus,
@@ -294,6 +307,7 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 			ScanTimedOut:   r.Interrupted,
 
 			ArchiveUnchecked: archiveUnchecked(r.Maintenance, local),
+			PrivateModules:   privList,
 		},
 	}
 	if r.Integrity != nil {
@@ -328,9 +342,9 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 	in.Self = assessSelf(ctx, r, &in.Checks)
 	in.SelfReleasedAt = lookupSelfRelease(ctx, r)
 
-	if r.Opts.ResponseHistory && r.Opts.SelfVersion != "" && !offline.Enabled() {
+	if r.Opts.ResponseHistory && r.Opts.SelfVersion != "" && !offline.Enabled() && !r.Private.Match(r.GoMod.ModulePath) {
 		// Context only: a failed lookup leaves the labels at "Not enough response history", never a Pending grade.
-		in.History, _ = scanner.ScanResponseHistory(ctx, scanner.ResponseHistoryOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, moduleDependencies(r.Graph))
+		in.History, _ = scanner.ScanResponseHistory(ctx, scanner.ResponseHistoryOptions{Timeout: r.Timeout}, r.GoMod.ModulePath, moduleDependencies(r.Graph, r.Private))
 	}
 	gi := buildGradeInput(&in)
 	res := grade.Grade(&gi)
@@ -341,6 +355,13 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 // module: no own advisories (OSV needs a version) and no archived lookup, said plainly in the result.
 func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Row {
 	row := grade.Row{Module: r.GoMod.ModulePath, Version: r.Opts.SelfVersion, Self: true}
+	if r.Private.Match(r.GoMod.ModulePath) {
+		// the customer's own private module: its path is in no request, and nothing is assumed about its status
+		checks.SelfPrivate = true
+		row.Private = true
+		row.Upkeep.NotAssessed = true
+		return row
+	}
 	if r.Opts.SelfVersion == "" {
 		checks.SelfAdvisoriesSkipped = true
 		row.Upkeep.NotAssessed = true // nobody looked at the module's own status: say so, not "finished"
@@ -519,4 +540,51 @@ func goDirective(gm *parser.GoMod) string {
 		return ""
 	}
 	return strings.TrimSpace(gm.GoVersion)
+}
+
+// privateModules is the set and the sorted list of the graph's modules the private patterns match.
+func privateModules(g *resolver.Graph, private *scanner.PrivateModules) (map[string]bool, []string) {
+	if g == nil || !private.Any() {
+		return nil, nil
+	}
+	set := map[string]bool{}
+	var list []string
+	for path := range g.Dependencies {
+		if private.Match(path) {
+			set[path] = true
+			list = append(list, path)
+		}
+	}
+	sort.Strings(list)
+	return set, list
+}
+
+// publicGraph is the graph without the private modules, which is what every lookup that puts a module path in a request
+// runs over; the graph itself when nothing is private.
+func publicGraph(g *resolver.Graph, private map[string]bool) *resolver.Graph {
+	if len(private) == 0 {
+		return g
+	}
+	pub := map[string]bool{}
+	for path := range g.Dependencies {
+		if !private[path] {
+			pub[path] = true
+		}
+	}
+	return subgraph(g, pub)
+}
+
+// publicVulns is the findings without those of private modules (the slices are shared, so what resolves them is seen by the
+// caller).
+func publicVulns(v map[string][]scanner.Vulnerability, private *scanner.PrivateModules) map[string][]scanner.Vulnerability {
+	if !private.Any() {
+		return v
+	}
+	out := make(map[string][]scanner.Vulnerability, len(v))
+	for k, list := range v {
+		if !private.Match(k) {
+			out[k] = list
+		}
+	}
+	return out
 }

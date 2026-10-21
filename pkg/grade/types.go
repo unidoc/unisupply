@@ -124,6 +124,11 @@ type Row struct {
 	TestOnly *bool
 	InBuild  *bool
 
+	// Private is true for a module matched by the private patterns (GOPRIVATE, --private-modules): the customer's own code, never
+	// looked up, so its upkeep is not assessed and never missing. Its findings (from govulncheck's public database, which has
+	// none for a private path) are graded as any other's.
+	Private bool
+
 	Findings []Finding
 	Upkeep   Upkeep
 }
@@ -143,6 +148,11 @@ type Checks struct {
 	SelfStatusFailed      bool
 	SelfAdvisoriesFailed  bool
 	SelfAdvisoriesSkipped bool
+
+	// PrivateModules lists, sorted, the dependencies that were not looked up because they are private; SelfPrivate that the
+	// module itself is (its status and advisories were not looked up either). The grade says so in a note and marks the rows.
+	PrivateModules []string
+	SelfPrivate    bool
 	// KEVUnchecked is the number of reached findings with a CVE whose known-exploited status (CISA's catalog) could not be
 	// checked: the grade says so in a note, since a called finding on that list is an F.
 	KEVUnchecked int
@@ -247,12 +257,14 @@ type FindingResult struct {
 
 // RowResult is a row after grading.
 type RowResult struct {
-	Module      string `json:"module"`
-	Version     string `json:"version,omitempty"`
-	Self        bool   `json:"self,omitempty"`
-	Direct      bool   `json:"direct,omitempty"`
-	TestOnly    bool   `json:"test_only,omitempty"`
-	NotBuilt    bool   `json:"not_built,omitempty"`
+	Module   string `json:"module"`
+	Version  string `json:"version,omitempty"`
+	Self     bool   `json:"self,omitempty"`
+	Direct   bool   `json:"direct,omitempty"`
+	TestOnly bool   `json:"test_only,omitempty"`
+	NotBuilt bool   `json:"not_built,omitempty"`
+	// Private marks a module that was not looked up because it matches the private patterns: not graded on upkeep.
+	Private     bool   `json:"private,omitempty"`
 	Score       int    `json:"score"`
 	VulnScore   int    `json:"vulnerability_score"`
 	UpkeepScore int    `json:"upkeep_score"`

@@ -85,13 +85,17 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	vulns := cloneVulns(an.Vulns)
 	fixOpts := scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}
 	fr := &factReader{store: f, date: date, analysed: an.AnalysedAt}
+	// Private modules are the customer's own code: their paths are in no request and no facts store call.
+	private := scanner.NewPrivateModules(opts.PrivatePatterns)
+	privSet, _ := privateModules(graph, private)
+	lookupGraph := publicGraph(graph, privSet)
 
 	if len(graph.Dependencies) == 0 {
 		// see analyse: the standard library is graded only when the caller says so
 		emptyVulnErr := vulnScanErr
-		fr.applyAdvisories(ctx, vulns)
-		resolveFixes(ctx, fr, fixOpts, vulns)
-		fr.storeAdvisories(ctx, vulns)
+		fr.applyAdvisories(ctx, publicVulns(vulns, private))
+		resolveFixes(ctx, fr, fixOpts, publicVulns(vulns, private))
+		fr.storeAdvisories(ctx, publicVulns(vulns, private))
 		stdlibVulns := takeStdlibVulns(vulns)
 
 		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
@@ -113,7 +117,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 		missingCode, missingKind := scanFailureCode(scanMissing)
 		g := gradeAll(ctx, &gradeRun{
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
-			Timeout: timeout, ScanStart: scanStart, Toolchain: an.ToolchainVersion, Facts: fr,
+			Timeout: timeout, ScanStart: scanStart, Toolchain: an.ToolchainVersion, Facts: fr, Private: private,
 			Stdlib:      gradedStdlib(&opts, stdlibVulns),
 			VulnScanned: scanMissing == nil, VulnScanReason: errString(scanMissing), StdlibScanned: emptyVulnErr == nil,
 			VulnScanCode: missingCode, VulnScanKind: missingKind,
@@ -130,13 +134,13 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 
 	// The date each fix was released (from the module proxy), so a finding can say whether it is inside the response
 	// window. Best effort: a failed lookup leaves the advisory's own date, or none.
-	fr.applyAdvisories(ctx, vulns)
-	resolveFixes(ctx, fr, fixOpts, vulns)
-	fr.storeAdvisories(ctx, vulns)
+	fr.applyAdvisories(ctx, publicVulns(vulns, private))
+	resolveFixes(ctx, fr, fixOpts, publicVulns(vulns, private))
+	fr.storeAdvisories(ctx, publicVulns(vulns, private))
 
 	rep.Stage("Checking maintenance health")
 	// With a facts store, only the modules without a fresh status are looked up
-	scanGraph, cached := fr.splitModules(ctx, graph)
+	scanGraph, cached := fr.splitModules(ctx, lookupGraph)
 	maintScanner := scanner.NewMaintenanceScanner(timeout)
 	maintScanner.ScanStart = scanStart
 	maintenance, err := maintScanner.ScanAll(ctx, scanGraph)
@@ -213,7 +217,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	if trustClient != nil {
 		rep.Stage("Querying Trust Index")
 		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
+		trustIndex, tiErr = trustClient.LookupAll(ctx, lookupGraph)
 		if tiErr != nil {
 			rep.Warn("Trust Index lookup failed: %v", tiErr)
 		}
@@ -263,7 +267,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	gradeResult := gradeAll(ctx, &gradeRun{
 		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 		Timeout: timeout, ScanStart: scanStart,
-		Toolchain: an.ToolchainVersion, Facts: fr,
+		Toolchain: an.ToolchainVersion, Facts: fr, Private: private,
 		Vulns: vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
 		VulnScanCode: vulnCode, VulnScanKind: vulnKind,

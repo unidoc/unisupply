@@ -335,7 +335,7 @@ func gradeRow(r Row, in *Input) RowResult {
 	}
 	rr := RowResult{
 		Module: r.Module, Version: r.Version, Self: r.Self, Direct: r.Direct,
-		TestOnly: isConfirmed(r.TestOnly), NotBuilt: isRefuted(r.InBuild),
+		TestOnly: isConfirmed(r.TestOnly), NotBuilt: isRefuted(r.InBuild), Private: r.Private,
 		Score: score, VulnScore: vs, UpkeepScore: us, Letter: bandOf(score),
 		UpkeepState: state, UpkeepNote: strings.TrimSpace(r.Upkeep.Message), UpkeepMissed: r.Upkeep.Missing, ArchivedUnread: r.Upkeep.ArchivedUnread,
 	}
@@ -363,6 +363,8 @@ func gradeRow(r Row, in *Input) RowResult {
 		rr.Reason = "findings are shown, not graded"
 	case state == StateUnknown:
 		rr.Reason = "upkeep could not be read"
+	case r.Private:
+		rr.Reason = "private module: not looked up, not graded on upkeep"
 	case state == StateNotAssessed:
 		rr.Reason = "not assessed"
 	default:
@@ -496,13 +498,29 @@ func gradeOnce(input *Input) Result {
 			res.Notes = append(res.Notes, "The standard library was scanned at "+v+", the Go toolchain this scan ran with; its findings are listed, not graded.")
 		}
 	}
-	if in.Checks.SelfAdvisoriesSkipped {
+	if in.Checks.SelfPrivate {
+		res.Notes = append(res.Notes, "The module itself is private: its status and advisories were not looked up.")
+	}
+	if n := privateNote(in.Checks.PrivateModules); n != "" {
+		res.Notes = append(res.Notes, n)
+	}
+	if in.Checks.SelfAdvisoriesSkipped && !in.Checks.SelfPrivate {
 		res.Notes = append(res.Notes, "The module's own advisories were not looked up: no module version was given.")
 	}
 	if n := archiveUncheckedNote(in.Checks.ArchiveUnchecked); n != "" {
 		res.Notes = append(res.Notes, n)
 	}
 	return res
+}
+
+// privateNote words the note for private modules: they were not looked up, so they are not graded on upkeep and are never
+// counted as "not archived". "" for an empty list.
+func privateNote(modules []string) string {
+	if len(modules) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d private module%s %s not looked up and %s not graded on upkeep: %s.", len(modules), plural(len(modules), "", "s"),
+		plural(len(modules), "was", "were"), plural(len(modules), "is", "are"), joinLimited(modules, 3))
 }
 
 // archiveUncheckedNote words the note for modules whose archived status was not checked: at most three names, sorted,

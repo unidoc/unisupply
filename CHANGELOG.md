@@ -170,6 +170,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   is refused (a flag value shows in the process list). Not combinable with `--offline`. `runner.Options.Facts` is the store
   `Run`/`RunAnalysed` grade with; the scanners' disk caches stay underneath.
 
+#### Private modules are never looked up
+
+- **A module matched by `GOPRIVATE` / `GONOPROXY` (or by `runner.Options.PrivatePatterns` / `--private-modules`, a comma list that
+  replaces them) is in no outbound request and no facts-store call.** Before, the maintenance, maintainer, activity, resilience,
+  fix-date, response-history and Trust Index lookups sent private import paths to proxy.golang.org, GitHub and the Trust Index. The
+  matching is Go's (`module.MatchPrefixPatterns`; `scanner.NewPrivateModules`). The module itself, when private, is skipped too.
+- **Private modules are not graded on upkeep**: their row is `not_assessed` with `private: true` (also `dependencies[].private` in
+  the JSON), they never make the grade Pending for "upkeep unread", and a note says they were not looked up. See "Private modules"
+  in `docs/grading.md`.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause

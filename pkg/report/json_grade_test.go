@@ -642,3 +642,19 @@ func TestWriteJSONFailure(t *testing.T) {
 		t.Errorf("%+v", got.ScanStatus)
 	}
 }
+
+func TestWriteJSON_PrivateDependencyIsMarked(t *testing.T) {
+	res := &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA, Rows: []grade.RowResult{
+		{Module: "github.com/x/y", Private: true, Letter: grade.LetterA, Reason: "private module: not looked up, not graded on upkeep", UpkeepState: grade.StateNotAssessed},
+	}, Notes: []string{"1 private module was not looked up and is not graded on upkeep: github.com/x/y."}}
+	_, top := renderJSON(t, gradeTestScore(plainDep()), JSONOptions{Grade: res})
+	var deps []struct {
+		Private bool `json:"private"`
+	}
+	if err := json.Unmarshal(top["dependencies"], &deps); err != nil || len(deps) != 1 || !deps[0].Private {
+		t.Errorf("dependencies = %s (%v)", top["dependencies"], err)
+	}
+	if !strings.Contains(string(top["grade"]), `"private": true`) {
+		t.Errorf("the grade row is not marked: %s", top["grade"])
+	}
+}

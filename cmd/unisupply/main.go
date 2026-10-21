@@ -46,6 +46,7 @@ func main() {
 		output                 string
 		sbomOut                string
 		analysisOut            string
+		privateModules         string
 		factsURL               string
 		factsKeyFlag           string
 		factsKeyFile           string
@@ -79,6 +80,7 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
 	flag.StringVar(&analysisOut, "analysis-out", "", "Also write the stored Analysis (JSON) of the same scan to this file; runner.Grade grades it again later without the module's files")
+	flag.StringVar(&privateModules, "private-modules", "", "Comma-separated module path patterns (GOPRIVATE syntax) of private modules: never looked up (no proxy, GitHub or facts request carries their path) and not graded on upkeep. Replaces GOPRIVATE/GONOPROXY from the environment when set")
 	flag.StringVar(&factsURL, "facts-url", "", "Read module and advisory facts from a gorisk facts API (e.g. https://gorisk.dev) instead of looking them up (env UNISUPPLY_FACTS_URL); the key comes from UNISUPPLY_FACTS_KEY or --facts-key-file")
 	flag.StringVar(&factsKeyFile, "facts-key-file", "", "File holding the facts API key (gk_...); the env var UNISUPPLY_FACTS_KEY works too")
 	flag.StringVar(&factsKeyFlag, "facts-key", "", "Refused: a flag value shows in the process list. Use UNISUPPLY_FACTS_KEY or --facts-key-file")
@@ -145,6 +147,7 @@ func main() {
 		output:                 output,
 		sbomOut:                sbomOut,
 		analysisOut:            analysisOut,
+		privateModules:         privateModules,
 		factsURL:               factsURL,
 		factsKeyFlag:           factsKeyFlag,
 		factsKeyFile:           factsKeyFile,
@@ -208,6 +211,7 @@ type runConfig struct {
 	output                 string
 	sbomOut                string
 	analysisOut            string
+	privateModules         string
 	factsURL               string
 	factsKeyFlag           string
 	factsKeyFile           string
@@ -361,6 +365,7 @@ func run(cfg *runConfig) error {
 		StrictArchivedStatus:   cfg.strictArchived,
 		CalledPass:             calledPassMode,
 		Facts:                  factsStore,
+		PrivatePatterns:        privatePatterns(cfg.privateModules),
 	}
 	var scanResult *runner.Result
 	var analysis *runner.Analysis
@@ -411,6 +416,14 @@ func run(cfg *runConfig) error {
 		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 	}
 	return nil
+}
+
+// privatePatterns splits --private-modules; nil (the environment's GOPRIVATE and GONOPROXY apply) when it is empty.
+func privatePatterns(flagValue string) []string {
+	if strings.TrimSpace(flagValue) == "" {
+		return nil
+	}
+	return strings.Split(flagValue, ",")
 }
 
 // factsStoreFor is the facts store the flags and environment ask for: nil without a facts URL. The key is never a flag value

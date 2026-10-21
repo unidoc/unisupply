@@ -82,6 +82,22 @@ is listed in `grade.tree_rows` and named in `grade.deciding`.
 When rows score the same, a vulnerability beats upkeep, then the module itself, then a direct dependency, then the module
 path alphabetically. The result does not depend on input order.
 
+## Private modules
+
+A module matched by the private patterns is the customer's own code, and its name must not leave their boundary. The patterns are
+Go's `GOPRIVATE` syntax (comma-separated globs, matched with `module.MatchPrefixPatterns`: `acme.example` matches
+`acme.example/x` but not `acme.example.evil.com/x`). unisupply reads `GOPRIVATE` and `GONOPROXY` from the environment; the
+option `runner.Options.PrivatePatterns` and the flag `--private-modules` (a comma list) replace them when set.
+
+- **A private module path is in no request to any host and no facts-store call**: not the module proxy, not GitHub, not the Trust
+  Index, not OSV by module, not the maintainer, activity, fix-date or response-history lookups, not `facts.Store` (neither `Get`
+  nor `Put`). That includes the module itself when it is private. (The go command's own downloads follow `GOPRIVATE` by themselves.)
+- **Private modules are not graded on upkeep.** Their row is `not_assessed` and marked `private` (`grade.rows[].private`, and
+  `dependencies[].private` in the JSON), never missing: a private module does not make the grade Pending for "upkeep unread", and it is
+  never counted as "not archived". A note says how many were not looked up.
+- **Vulnerabilities for a private module are only what govulncheck finds from the public database**, which has none for a private
+  path. A private module is therefore never graded as "checked and clean": the result says it was not looked up.
+
 ## Pending
 
 A letter needs its checks. When a check that could change the letter did not run, the grade is **Pending**: there is no

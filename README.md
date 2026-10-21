@@ -452,6 +452,7 @@ The most frequently used flags:
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)                                                                     |
 | `--sbom-out`            | Also write the CycloneDX SBOM of the same scan to this file, whatever `--format` is (one scan, two outputs)          |
 | `--facts-url`           | Read module and advisory facts from a gorisk facts API (env `UNISUPPLY_FACTS_URL`). The key: env `UNISUPPLY_FACTS_KEY` or `--facts-key-file` (never a flag value) |
+| `--private-modules`     | Comma list of private module path patterns (GOPRIVATE syntax; replaces `GOPRIVATE`/`GONOPROXY`): never looked up, not graded on upkeep |
 | `--analysis-out`        | Also write the stored Analysis (JSON) of the same scan, for `runner.Grade` to re-grade later                         |
 | `--called-pass`         | When govulncheck's called pass runs: `auto` (default: only when it can change the letter), `always`, `never`         |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                                                                             |

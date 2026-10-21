@@ -132,6 +132,9 @@ type JSONDependency struct {
 	Module  string `json:"module"`
 	Version string `json:"version"`
 	Direct  bool   `json:"direct"`
+	// Private is true for a module matched by the private patterns (GOPRIVATE, --private-modules): it was not looked up, so it
+	// has no maintenance data and is not graded on upkeep. Never read its absence of data as "not archived".
+	Private bool `json:"private,omitempty"`
 	// Deprecated: the row's policy value and its coarse level, derived from the grade (see json_deprecated.go).
 	RiskScore *int   `json:"risk_score,omitempty"`
 	RiskLevel string `json:"risk_level"`
@@ -478,6 +481,7 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 			Module:         ds.Module,
 			Version:        ds.Version,
 			Direct:         ds.Direct,
+			Private:        rows[ds.Module].Private,
 			RiskScore:      rowScore(opts.Grade, rows[ds.Module], hasRow(rows, ds.Module)),
 			RiskLevel:      deprecatedLevel(rows[ds.Module].Letter),
 			TestOnly:       ds.IsTestOnly,
