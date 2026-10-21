@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/safego"
+	"github.com/unidoc/unisupply/pkg/facts"
 	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -112,6 +113,10 @@ type Options struct {
 	// Commit is the source commit of the tree being analysed, for a tree that is not a published version (Options.SelfVersion
 	// is empty). It is only recorded, in Analysis.Identity: unisupply does not read it from git.
 	Commit string
+
+	// Facts is the store Run and RunAnalysed read facts through when they grade (see Grade). Nil looks everything up. Analyse
+	// does not read it.
+	Facts facts.Store
 
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
@@ -219,7 +224,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	if err != nil {
 		return nil, err
 	}
-	return gradeAnalysis(ctx, an, st, nil, st.scanStart, opts)
+	return gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, opts)
 }
 
 // RunAnalysed is Run that also returns the Analysis it graded, made as Analyse makes it (the advisory fingerprint in its
@@ -235,7 +240,7 @@ func RunAnalysed(ctx context.Context, opts Options) (res *Result, an *Analysis, 
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err = gradeAnalysis(ctx, an, st, nil, st.scanStart, opts)
+	res, err = gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, opts)
 	if err != nil {
 		return nil, an, err
 	}

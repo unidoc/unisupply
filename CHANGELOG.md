@@ -156,6 +156,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`scan.go_version`** (the Go release the standard library was matched against) is always present once a scan started: when
   govulncheck's output does not say, the release unisupply gave it as `GOVERSION` is used.
 
+#### Read shared facts from gorisk's facts API
+
+- **`facts.HTTPStore`** (`facts.NewHTTPStore(base, key)`) is a read-only `facts.Store` over gorisk's shared-facts API
+  (`GET {base}/api/v1/facts/modules?path=&version=`, `/advisories/<id>`, `/fixes?module=&version=`), so a scan outside gorisk reads
+  what gorisk knows instead of looking it up. The key goes only in `Authorization: Bearer`, never in a URL, an error or a log.
+  A 404 is a miss; any other failure (401/403, 5xx, network, bad JSON) is a miss with the error returned, which unisupply ignores,
+  so the service being down never fails a scan; after a 401/403 no further request is made. `Retry-After` is honoured once
+  (up to 5 s, otherwise a miss). Requests time out after 10 s, send `User-Agent: unisupply/<version>`, never follow redirects,
+  and are cached in memory so a scan asks for a fact once. HTTPS is required unless the host is loopback. `Put*` do nothing:
+  a scan never writes to the shared facts, which keeps private module names out of them.
+- **CLI:** `--facts-url` (env `UNISUPPLY_FACTS_URL`) and the key from `UNISUPPLY_FACTS_KEY` or `--facts-key-file`. `--facts-key`
+  is refused (a flag value shows in the process list). Not combinable with `--offline`. `runner.Options.Facts` is the store
+  `Run`/`RunAnalysed` grade with; the scanners' disk caches stay underneath.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause

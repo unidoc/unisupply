@@ -762,3 +762,48 @@ func TestAnalysisOut_GradesAgainToTheSameResult(t *testing.T) {
 		}
 	}
 }
+
+func TestFactsStoreFor(t *testing.T) {
+	t.Setenv("UNISUPPLY_FACTS_URL", "")
+	t.Setenv("UNISUPPLY_FACTS_KEY", "")
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("gk_abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := factsStoreFor(&runConfig{}); s != nil || err != nil {
+		t.Errorf("no URL: %v %v", s, err)
+	}
+	if _, err := factsStoreFor(&runConfig{factsKeyFlag: "gk_abc", factsURL: "https://gorisk.dev"}); err == nil || strings.Contains(err.Error(), "gk_abc") {
+		t.Errorf("the key as a flag value must be refused without echoing it: %v", err)
+	}
+	if _, err := factsStoreFor(&runConfig{factsURL: "https://gorisk.dev"}); err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Errorf("no key: %v", err)
+	}
+	if s, err := factsStoreFor(&runConfig{factsURL: "https://gorisk.dev", factsKeyFile: keyFile}); s == nil || err != nil {
+		t.Errorf("key file: %v %v", s, err)
+	}
+	t.Setenv("UNISUPPLY_FACTS_URL", "https://gorisk.dev")
+	t.Setenv("UNISUPPLY_FACTS_KEY", "gk_env")
+	if s, err := factsStoreFor(&runConfig{}); s == nil || err != nil {
+		t.Errorf("env: %v %v", s, err)
+	}
+	if _, err := factsStoreFor(&runConfig{offlineMode: true}); err == nil {
+		t.Error("offline with a facts URL must be refused")
+	}
+	t.Setenv("UNISUPPLY_FACTS_URL", "http://gorisk.dev")
+	if _, err := factsStoreFor(&runConfig{}); err == nil {
+		t.Error("plain http to a non-loopback host must be refused")
+	}
+}
+
+func TestFactsKeyFlagIsRefusedByTheBinary(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/e\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b, err := exec.Command(bin, "--progress", "none", "--facts-url", "https://gorisk.dev", "--facts-key", "gk_topsecret", dir).CombinedOutput()
+	if exitCodeOf(err) != 1 || !strings.Contains(string(b), "refused") || strings.Contains(string(b), "gk_topsecret") {
+		t.Errorf("exit %d: %s", exitCodeOf(err), b)
+	}
+}

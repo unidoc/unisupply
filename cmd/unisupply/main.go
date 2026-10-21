@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/facts"
 	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/policy"
@@ -45,6 +46,9 @@ func main() {
 		output                 string
 		sbomOut                string
 		analysisOut            string
+		factsURL               string
+		factsKeyFlag           string
+		factsKeyFile           string
 		verbose                bool
 		noColor                bool
 		moduleVersion          string
@@ -75,6 +79,10 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
 	flag.StringVar(&analysisOut, "analysis-out", "", "Also write the stored Analysis (JSON) of the same scan to this file; runner.Grade grades it again later without the module's files")
+	flag.StringVar(&factsURL, "facts-url", "", "Read module and advisory facts from a gorisk facts API (e.g. https://gorisk.dev) instead of looking them up (env UNISUPPLY_FACTS_URL); the key comes from UNISUPPLY_FACTS_KEY or --facts-key-file")
+	flag.StringVar(&factsKeyFile, "facts-key-file", "", "File holding the facts API key (gk_...); the env var UNISUPPLY_FACTS_KEY works too")
+	flag.StringVar(&factsKeyFlag, "facts-key", "", "Refused: a flag value shows in the process list. Use UNISUPPLY_FACTS_KEY or --facts-key-file")
+	_ = flag.CommandLine.MarkHidden("facts-key")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
@@ -137,6 +145,9 @@ func main() {
 		output:                 output,
 		sbomOut:                sbomOut,
 		analysisOut:            analysisOut,
+		factsURL:               factsURL,
+		factsKeyFlag:           factsKeyFlag,
+		factsKeyFile:           factsKeyFile,
 		verbose:                verbose,
 		noColor:                noColor,
 		moduleVersion:          moduleVersion,
@@ -197,6 +208,9 @@ type runConfig struct {
 	output                 string
 	sbomOut                string
 	analysisOut            string
+	factsURL               string
+	factsKeyFlag           string
+	factsKeyFile           string
 	verbose                bool
 	noColor                bool
 	moduleVersion          string
@@ -255,6 +269,10 @@ func run(cfg *runConfig) error {
 	case "", "strict", "moderate":
 	default:
 		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
+	}
+	factsStore, err := factsStoreFor(cfg)
+	if err != nil {
+		return err
 	}
 	if cfg.analysisOut != "" && (cfg.analysisOut == cfg.output || cfg.analysisOut == cfg.sbomOut) {
 		return fmt.Errorf("--analysis-out names the same file as --output or --sbom-out (%s): it would overwrite it", cfg.analysisOut)
@@ -342,6 +360,7 @@ func run(cfg *runConfig) error {
 		GradeStdlib:            cfg.gradeStdlib,
 		StrictArchivedStatus:   cfg.strictArchived,
 		CalledPass:             calledPassMode,
+		Facts:                  factsStore,
 	}
 	var scanResult *runner.Result
 	var analysis *runner.Analysis
@@ -392,6 +411,40 @@ func run(cfg *runConfig) error {
 		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 	}
 	return nil
+}
+
+// factsStoreFor is the facts store the flags and environment ask for: nil without a facts URL. The key is never a flag value
+// (it would show in the process list); it comes from --facts-key-file or UNISUPPLY_FACTS_KEY.
+func factsStoreFor(cfg *runConfig) (facts.Store, error) {
+	if cfg.factsKeyFlag != "" {
+		return nil, errors.New("--facts-key is refused: a flag value shows in the process list; use UNISUPPLY_FACTS_KEY or --facts-key-file")
+	}
+	base := cfg.factsURL
+	if base == "" {
+		base = strings.TrimSpace(os.Getenv("UNISUPPLY_FACTS_URL"))
+	}
+	if base == "" {
+		return nil, nil
+	}
+	if cfg.offlineMode {
+		return nil, errors.New("--offline cannot be combined with a facts URL: the facts API is a network service")
+	}
+	key := strings.TrimSpace(os.Getenv("UNISUPPLY_FACTS_KEY"))
+	if cfg.factsKeyFile != "" {
+		b, err := os.ReadFile(cfg.factsKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading --facts-key-file: %w", err)
+		}
+		key = strings.TrimSpace(string(b))
+	}
+	if key == "" {
+		return nil, errors.New("a facts URL needs its API key: set UNISUPPLY_FACTS_KEY or --facts-key-file")
+	}
+	store, err := facts.NewHTTPStore(base, key)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 // writeAnalysisFile writes the Analysis as JSON, for --analysis-out.
