@@ -87,6 +87,47 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   could not run) and `direct_only` the edges are the main module's requirements only. In Go: `resolver.Graph.Edges()` and
   `resolver.Graph.Source`.
 
+#### Analysis and grading are separate: `runner.Analyse` and `runner.Grade`
+
+- **`runner.Analyse(ctx, opts) (*runner.Analysis, error)`** does what depends on the module's code and not on the day: the
+  go.mod, the build list and requirement graph with the test-only / in-build / platform classification, the go.mod and
+  go.sum audit (`go mod verify` included), the CI/CD audit, and govulncheck's findings with their tiers, call paths, and the
+  severity and known-exploited status they had when it ran. It is JSON-serialisable (`schema_version`, `identity`,
+  `analysed_at`, `go_mod`, `graph`, `vulnerabilities`, `vulnerability_scan`, ...) and meant to be stored.
+  `Analysis.Complete()` says whether it can be kept as final (the scan ran and was not cut short) and `Analysis.Status()`
+  gives its machine-readable state.
+- **`Analysis.Identity`** is everything it depends on: module version or commit (`Options.SelfVersion`, the new
+  `Options.Commit`), the SHA-256 of go.mod and go.sum, the Go release, the govulncheck and unisupply versions, the called-pass
+  setting, and an **advisory fingerprint** of the build list (and the standard library) from the vulnerability database's
+  module index. `Identity.Key()` is one hex string for all of it; an analysis whose key has not changed is still valid.
+  If the index cannot be read the fingerprint is empty and the analysis is still made.
+- **`runner.Grade(ctx, analysis, facts, date, opts) (*runner.Result, error)`** applies Grading v2 to an analysis with the facts
+  and the date of the day: maintenance status (archived, deprecated, last release and activity), fix dates, severity and
+  known-exploited status, the module's own advisories, and the grade. It never changes the analysis, so one stored analysis
+  is graded every day, and it does not read the module's files. The result is the same `Result` that `Run` returns.
+- **The CLI and `runner.Run` are `Analyse` followed by `Grade`**, and give the same output as before (checked on real
+  modules, JSON and text, against the previous build). One difference in the progress output on stderr: the CI/CD audit
+  stage now runs before the maintenance stages, not after them. `Run` does not ask for the advisory fingerprint, so the CLI
+  makes no extra request.
+- **`resolver.Graph`, `resolver.Dependency` and `parser.GoMod` have JSON tags** (snake_case) so an analysis can be stored.
+
+#### A facts store behind an interface
+
+- **`facts.Store`** (new package `pkg/facts`) is where unisupply reads what is known about a module or an advisory outside
+  its code: module status (`facts.Module`: the maintenance record), advisories (`facts.Advisory`: severity, known-exploited
+  status) and fix releases (`facts.Fix`: release date, the Go the fix needs), each with a `FetchedAt`. `facts.Memory` is the
+  in-process implementation, `facts.None` the empty one; gorisk will plug in a Postgres-backed one. `facts.Policy` says how old
+  a fact may be (`DefaultPolicy`: status and advisories a day, fix dates thirty days), measured to the grade's date.
+- **`Grade` reads through it**: a fresh module status is used instead of a lookup (and the maintainer analysis, which the
+  grade does not use, is made only for modules that were not in the store), a fix release in the store saves the proxy
+  requests, and a severity or known-exploited status in the store that is newer than the analysis replaces the analysis's.
+  What a lookup finds is written back (only whole answers: a status whose archived flag could not be read is not stored).
+  With a nil store `Grade` and `Run` look everything up as before; the CLI passes none, and keeps the per-request disk caches the
+  scanners already have.
+- **Not done:** reading the archived flag from deps.dev / OpenSSF Scorecard before GitHub. deps.dev has no archived flag, and
+  Scorecard's snapshot (two months old when checked) can only say "archived" in free text; the reasons are written as a TODO
+  in `pkg/facts`. Severities already come from OSV first, and activity from the module proxy first.
+
 #### Which modules' advisories changed: `pkg/vulndb`
 
 - **`vulndb.Client.ChangedModules(ctx, since)`** reads the Go vulnerability database's index

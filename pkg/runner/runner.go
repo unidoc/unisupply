@@ -5,14 +5,16 @@
 // package to run the same scan in-process, without shelling out to the
 // unisupply binary. gorisk (UniDoc's continuous-scanning service) is the
 // first such caller.
+//
+// Run is two steps that can also be called apart: Analyse does what depends on the module's code (the build list, the
+// vulnerability scan) and returns an Analysis that can be stored, and Grade applies Grading v2 to it with the facts and the
+// date of the day, so that one analysis serves a grade every day.
 package runner
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"maps"
-	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -21,9 +23,7 @@ import (
 
 	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/grade"
-	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
-	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
@@ -108,6 +108,10 @@ type Options struct {
 	// imported pass existed; scanner.CalledPassNever runs the imported pass only.
 	CalledPass scanner.CalledPassMode
 
+	// Commit is the source commit of the tree being analysed, for a tree that is not a published version (Options.SelfVersion
+	// is empty). It is only recorded, in Analysis.Identity: unisupply does not read it from git.
+	Commit string
+
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
 	// time.Now().UTC().Truncate(24*time.Hour) if zero — the same
@@ -190,6 +194,10 @@ var scanVulns = scanner.ScanVulnsWithOptions
 // len(result.Graph.Dependencies) == 0 themselves, since whether to skip
 // writing output is a presentation decision, not a scanning one.
 //
+// Run is Analyse followed by Grade at the scan date, with the facts looked up as they always were: what depends on the code
+// (the build list, the vulnerability scan) is analysed, and what depends on the day (maintenance status, fix dates, the
+// grade) is graded. A caller that stores analyses calls the two itself.
+//
 // Progress events go through progress.From(ctx): pass a context wrapped
 // with progress.WithReporter for CLI-style stage output; a plain context
 // (as any library caller will pass) gets progress.From's built-in no-op
@@ -206,329 +214,11 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 			res, runErr = nil, panicScanError(r)
 		}
 	}()
-	// Timeout is passed through unchanged: the scanner clients map 0 to their
-	// own default, exactly as the CLI's --timeout 0 always has.
-	timeout := opts.Timeout
-	scanStart := opts.Now
-	if scanStart.IsZero() {
-		scanStart = time.Now().UTC().Truncate(24 * time.Hour)
-	}
-
-	rep := progress.From(ctx)
-	// Offline mode is process-wide (pkg/offline swaps http.DefaultTransport), so
-	// read the same switch the vulnerability scanner, resolver and scorer read.
-	// A caller that wants an offline scan calls offline.Enable() before Run.
-	offlineMode := offline.Enabled()
-
-	if opts.RequireGithubToken && opts.GithubToken == "" {
-		return nil, fmt.Errorf("%w: no GitHub token was provided", ErrGithubTokenPrecondition)
-	}
-
-	rep.Stage("Parsing go.mod")
-	gomodPath, err := parser.FindGoMod(opts.Path)
+	an, st, err := analyse(ctx, opts, false)
 	if err != nil {
-		return nil, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoGoMod, Err: err}
+		return nil, err
 	}
-	gomod, err := parser.ParseGoMod(gomodPath)
-	if err != nil {
-		return nil, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonUnknown, Err: err}
-	}
-	projectDir := filepath.Dir(gomodPath)
-	rep.Done("%s", gomodPath)
-
-	// Audit replace/exclude directives (pure go.mod analysis, no network).
-	rep.Stage("Auditing go.mod directives")
-	integrityScanner := scanner.NewIntegrityScanner()
-	integrityScanner.Offline = offlineMode
-	integrityReport, integrityClasses := integrityScanner.ScanDirectives(gomod)
-	rep.Done("%d replace, %d exclude (%d redirect)", integrityReport.ReplaceCount, integrityReport.ExcludeCount, integrityReport.RedirectCount)
-
-	rep.Stage("Resolving dependency graph")
-	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
-	if err != nil {
-		// Resolve fails only when go.mod cannot be read, and it was just read above. The package errors of go list
-		// ("build constraints exclude all Go files in ...") come back as a note, so build_constraints and cgo_dependency
-		// are decided by the vulnerability scan alone.
-		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err(), projectDir)
-	}
-	for _, w := range resolverWarnings {
-		rep.Warn("%s", w)
-	}
-	for _, n := range graph.Notes {
-		rep.Step("%s", n)
-	}
-	rep.Done("%d modules", len(graph.Dependencies))
-
-	// Validate the token after Resolve, so a bad path or an empty project
-	// reports its own error first, and before any scanner is constructed,
-	// since a rejected token is cleared and the scanners below must get the
-	// cleared value. An empty graph uses no token, so it is only probed when
-	// the caller made a valid token a precondition.
-	tokenStatus := tokenCheck{token: opts.GithubToken}
-	if len(graph.Dependencies) > 0 || opts.RequireGithubToken || opts.SelfVersion != "" {
-		tokenStatus, err = checkGitHubToken(ctx, opts.GithubToken, opts.RequireGithubToken, offlineMode, timeout)
-		if err != nil {
-			return nil, err
-		}
-	}
-	githubToken := tokenStatus.token
-
-	if len(graph.Dependencies) == 0 {
-		// No dependency means no per-dependency scanner has anything to do, but the standard library is part of every
-		// build: govulncheck still runs, and its standard-library advisories are listed (with the Go release they were
-		// matched against and the scan block). They decide the letter only when the caller grades the standard library
-		// (Options.GradeStdlib). A scan that failed is Pending only then; otherwise it is a warning and the letter is the
-		// module's own row.
-		rep.Stage("Scanning vulnerabilities (govulncheck)")
-		var scanInfo scanner.ScanInfo
-		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
-		if verr != nil && !saidByWarnings(vulnWarnings, verr) {
-			rep.Warn("Vulnerability scan failed: %s", errString(verr))
-		}
-		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
-		for _, w := range vulnWarnings {
-			rep.Warn("%s", w)
-		}
-		rep.Done("%d standard library advisories", len(vulns["stdlib"]))
-		resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
-		stdlibVulns := takeStdlibVulns(vulns)
-
-		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
-		// real empty-graph score looks like.
-		projectScore := scorer.ScoreAll(scorer.ScoreInput{
-			Graph:               graph,
-			Now:                 scanStart,
-			VulnScanUnavailable: opts.GradeStdlib && emptyVulnErr != nil,
-		})
-		if emptyVulnErr != nil {
-			// not graded (no --grade-stdlib): the failed scan is said, but the letter is the module's own row
-			projectScore.Warnings = appendScanFailure(projectScore.Warnings, vulnWarnings, emptyVulnErr)
-		}
-		// a failed scan is a missing check only when its result takes part in the grade
-		scanMissing := emptyVulnErr
-		if !opts.GradeStdlib {
-			scanMissing = nil
-		}
-		missingCode, missingKind := scanFailureCode(scanMissing)
-		g := gradeAll(ctx, &gradeRun{
-			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
-			Timeout: timeout, ScanStart: scanStart, ProjectDir: projectDir,
-			Stdlib:      gradedStdlib(&opts, stdlibVulns),
-			VulnScanned: scanMissing == nil, VulnScanReason: errString(scanMissing), StdlibScanned: emptyVulnErr == nil,
-			VulnScanCode: missingCode, VulnScanKind: missingKind,
-			KEVStaleSince: kevStaleSince(&scanInfo),
-		})
-		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
-			StdlibVulns: stdlibVulns, VulnScanErr: emptyVulnErr,
-			ScanInfo: scanInfoPtr(&scanInfo), KEVStaleSince: kevStaleSince(&scanInfo),
-			ScanStatus: scanStatusOf(g, emptyVulnErr, false)}, nil
-	}
-
-	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
-	rep.Stage("Auditing pseudo-version pins")
-	pseudoVersionClasses := integrityScanner.ScanPseudoVersions(graph, integrityReport)
-	rep.Done("%d pseudo-version pins", integrityReport.PseudoVersionCount)
-
-	rep.Stage("Verifying go.sum (go mod verify)")
-	integrityScanner.ScanGoSum(gomodPath, gomod, graph, integrityReport)
-	integrityScanner.VerifyGoSum(ctx, gomodPath, integrityReport)
-	rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
-
-	rep.Stage("Scanning vulnerabilities (govulncheck)")
-	var scanInfo scanner.ScanInfo
-	vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
-	// The scanner reports availability directly: a scan that did not run must
-	// not read as clean, whether it came back with an error or only a warning.
-	vulnScanUnavailable := !vulnScanned
-	if err != nil && !saidByWarnings(vulnWarnings, err) {
-		rep.Warn("Vulnerability scan failed: %s", errString(err))
-	}
-	vulnScanErr := vulnScanFailure(err, vulnScanned, vulnWarnings)
-	for _, w := range vulnWarnings {
-		rep.Warn("%s", w)
-	}
-	rep.Done("%d affected modules", len(vulns))
-
-	// The date each fix was released (from the module proxy), so a finding can say whether it is inside the response
-	// window. Best effort: a failed lookup leaves the advisory's own date, or none.
-	resolveAllFixDates(ctx, scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}, fixDateStageTimeout, vulns)
-
-	rep.Stage("Checking maintenance health")
-	maintScanner := scanner.NewMaintenanceScanner(timeout)
-	maintScanner.ScanStart = scanStart
-	maintenance, err := maintScanner.ScanAll(ctx, graph)
-	var maintWarnings []string
-	if err != nil {
-		if offlineMode {
-			// The scorer emits the authoritative report warning for this.
-			rep.Warn("%v", err)
-		} else {
-			// The wrapped error embeds the module proxy URL (a module path),
-			// so it goes to the progress reporter only, not into the report.
-			maintWarnings = append(maintWarnings,
-				"maintenance lookups failed for some modules (module proxy unreachable or erroring) — see stderr for the underlying error")
-			rep.Warn("Some maintenance checks failed: %v", err)
-		}
-	}
-	rep.Done("")
-
-	if githubToken == "" && !offlineMode {
-		// 60 unauthenticated req/hr ÷ ~3 API calls per dep ≈ 20 deps before truncation
-		if n := scanner.CountGitHubDeps(graph); n > 20 {
-			// A rejected token was cleared above, so the token is empty here
-			// too; "unset" would tell that user to set a token they did set.
-			reason := "GITHUB_TOKEN is unset"
-			if tokenStatus.rejected {
-				reason = "the GitHub token was rejected (401)"
-			}
-			rep.Warn("found %d GitHub-hosted deps but %s — maintainer data may be truncated; see https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", n, reason)
-		}
-	}
-
-	rep.Stage("Analyzing maintainers (GitHub API)")
-	maintainerScanner := scanner.NewMaintainerScanner(timeout, githubToken)
-	maintainerScanner.ScanStart = scanStart
-	maintainerScanner.TokenRejected = tokenStatus.rejected
-	maintainers := maintainerScanner.ScanAll(ctx, graph)
-	rep.Done("")
-
-	// Archived status comes from the repository each module is published from, so it needs the maintainer scan's
-	// repository cache and runs before the activity scan (which skips archived modules).
-	if err := maintScanner.ScanArchived(ctx, maintenance, maintainerScanner); err != nil {
-		maintWarnings = append(maintWarnings, err.Error())
-		rep.Warn("%v", err)
-	}
-
-	// Activity reads the default branch the maintainer scan found, so it runs
-	// after it.
-	rep.Stage("Checking default-branch activity")
-	commitFallback := activityFallback(githubToken, offlineMode, maintainerScanner)
-	if err := maintScanner.ScanActivity(ctx, graph, maintenance, maintainers, commitFallback); err != nil {
-		maintWarnings = append(maintWarnings, err.Error())
-		rep.Warn("%v", err)
-	}
-	rep.Done("")
-
-	rep.Stage("Detecting typosquats")
-	typosquatScanner := scanner.NewTyposquatScanner()
-	typosquats := typosquatScanner.ScanAll(ctx, graph)
-	rep.Done("%d suspicious", len(typosquats))
-
-	rep.Stage("Scoring resilience")
-	resilienceScanner := scanner.NewResilienceScanner(timeout)
-	resilienceScanner.ScanStart = scanStart
-	resilience := resilienceScanner.ScanAll(ctx, graph, maintainers)
-	rep.Done("")
-
-	var trustIndex map[string]*scanner.TrustIndexEntry
-	trustClient, err := scanner.NewTrustIndexClient(opts.TrustIndexURL, timeout, opts.TrustIndexAllowPrivate)
-	if err != nil {
-		return nil, fmt.Errorf("trust index: %w", err)
-	}
-	if trustClient != nil {
-		rep.Stage("Querying Trust Index")
-		var tiErr error
-		trustIndex, tiErr = trustClient.LookupAll(ctx, graph)
-		if tiErr != nil {
-			rep.Warn("Trust Index lookup failed: %v", tiErr)
-		}
-		rep.Done("%d entries", len(trustIndex))
-		scanner.EnrichMaintainersFromTrustIndex(maintainers, trustIndex)
-	}
-
-	rep.Stage("Computing risk scores")
-	projectScore := scorer.ScoreAll(scorer.ScoreInput{
-		Graph:         graph,
-		Vulns:         vulns,
-		Maintenance:   maintenance,
-		Maintainers:   maintainers,
-		Typosquats:    typosquats,
-		Resilience:    resilience,
-		TrustIndex:    trustIndex,
-		Integrity:     integrityClasses,
-		PseudoVersion: pseudoVersionClasses,
-		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
-
-		VulnScanUnavailable: vulnScanUnavailable,
-
-		Now: scanStart,
-	})
-	// Resolver degradations change the numbers, so they belong in the report.
-	// So does the token outcome: under --progress none, or for a library
-	// caller with no reporter, the report is the only place it shows.
-	if tokenStatus.warning != "" {
-		projectScore.Warnings = append(projectScore.Warnings, tokenStatus.warning)
-	}
-	projectScore.Warnings = append(projectScore.Warnings, resolverWarnings...)
-	projectScore.Warnings = appendScanFailure(projectScore.Warnings, vulnWarnings, vulnScanErr)
-	projectScore.Warnings = append(projectScore.Warnings, maintWarnings...)
-	// Resolver notes are informational and kept apart from the warnings, so a
-	// report does not present them as a limitation of the results.
-	projectScore.Notes = append(projectScore.Notes, graph.Notes...)
-	rep.Done("")
-
-	var ciReport *scanner.CIReport
-	if opts.ScanWorkflows || opts.ScanCI {
-		rep.Stage("Auditing CI/CD pipelines")
-		ciScanner := scanner.NewCIScanner()
-
-		wfPath := opts.WorkflowPath
-		if wfPath == "" {
-			wfPath = ".github/workflows"
-		}
-		if !filepath.IsAbs(wfPath) {
-			wfPath = filepath.Join(projectDir, wfPath)
-		}
-
-		ciReport, err = ciScanner.ScanWorkflows(ctx, wfPath)
-		if err != nil {
-			rep.Warn("Workflow scanning failed: %v", err)
-		}
-
-		if opts.ScanCI && ciReport != nil {
-			buildFindings := ciScanner.ScanBuildFiles(ctx, projectDir)
-			ciReport.BuildFindings = buildFindings
-			ciReport.TotalFindings += len(buildFindings)
-		}
-		rep.Done("")
-	}
-
-	stdlibVulns := takeStdlibVulns(vulns)
-
-	interrupted := ctx.Err() != nil
-	if interrupted {
-		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
-	}
-
-	vulnCode, vulnKind := scanFailureCode(vulnScanErr)
-	gradeResult := gradeAll(ctx, &gradeRun{
-		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
-		Timeout: timeout, ScanStart: scanStart,
-		ProjectDir: projectDir,
-		Vulns:      vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
-		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
-		VulnScanCode: vulnCode, VulnScanKind: vulnKind,
-		StdlibScanned: vulnScanErr == nil, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
-	})
-
-	return &Result{
-		GoMod:           gomod,
-		Graph:           graph,
-		ProjectScore:    projectScore,
-		Grade:           gradeResult,
-		CIReport:        ciReport,
-		StdlibVulns:     stdlibVulns,
-		IntegrityReport: integrityReport,
-		VulnScanErr:     vulnScanErr,
-		ScanInfo:        scanInfoPtr(&scanInfo),
-		KEVStaleSince:   kevStaleSince(&scanInfo),
-		Interrupted:     interrupted,
-		ScanStatus:      scanStatusOf(gradeResult, vulnScanErr, interrupted),
-
-		GithubTokenRejected: tokenStatus.rejected,
-		Maintainers:         maintainers,
-		Typosquats:          typosquats,
-	}, nil
+	return gradeAnalysis(ctx, an, st, nil, st.scanStart, opts)
 }
 
 // scanStatusOf is the status of a finished Run. A vulnerability scan that failed is a failed scan even when the grade does
@@ -540,6 +230,15 @@ func scanStatusOf(g *grade.Result, vulnErr error, interrupted bool) scanner.Scan
 		in.PendingCheck, in.PendingReason = g.Pending.Check, g.Pending.Reason
 	}
 	return scanner.ScanStatusOf(in)
+}
+
+// vulnScanOptions is what the vulnerability scan runs with: the credentials, the called-pass setting and the grading
+// code's test for when the called pass can matter.
+func vulnScanOptions(opts *Options, githubToken string, info *scanner.ScanInfo) scanner.VulnScanOptions {
+	return scanner.VulnScanOptions{
+		GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: info,
+		CalledPass: opts.CalledPass, NeedsCalledPass: calledPassTest(opts.GradeStdlib),
+	}
 }
 
 // calledPassTest is grade.CalledPassCanChangeLetter for this scan. The standard library's findings are listed but not graded
@@ -557,15 +256,6 @@ func calledPassTest(gradeStdlib bool) scanner.NeedsCalledPassFunc {
 			reason += "; the standard library's advisories are listed, not graded, and are shown as imported"
 		}
 		return needed, reason
-	}
-}
-
-// vulnScanOptions is what the vulnerability scan runs with: the credentials, the called-pass setting and the grading
-// code's test for when the called pass can matter.
-func vulnScanOptions(opts *Options, githubToken string, info *scanner.ScanInfo) scanner.VulnScanOptions {
-	return scanner.VulnScanOptions{
-		GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: info,
-		CalledPass: opts.CalledPass, NeedsCalledPass: calledPassTest(opts.GradeStdlib),
 	}
 }
 

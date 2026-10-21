@@ -224,9 +224,11 @@ type gradeRun struct {
 	Token     string
 	Timeout   time.Duration
 	ScanStart time.Time
-	// ProjectDir is the scanned module's directory: the Go toolchain version the standard library was graded at is
-	// asked of the go command there.
-	ProjectDir string
+	// Toolchain is the Go release the scan ran with (Analysis.ToolchainVersion): the standard library was graded at it.
+	Toolchain string
+
+	// Facts is where the module's own status is read first and written back; nil without a store.
+	Facts *factReader
 
 	Vulns       map[string][]scanner.Vulnerability
 	Stdlib      []scanner.Vulnerability
@@ -311,7 +313,7 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 	if r.StdlibScanned {
 		// recorded whenever the standard library was scanned, whether or not it had findings: a clean result holds for this
 		// Go release only
-		in.StdlibVersion = scanToolchainVersion(ctx, r.ProjectDir)
+		in.StdlibVersion = r.Toolchain
 		in.Checks.StdlibVersion = in.StdlibVersion
 		in.Checks.StdlibGraded = r.Opts.GradeStdlib
 	}
@@ -349,30 +351,38 @@ func assessSelf(ctx context.Context, r *gradeRun, checks *grade.Checks) grade.Ro
 	mini := &resolver.Graph{Root: r.GoMod.ModulePath, Dependencies: map[string]*resolver.Dependency{
 		r.GoMod.ModulePath: {Module: parser.Module{Path: r.GoMod.ModulePath, Version: r.Opts.SelfVersion}, Direct: true},
 	}}
-	ms := scanner.NewMaintenanceScanner(r.Timeout)
-	ms.ScanStart = r.ScanStart
-	maint, err := ms.ScanAll(ctx, mini)
-	info := maint[r.GoMod.ModulePath]
-	if err != nil || info == nil {
-		checks.SelfStatusFailed = true
-		checks.SelfStatusReason = selfStatusFailureReason(r.GoMod.ModulePath)
-		row.Upkeep.Missing = true
-	} else {
-		mr := scanner.NewMaintainerScanner(r.Timeout, r.Token)
-		mr.ScanStart = r.ScanStart
-		maintainers := mr.ScanAll(ctx, mini)
-		if aerr := ms.ScanArchived(ctx, maint, mr); aerr != nil {
-			checks.SelfStatusFailed = true
-			checks.SelfStatusReason = "archived status could not be read: " + errString(aerr)
-		}
-		_ = ms.ScanActivity(ctx, mini, maint, maintainers, activityFallback(r.Token, offline.Enabled(), mr))
+	if info, ok := r.Facts.module(ctx, r.GoMod.ModulePath, r.Opts.SelfVersion); ok {
+		// a fresh status from the facts store: nothing to look up
 		row.Upkeep = upkeepOf(info)
-		if row.Upkeep.Missing {
+	} else {
+		ms := scanner.NewMaintenanceScanner(r.Timeout)
+		ms.ScanStart = r.ScanStart
+		maint, err := ms.ScanAll(ctx, mini)
+		info := maint[r.GoMod.ModulePath]
+		if err != nil || info == nil {
 			checks.SelfStatusFailed = true
-			checks.SelfStatusReason = "archived status could not be read"
-			if info != nil && info.ModCheckFailed {
-				checks.SelfStatusReason = "its go.mod notices (deprecation, retraction) could not be read"
+			checks.SelfStatusReason = selfStatusFailureReason(r.GoMod.ModulePath)
+			row.Upkeep.Missing = true
+		} else {
+			mr := scanner.NewMaintainerScanner(r.Timeout, r.Token)
+			mr.ScanStart = r.ScanStart
+			maintainers := mr.ScanAll(ctx, mini)
+			if aerr := ms.ScanArchived(ctx, maint, mr); aerr != nil {
+				checks.SelfStatusFailed = true
+				checks.SelfStatusReason = "archived status could not be read: " + errString(aerr)
 			}
+			_ = ms.ScanActivity(ctx, mini, maint, maintainers, activityFallback(r.Token, offline.Enabled(), mr))
+			row.Upkeep = upkeepOf(info)
+			if row.Upkeep.Missing {
+				checks.SelfStatusFailed = true
+				checks.SelfStatusReason = "archived status could not be read"
+				if info != nil && info.ModCheckFailed {
+					checks.SelfStatusReason = "its go.mod notices (deprecation, retraction) could not be read"
+				}
+			}
+		}
+		if !checks.SelfStatusFailed {
+			r.Facts.putModule(ctx, r.GoMod.ModulePath, r.Opts.SelfVersion, info)
 		}
 	}
 
