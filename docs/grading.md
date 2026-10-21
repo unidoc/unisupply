@@ -268,4 +268,5 @@ worse), and with a looser maximum it passes with a warning naming the number of 
 still contains them is rejected. See [examples/policy-custom.md](../examples/policy-custom.md) for every policy field.
 
 The exit code reflects the grade only when a policy is given (`--policy` or `--policy-preset`): without one, a grade of
-F still exits 0.
+F still exits 0. A scan that failed or was interrupted exits 4 after writing its report (`scan_status.status` `failed` or
+`interrupted`, the typed reason in `scan_status.reason`); a policy violation (2) takes precedence.

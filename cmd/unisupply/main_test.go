@@ -546,3 +546,151 @@ func TestNoGoMod_PrintsTheCauseOnly(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
+
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
+
+// With a JSON report asked for, a scan that could not start still leaves the typed reason as the whole JSON, next to the
+// unchanged error line and exit code 1. Other formats write nothing, as before.
+func TestNoGoMod_JSONCarriesTheTypedReason(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.json")
+
+	cmd := exec.Command(bin, "--progress", "none", "-f", "json", "-o", out, dir)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if code := exitCodeOf(cmd.Run()); code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if want := "Error: no go.mod found in " + dir + "\n"; stderr.String() != want {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("the JSON failure was not written: %v", err)
+	}
+	var got struct {
+		Tool       string `json:"tool"`
+		ScanStatus struct {
+			Status, Reason, Kind string
+		} `json:"scan_status"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("%v\n%s", err, raw)
+	}
+	if got.Tool != "unisupply" || got.ScanStatus.Status != "failed" || got.ScanStatus.Reason != "no_go_mod" || got.ScanStatus.Kind != "permanent" || !strings.Contains(got.Error, "no go.mod found") {
+		t.Errorf("%s", raw)
+	}
+
+	// text: nothing is written
+	out2 := filepath.Join(dir, "out.txt")
+	cmd = exec.Command(bin, "--progress", "none", "-o", out2, dir)
+	_ = cmd.Run()
+	if _, err := os.Stat(out2); err == nil {
+		t.Error("a text report was written for a scan that could not start")
+	}
+}
+
+// One scan, two outputs: --sbom-out writes the CycloneDX SBOM next to whatever --format wrote. The scan here is offline, so the
+// grade is Pending and the status "pending", which is not a failure (exit 0). The JSON carries the graph edges, the status and
+// the Go release.
+func TestSBOMOut_WritesBothOutputsFromOneScan(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/app\n\ngo 1.25\n\nrequire example.com/dep v1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, sbom := filepath.Join(dir, "r.json"), filepath.Join(dir, "sbom.json")
+
+	cmd := exec.Command(bin, "--progress", "none", "--offline", "--direct-only", "-f", "json", "-o", out, "--sbom-out", sbom, dir)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, b)
+	}
+	var rep struct {
+		ScanStatus struct{ Status, Reason string } `json:"scan_status"`
+		Graph      struct {
+			Root   string `json:"root"`
+			Source string `json:"source"`
+			Edges  []struct{ From, To string }
+		} `json:"dependency_graph"`
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.ScanStatus.Status != "pending" || rep.Graph.Root != "example.com/app" || rep.Graph.Source != "direct_only" || len(rep.Graph.Edges) != 1 || rep.Graph.Edges[0].To != "example.com/dep" {
+		t.Errorf("report = %+v\n%s", rep, raw)
+	}
+	var bom struct {
+		BOMFormat  string `json:"bomFormat"`
+		Components []struct{ Name string }
+	}
+	raw, err = os.ReadFile(sbom)
+	if err != nil {
+		t.Fatalf("the SBOM was not written: %v", err)
+	}
+	if err := json.Unmarshal(raw, &bom); err != nil || bom.BOMFormat != "CycloneDX" || len(bom.Components) == 0 {
+		t.Errorf("SBOM = %v %+v", err, bom)
+	}
+
+	// the same file for both would overwrite the report: refused before the scan
+	cmd = exec.Command(bin, "--progress", "none", "--offline", "-f", "json", "-o", out, "--sbom-out", out, dir)
+	b, err := cmd.CombinedOutput()
+	if exitCodeOf(err) != 1 || !strings.Contains(string(b), "same file") {
+		t.Errorf("exit %d, output %q", exitCodeOf(err), b)
+	}
+}
+
+// Exit code 4: the scan failed, and the report was still written, with the typed reason in scan_status. The fixture needs a
+// go.sum entry that is not there, and the go command may not add it.
+func TestExitCode4_FailedScanWithAReport(t *testing.T) {
+	bin := buildBinary(t)
+	fixture := filepath.Join("..", "..", "test", "integration", "testdata", "scanerr", "missing_gosum")
+	out, sbom := filepath.Join(t.TempDir(), "r.json"), filepath.Join(t.TempDir(), "s.json")
+
+	cmd := exec.Command(bin, "--progress", "none", "--direct-only", "--called-pass", "always", "-f", "json", "-o", out, "--sbom-out", sbom, fixture)
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=readonly", "GOTOOLCHAIN=local", "GOWORK=off", "GOMODCACHE="+t.TempDir())
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if code := exitCodeOf(cmd.Run()); code != 4 {
+		t.Fatalf("exit code = %d, want 4\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "scan failed: missing_gosum") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	var rep struct {
+		ScanStatus struct{ Status, Reason, Kind string } `json:"scan_status"`
+		Scan       struct {
+			GoVersion string `json:"go_version"`
+		} `json:"scan"`
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("the report was not written: %v", err)
+	}
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.ScanStatus.Status != "failed" || rep.ScanStatus.Reason != "missing_gosum" || rep.ScanStatus.Kind != "permanent" {
+		t.Errorf("scan_status = %+v", rep.ScanStatus)
+	}
+	if !strings.HasPrefix(rep.Scan.GoVersion, "go1.") {
+		t.Errorf("scan.go_version = %q: the Go release the standard library is matched against must be there even when the scan failed", rep.Scan.GoVersion)
+	}
+	if _, err := os.Stat(sbom); err != nil {
+		t.Errorf("the SBOM is written with the report: %v", err)
+	}
+}

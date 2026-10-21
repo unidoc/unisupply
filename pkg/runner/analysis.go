@@ -365,6 +365,11 @@ func analyse(ctx context.Context, opts Options, withIndex bool) (*Analysis, *ana
 	}
 	an.Scan = scanInfoPtr(&scanInfo)
 	an.ToolchainVersion = scanToolchainVersion(ctx, projectDir)
+	if an.Scan != nil && an.Scan.GoVersion == "" {
+		// govulncheck is given this release as its GOVERSION, so it is the one the standard library was matched against even
+		// when its output (a scan that failed early, or an old govulncheck) does not say so
+		an.Scan.GoVersion = an.ToolchainVersion
+	}
 	an.Identity = identityOf(ctx, &opts, an, gomodPath, projectDir, withIndex)
 	return an, st, nil
 }

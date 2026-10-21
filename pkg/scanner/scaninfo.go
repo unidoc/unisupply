@@ -16,7 +16,9 @@ type ScanInfo struct {
 	// Platform is "goos/goarch" of the scan: GOOS and GOARCH from the
 	// environment when set, else those of the running binary.
 	Platform string `json:"platform,omitempty"`
-	// GoVersion is the Go release govulncheck analysed with ("go1.26.9").
+	// GoVersion is the Go release govulncheck analysed with ("go1.26.9"), the one the standard library's advisories were matched
+	// against. When govulncheck's output does not say (it failed before reporting, or an old version) the runner fills in the
+	// release it gave govulncheck as GOVERSION.
 	GoVersion string `json:"go_version,omitempty"`
 	// GovulncheckVersion is the version of golang.org/x/vuln linked into this binary (govulncheck runs in-process), read
 	// from the build info. Empty when the build info does not list it. It is NOT govulncheck's own scanner_version: that

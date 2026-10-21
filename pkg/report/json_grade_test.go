@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -617,5 +618,27 @@ func TestWriteJSON_ScanStatusFromGradeAndEmptyEdges(t *testing.T) {
 	_, top = renderJSON(t, gradeTestScore(plainDep()), JSONOptions{Grade: &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA}})
 	if !strings.Contains(string(top["scan_status"]), `"complete"`) {
 		t.Errorf("scan_status = %s", top["scan_status"])
+	}
+}
+
+func TestWriteJSONFailure(t *testing.T) {
+	var buf bytes.Buffer
+	cause := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoGoMod, Err: errors.New("no go.mod found in /x")}
+	if err := WriteJSONFailure(cause, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var got JSONFailure
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tool != "unisupply" || got.Version == "" || got.ScanStatus.Status != scanner.StatusFailed || got.ScanStatus.Reason != "no_go_mod" || got.ScanStatus.Kind != "permanent" || got.Error != "no go.mod found in /x" {
+		t.Errorf("%+v", got)
+	}
+	// a deadline is an interrupted scan, not a failed one
+	buf.Reset()
+	_ = WriteJSONFailure(&scanner.ScanError{Kind: scanner.FailTooLarge, Reason: scanner.ReasonScanDeadline, Err: errors.New("x")}, &buf)
+	_ = json.Unmarshal(buf.Bytes(), &got)
+	if got.ScanStatus.Status != scanner.StatusInterrupted || got.ScanStatus.Reason != scanner.ReasonScanDeadline {
+		t.Errorf("%+v", got.ScanStatus)
 	}
 }

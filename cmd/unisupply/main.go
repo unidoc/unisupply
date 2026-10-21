@@ -27,6 +27,10 @@ import (
 // errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
 
+// errScanFailed is returned when the scan failed or was interrupted but a report could still be written (scan_status.status
+// is "failed" or "interrupted" in the JSON). The report is written first; the exit code is 4.
+var errScanFailed = errors.New("scan failed")
+
 // errTokenPrecondition is returned when --require-github-token is set but the
 // token is missing, rejected, or could not be validated. Exit code 3 is
 // reserved for this precondition failure so CI pipelines can distinguish it
@@ -38,6 +42,7 @@ func main() {
 	var (
 		format                 string
 		output                 string
+		sbomOut                string
 		verbose                bool
 		noColor                bool
 		moduleVersion          string
@@ -66,6 +71,7 @@ func main() {
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
+	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
@@ -126,6 +132,7 @@ func main() {
 		path:                   path,
 		format:                 format,
 		output:                 output,
+		sbomOut:                sbomOut,
 		verbose:                verbose,
 		noColor:                noColor,
 		moduleVersion:          moduleVersion,
@@ -155,6 +162,11 @@ func main() {
 		if errors.Is(err, errPolicyViolation) {
 			os.Exit(2)
 		}
+		// A scan that failed or was interrupted, with its report written, exits with code 4.
+		if errors.Is(err, errScanFailed) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(4)
+		}
 		// Token precondition failure exits with code 3.
 		if errors.Is(err, errTokenPrecondition) {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", cliError(err))
@@ -179,6 +191,7 @@ type runConfig struct {
 	path                   string
 	format                 string
 	output                 string
+	sbomOut                string
 	verbose                bool
 	noColor                bool
 	moduleVersion          string
@@ -237,6 +250,9 @@ func run(cfg *runConfig) error {
 	case "", "strict", "moderate":
 	default:
 		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
+	}
+	if cfg.sbomOut != "" && cfg.sbomOut == cfg.output {
+		return fmt.Errorf("--sbom-out and --output name the same file (%s): the SBOM would overwrite the report", cfg.output)
 	}
 
 	if cfg.policyFile != "" && cfg.policyPreset != "" {
@@ -320,6 +336,10 @@ func run(cfg *runConfig) error {
 		CalledPass:             calledPassMode,
 	})
 	if err != nil {
+		// A scan that could not start still leaves a machine-readable answer when JSON was asked for: the typed reason.
+		if cfg.format == "json" {
+			writeFailureJSON(cfg, err)
+		}
 		return err
 	}
 
@@ -334,12 +354,58 @@ func run(cfg *runConfig) error {
 		if err := writeReport(ctx, cfg, rep, scanResult); err != nil {
 			return err
 		}
+		if cfg.sbomOut != "" {
+			if err := writeSBOMFile(cfg.sbomOut, scanResult); err != nil {
+				return err
+			}
+		}
 	}
 
 	if cfg.policyFile != "" || cfg.policyPreset != "" {
-		return evaluatePolicy(cfg, rep, scanResult)
+		if err := evaluatePolicy(cfg, rep, scanResult); err != nil {
+			return err
+		}
+	}
+	// The report is written either way; a failed or interrupted scan is said in its scan_status and by the exit code.
+	if st := scanResult.ScanStatus; !noReport && (st.Status == scanner.StatusFailed || st.Status == scanner.StatusInterrupted) {
+		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 	}
 	return nil
+}
+
+// writeSBOMFile writes the CycloneDX SBOM of the scan to path, for --sbom-out.
+func writeSBOMFile(path string, scanResult *runner.Result) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating SBOM file: %w", err)
+	}
+	opts := report.SBOMOptions{GoVersion: scanResult.GoMod.GoVersion, Grade: scanResult.Grade}
+	if err := report.WriteCycloneDX(scanResult.Graph, scanResult.ProjectScore, opts, f); err != nil {
+		f.Close()
+		return fmt.Errorf("writing SBOM: %w", err)
+	}
+	return f.Close()
+}
+
+// writeFailureJSON writes the JSON of a scan that could not start (no go.mod, the dependency graph cannot be resolved,
+// ...) to the output file or stdout, with the typed reason in scan_status. It does nothing for an error that is not a
+// scan failure (a bad flag, the token precondition) and never turns a failure into a second one: the error the caller
+// returns is the one that is reported.
+func writeFailureJSON(cfg *runConfig, cause error) {
+	var se *scanner.ScanError
+	if !errors.As(cause, &se) {
+		return
+	}
+	w := os.Stdout
+	if cfg.output != "" {
+		f, err := os.Create(cfg.output)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		w = f
+	}
+	_ = report.WriteJSONFailure(cause, w)
 }
 
 // writeReport renders the scan result in the format asked for.
@@ -499,6 +565,7 @@ func printUsage() {
 	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
 	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
 	fmt.Println("  unisupply -f pdf                             # Generate PDF report")
+	fmt.Println("  unisupply -f json -o r.json --sbom-out s.json # JSON report and CycloneDX SBOM from one scan")
 	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
 	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
 	fmt.Println("  unisupply --module-version v1.4.0            # Also grade the module itself at a published version")
@@ -518,6 +585,9 @@ func printUsage() {
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
 	fmt.Println("  2  Policy violation — one or more policy rules failed (max_grade: a grade worse than the limit, or Pending unless allow_pending)")
 	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
+	fmt.Println("  4  The scan failed or was interrupted, and the report was still written: scan_status.status is \"failed\" or \"interrupted\" with the typed")
+	fmt.Println("     reason in scan_status.reason. A policy violation (2) takes precedence. A scan that could not start (1) writes the same scan_status")
+	fmt.Println("     as the whole JSON when --format json is used")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

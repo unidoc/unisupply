@@ -257,6 +257,12 @@ violations cause the binary to exit `2`, which is the convention CI systems
 expect for a deliberate fail-fast. Without `--policy` or `--policy-preset` the
 exit code ignores the grade: a grade of F still exits `0`.
 
+Exit codes: `0` success; `1` runtime error, no report (with `--format json` the JSON is still written, holding only
+`scan_status` with the typed reason, for example `no_go_mod`); `2` policy violation; `3` token precondition
+(`--require-github-token`); `4` the scan failed or was interrupted and the report was still written, with `scan_status.status`
+`failed` or `interrupted` and the typed reason in `scan_status.reason` (a policy violation, `2`, takes precedence). A scan that
+only lacks a check the letter needs (Pending, offline mode) exits `0`: its `scan_status.status` is `pending`.
+
 ```bash
 # Built-in presets
 unisupply ./ --policy-preset strict
@@ -444,6 +450,8 @@ The most frequently used flags:
 | ----------------------- |----------------------------------------------------------------------------------------------------------------------|
 | `-f, --format`          | `text`, `json`, `pdf`, `sbom-cyclonedx`, `sbom-spdx`                                                                 |
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)                                                                     |
+| `--sbom-out`            | Also write the CycloneDX SBOM of the same scan to this file, whatever `--format` is (one scan, two outputs)          |
+| `--called-pass`         | When govulncheck's called pass runs: `auto` (default: only when it can change the letter), `always`, `never`         |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                                                                             |
 | `--nvd-api-key`         | NVD API key for higher severity lookup rate limits (or `NVD_API_KEY` env) |
 | `--trust-index-url`     | unitrust endpoint for curated trust scores                                                                           |

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/facts"
+	"github.com/unidoc/unisupply/pkg/grade"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/vulndb"
 )
@@ -358,5 +360,44 @@ func TestGrade_ReadsFactsThroughTheStore(t *testing.T) {
 	// a fact newer than the analysis is kept as it is
 	if a, _, _ := store.GetAdvisory(ctx, "GO-2025-0009"); a.Severity != "CRITICAL" || !a.FetchedAt.Equal(gradeDate) {
 		t.Errorf("the newer fact was overwritten: %+v", a)
+	}
+}
+
+// scan.go_version is the Go release the standard library was matched against, and it is there even when govulncheck's own
+// output did not say (a scan that failed early): the runner fills in the release it gave govulncheck.
+func TestAnalyse_ScanGoVersionFallsBackToTheToolchain(t *testing.T) {
+	dir := depModule(t)
+	stubGitHub(t, http.StatusOK)
+	prev := scanVulns
+	t.Cleanup(func() { scanVulns = prev })
+	scanVulns = func(_ context.Context, _ string, opts scanner.VulnScanOptions) (map[string][]scanner.Vulnerability, []string, bool, error) {
+		*opts.Info = scanner.ScanInfo{Platform: "linux/amd64"} // no go_version: govulncheck said nothing
+		return nil, nil, false, &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoPackages, Err: errors.New("no packages matched")}
+	}
+	an, err := Analyse(context.Background(), Options{Path: dir, DirectOnly: true, Now: gradeDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if an.ToolchainVersion == "" || an.Scan == nil || an.Scan.GoVersion != an.ToolchainVersion || !strings.HasPrefix(an.Scan.GoVersion, "go1.") {
+		t.Errorf("toolchain %q, scan %+v", an.ToolchainVersion, an.Scan)
+	}
+}
+
+// Offline mode skips the vulnerability scan on purpose: the status is pending, not failed; a typed failure still fails.
+func TestScanStatusOf_OfflineIsPendingNotFailed(t *testing.T) {
+	pending := &grade.Result{Pending: &grade.Pending{Check: "vulnerability_scan", Reason: "offline"}}
+	skipped := errors.New("offline — vulnerability scan skipped (no local vuln DB mirror configured)")
+	typed := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoPackages, Err: errors.New("x")}
+
+	if st := scanStatusOf(pending, skipped, false); st.Status != scanner.StatusFailed {
+		t.Errorf("online, an untyped failure is a failed scan: %+v", st)
+	}
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	if st := scanStatusOf(pending, skipped, false); st.Status != scanner.StatusPending || st.Reason != "vulnerability_scan" {
+		t.Errorf("offline: %+v", st)
+	}
+	if st := scanStatusOf(pending, typed, false); st.Status != scanner.StatusFailed || st.Reason != scanner.ReasonNoPackages {
+		t.Errorf("offline, a typed failure still fails: %+v", st)
 	}
 }

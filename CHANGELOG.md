@@ -137,6 +137,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `Index.ChangesSince` and `Index.Fingerprint(modules)` work on a fetched index; a fingerprint also sees an advisory that was
   removed, which no timestamp can.
 
+#### One scan, two outputs, and an exit code for a failed scan
+
+- **`--sbom-out <file>`** writes the CycloneDX SBOM of the same scan next to whatever `--format` wrote, so one run gives the JSON
+  report and the SBOM (`unisupply -f json -o report.json --sbom-out sbom.json`). It is refused before the scan when it names the
+  same file as `--output`.
+- **Exit code 4**: the scan failed or was interrupted (`scan_status.status` is `failed` or `interrupted`) and the report was still
+  written. Before, such a scan exited 0 with a Pending grade. A policy violation (2) takes precedence; Pending (a check the letter
+  needs did not run) and offline mode are `pending`, not failures, and still exit 0. A zero-dependency module with no
+  `--module-version` writes no report and does not use this code.
+- **A scan that could not start writes JSON too**, with `--format json`: the whole document is `{"tool", "version",
+  "generated_at", "scan_status": {"status": "failed", "reason": "no_go_mod", "kind": "permanent", ...}, "error": ...}`, next to
+  the unchanged error line and exit code 1. Other formats write nothing, as before.
+- **`scan.go_version`** (the Go release the standard library was matched against) is always present once a scan started: when
+  govulncheck's output does not say, the release unisupply gave it as `GOVERSION` is used.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause

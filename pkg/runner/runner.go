@@ -23,6 +23,7 @@ import (
 
 	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/grade"
+	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/parser"
 	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -224,7 +225,14 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 // scanStatusOf is the status of a finished Run. A vulnerability scan that failed is a failed scan even when the grade does
 // not rest on it (a module with no dependencies and no --grade-stdlib still has a letter): the listing of its standard-library
 // findings is missing, and the typed reason is what a caller wants to see.
+//
+// Offline mode skips the vulnerability scan on purpose (there is no database to read without the network), which is not a
+// failure: the grade is Pending (vulnerability_scan) and the status is "pending".
 func scanStatusOf(g *grade.Result, vulnErr error, interrupted bool) scanner.ScanStatus {
+	var se *scanner.ScanError
+	if offline.Enabled() && !errors.As(vulnErr, &se) {
+		vulnErr = nil
+	}
 	in := scanner.StatusInput{VulnErr: vulnErr, Interrupted: interrupted, Graded: g != nil}
 	if g != nil && g.Pending != nil {
 		in.PendingCheck, in.PendingReason = g.Pending.Check, g.Pending.Reason

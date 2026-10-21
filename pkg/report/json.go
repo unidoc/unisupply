@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -773,4 +774,31 @@ func jsonDependencyGraph(g *resolver.Graph) JSONDependencyGraph {
 		out.Edges = []resolver.Edge{}
 	}
 	return out
+}
+
+// JSONFailure is the whole JSON output of a scan that could not start: there is no graph and no grade, only the typed reason.
+type JSONFailure struct {
+	Tool        string             `json:"tool"`
+	Version     string             `json:"version"`
+	GeneratedAt string             `json:"generated_at"`
+	ScanStatus  scanner.ScanStatus `json:"scan_status"`
+	// Error is the cause as text (the tail of the go command's or govulncheck's output).
+	Error string `json:"error"`
+}
+
+// WriteJSONFailure writes the JSON for a scan that failed before there was anything to report. cause is a *scanner.ScanError
+// when its reason is known.
+func WriteJSONFailure(cause error, w io.Writer) error {
+	status := scanner.ScanStatusOf(scanner.StatusInput{VulnErr: cause})
+	text := ""
+	if cause != nil {
+		text = cause.Error()
+		var se *scanner.ScanError
+		if errors.As(cause, &se) && se.Err != nil {
+			text = se.Err.Error()
+		}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(JSONFailure{Tool: "unisupply", Version: version.Version, GeneratedAt: time.Now().UTC().Format(time.RFC3339), ScanStatus: status, Error: text})
 }
