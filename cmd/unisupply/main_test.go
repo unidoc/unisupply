@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/unidoc/unisupply/pkg/offline"
+	"github.com/unidoc/unisupply/pkg/runner"
 )
 
 // buildBinary compiles the unisupply binary into a temporary directory and
@@ -692,5 +696,69 @@ func TestExitCode4_FailedScanWithAReport(t *testing.T) {
 	}
 	if _, err := os.Stat(sbom); err != nil {
 		t.Errorf("the SBOM is written with the report: %v", err)
+	}
+}
+
+// --analysis-out stores the Analysis of the scan that produced the report; runner.Grade grades it again without the module's
+// directory, and gives the report's grade.
+func TestAnalysisOut_GradesAgainToTheSameResult(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/app\n\ngo 1.25\n\nrequire example.com/dep v1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, an := filepath.Join(t.TempDir(), "r.json"), filepath.Join(t.TempDir(), "a.json")
+
+	cmd := exec.Command(bin, "--progress", "none", "--offline", "--direct-only", "-f", "json", "-o", out, "--analysis-out", an, dir)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("exit %d: %v\n%s", exitCodeOf(err), err, b)
+	}
+	var rep struct {
+		Grade struct {
+			Letter  string `json:"letter"`
+			Pending *struct {
+				Check string `json:"check"`
+			} `json:"pending"`
+		} `json:"grade"`
+	}
+	raw, _ := os.ReadFile(out)
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(an)
+	if err != nil {
+		t.Fatalf("the analysis was not written: %v", err)
+	}
+	var a runner.Analysis
+	if err := json.Unmarshal(raw, &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Identity.Module != "example.com/app" || a.Identity.UnisupplyVersion == "" || a.Identity.GoSumHash == "" {
+		t.Errorf("identity = %+v", a.Identity)
+	}
+	// the module's directory is gone: grading needs the analysis, the facts and the date only
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	offline.Enable()
+	t.Cleanup(offline.Disable)
+	res, err := runner.Grade(context.Background(), &a, nil, time.Now().UTC(), runner.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(res.Grade.Letter) != rep.Grade.Letter {
+		t.Errorf("letter %q, the report's is %q", res.Grade.Letter, rep.Grade.Letter)
+	}
+	if (res.Grade.Pending == nil) != (rep.Grade.Pending == nil) || (res.Grade.Pending != nil && res.Grade.Pending.Check != rep.Grade.Pending.Check) {
+		t.Errorf("pending %+v, the report's %+v", res.Grade.Pending, rep.Grade.Pending)
+	}
+
+	// the same file as another output is refused before the scan
+	for _, args := range [][]string{{"-o", an}, {"--sbom-out", an}} {
+		c := exec.Command(bin, append([]string{"--progress", "none", "--offline", "-f", "json", "--analysis-out", an}, append(args, dir)...)...)
+		b, err := c.CombinedOutput()
+		if exitCodeOf(err) != 1 || !strings.Contains(string(b), "--analysis-out") {
+			t.Errorf("%v: exit %d, %q", args, exitCodeOf(err), b)
+		}
 	}
 }

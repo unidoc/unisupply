@@ -222,6 +222,26 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	return gradeAnalysis(ctx, an, st, nil, st.scanStart, opts)
 }
 
+// RunAnalysed is Run that also returns the Analysis it graded, made as Analyse makes it (the advisory fingerprint in its
+// Identity included, which costs one request to vuln.go.dev). The Result is the one Run would give. The Analysis is returned
+// whenever one was made, so it is non-nil next to a Result whose scan failed; on an error before an analysis exists both are nil.
+func RunAnalysed(ctx context.Context, opts Options) (res *Result, an *Analysis, runErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			res, an, runErr = nil, nil, panicScanError(r)
+		}
+	}()
+	an, st, err := analyse(ctx, opts, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	res, err = gradeAnalysis(ctx, an, st, nil, st.scanStart, opts)
+	if err != nil {
+		return nil, an, err
+	}
+	return res, an, nil
+}
+
 // scanStatusOf is the status of a finished Run. A vulnerability scan that failed is a failed scan even when the grade does
 // not rest on it (a module with no dependencies and no --grade-stdlib still has a letter): the listing of its standard-library
 // findings is missing, and the typed reason is what a caller wants to see.

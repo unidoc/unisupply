@@ -142,6 +142,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`--sbom-out <file>`** writes the CycloneDX SBOM of the same scan next to whatever `--format` wrote, so one run gives the JSON
   report and the SBOM (`unisupply -f json -o report.json --sbom-out sbom.json`). It is refused before the scan when it names the
   same file as `--output`.
+- **`--analysis-out <file>`** also writes the stored `runner.Analysis` (JSON, with the advisory fingerprint in `identity`) of the same
+  scan, for `runner.Grade` to grade again later without the module's files. It is refused before the scan when it names the
+  same file as `-o` or `--sbom-out`; nothing is written when the scan failed before an analysis existed. The other outputs
+  and exit codes are unchanged. In Go: `runner.RunAnalysed`.
 - **Exit code 4**: the scan failed or was interrupted (`scan_status.status` is `failed` or `interrupted`) and the report was still
   written. Before, such a scan exited 0 with a Pending grade. A policy violation (2) takes precedence; Pending (a check the letter
   needs did not run) and offline mode are `pending`, not failures, and still exit 0. A zero-dependency module with no

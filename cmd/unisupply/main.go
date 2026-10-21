@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,7 @@ func main() {
 		format                 string
 		output                 string
 		sbomOut                string
+		analysisOut            string
 		verbose                bool
 		noColor                bool
 		moduleVersion          string
@@ -72,6 +74,7 @@ func main() {
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
+	flag.StringVar(&analysisOut, "analysis-out", "", "Also write the stored Analysis (JSON) of the same scan to this file; runner.Grade grades it again later without the module's files")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
@@ -133,6 +136,7 @@ func main() {
 		format:                 format,
 		output:                 output,
 		sbomOut:                sbomOut,
+		analysisOut:            analysisOut,
 		verbose:                verbose,
 		noColor:                noColor,
 		moduleVersion:          moduleVersion,
@@ -192,6 +196,7 @@ type runConfig struct {
 	format                 string
 	output                 string
 	sbomOut                string
+	analysisOut            string
 	verbose                bool
 	noColor                bool
 	moduleVersion          string
@@ -250,6 +255,9 @@ func run(cfg *runConfig) error {
 	case "", "strict", "moderate":
 	default:
 		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
+	}
+	if cfg.analysisOut != "" && (cfg.analysisOut == cfg.output || cfg.analysisOut == cfg.sbomOut) {
+		return fmt.Errorf("--analysis-out names the same file as --output or --sbom-out (%s): it would overwrite it", cfg.analysisOut)
 	}
 	if cfg.sbomOut != "" && cfg.sbomOut == cfg.output {
 		return fmt.Errorf("--sbom-out and --output name the same file (%s): the SBOM would overwrite the report", cfg.output)
@@ -317,7 +325,7 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	scanResult, err := runner.Run(ctx, runner.Options{
+	runOpts := runner.Options{
 		Path:                   cfg.path,
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
@@ -334,13 +342,26 @@ func run(cfg *runConfig) error {
 		GradeStdlib:            cfg.gradeStdlib,
 		StrictArchivedStatus:   cfg.strictArchived,
 		CalledPass:             calledPassMode,
-	})
+	}
+	var scanResult *runner.Result
+	var analysis *runner.Analysis
+	if cfg.analysisOut != "" {
+		scanResult, analysis, err = runner.RunAnalysed(ctx, runOpts)
+	} else {
+		scanResult, err = runner.Run(ctx, runOpts)
+	}
 	if err != nil {
 		// A scan that could not start still leaves a machine-readable answer when JSON was asked for: the typed reason.
 		if cfg.format == "json" {
 			writeFailureJSON(cfg, err)
 		}
 		return err
+	}
+
+	if analysis != nil {
+		if err := writeAnalysisFile(cfg.analysisOut, analysis); err != nil {
+			return err
+		}
 	}
 
 	// A module with nothing to scan and no published version to grade has no report. A policy is still evaluated: a gate
@@ -371,6 +392,21 @@ func run(cfg *runConfig) error {
 		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 	}
 	return nil
+}
+
+// writeAnalysisFile writes the Analysis as JSON, for --analysis-out.
+func writeAnalysisFile(path string, an *runner.Analysis) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating analysis file: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(an); err != nil {
+		f.Close()
+		return fmt.Errorf("writing analysis: %w", err)
+	}
+	return f.Close()
 }
 
 // writeSBOMFile writes the CycloneDX SBOM of the scan to path, for --sbom-out.

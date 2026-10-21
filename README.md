@@ -451,6 +451,7 @@ The most frequently used flags:
 | `-f, --format`          | `text`, `json`, `pdf`, `sbom-cyclonedx`, `sbom-spdx`                                                                 |
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)                                                                     |
 | `--sbom-out`            | Also write the CycloneDX SBOM of the same scan to this file, whatever `--format` is (one scan, two outputs)          |
+| `--analysis-out`        | Also write the stored Analysis (JSON) of the same scan, for `runner.Grade` to re-grade later                         |
 | `--called-pass`         | When govulncheck's called pass runs: `auto` (default: only when it can change the letter), `always`, `never`         |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                                                                             |
 | `--nvd-api-key`         | NVD API key for higher severity lookup rate limits (or `NVD_API_KEY` env) |
