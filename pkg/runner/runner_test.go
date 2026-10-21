@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/offline"
+	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
@@ -438,6 +439,58 @@ func TestRun_ScanErrorWithoutWarning(t *testing.T) {
 	want := "Vulnerability scan failed: needs_newer_go: this unisupply was built with go1.26.9 and cannot scan code that needs go1.99"
 	if len(res.ProjectScore.Warnings) != 1 || res.ProjectScore.Warnings[0] != want {
 		t.Errorf("report warnings = %q, want %q", res.ProjectScore.Warnings, want)
+	}
+}
+
+// The progress output says a failed scan once: by the scanner's warning when it carries the cause (a package-loading
+// failure), else by the "Vulnerability scan failed" line (a refused toolchain, which has no warning).
+func TestRun_ScanFailureIsWarnedOnce(t *testing.T) {
+	toolchainErr := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNeedsNewerGo, Err: errors.New("this unisupply was built with go1.26.9 and cannot scan code that needs go1.99")}
+	pkgErr, pkgWarnings := packageErrorScan()
+	tests := []struct {
+		name     string
+		err      error
+		warnings []string
+		// want is the number of progress warnings that name the cause, and failed how many of them are the runner's
+		// own "Vulnerability scan failed" line.
+		cause        string
+		want, failed int
+	}{
+		{"package error", pkgErr, pkgWarnings, "main redeclared in this block", 1, 0},
+		{"refused toolchain", toolchainErr, nil, "cannot scan code that needs go1.99", 1, 1},
+	}
+	for _, withDeps := range []bool{false, true} {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("%s/deps=%v", tc.name, withDeps), func(t *testing.T) {
+				dir := writeEmptyModule(t)
+				if withDeps {
+					gomod := "module github.com/example/app\n\ngo 1.25\n\nrequire github.com/example/dep v1.0.0\n"
+					if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stubGitHub(t, http.StatusOK)
+				stubScan(t, nil, tc.warnings, false, tc.err)
+				rep := &recordingReporter{}
+				ctx := progress.WithReporter(context.Background(), rep)
+
+				if _, err := Run(ctx, Options{Path: dir, DirectOnly: true, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}); err != nil {
+					t.Fatal(err)
+				}
+				var said, failed int
+				for _, w := range rep.warnings {
+					if strings.Contains(w, tc.cause) {
+						said++
+						if strings.HasPrefix(w, "Vulnerability scan failed") {
+							failed++
+						}
+					}
+				}
+				if said != tc.want || failed != tc.failed {
+					t.Errorf("progress warnings = %q, want the cause %d time(s), %d by the failure line", rep.warnings, tc.want, tc.failed)
+				}
+			})
+		}
 	}
 }
 

@@ -268,7 +268,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		rep.Stage("Scanning vulnerabilities (govulncheck)")
 		var scanInfo scanner.ScanInfo
 		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
-		if verr != nil {
+		if verr != nil && !saidByWarnings(vulnWarnings, verr) {
 			rep.Warn("Vulnerability scan failed: %s", errString(verr))
 		}
 		emptyVulnErr := vulnScanFailure(verr, vulnScanned, vulnWarnings)
@@ -323,7 +323,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	// The scanner reports availability directly: a scan that did not run must
 	// not read as clean, whether it came back with an error or only a warning.
 	vulnScanUnavailable := !vulnScanned
-	if err != nil {
+	if err != nil && !saidByWarnings(vulnWarnings, err) {
 		rep.Warn("Vulnerability scan failed: %s", errString(err))
 	}
 	vulnScanErr := vulnScanFailure(err, vulnScanned, vulnWarnings)
@@ -555,9 +555,15 @@ func vulnScanFailure(err error, scanned bool, warnings []string) error {
 // warning carries it: a refused toolchain check is an error, not a warning, and would otherwise reach stderr only.
 func appendScanFailure(dst, warnings []string, failure error) []string {
 	dst = append(dst, warnings...)
-	if failure == nil {
+	if failure == nil || saidByWarnings(warnings, failure) {
 		return dst
 	}
+	return append(dst, "Vulnerability scan failed: "+errString(failure))
+}
+
+// saidByWarnings reports whether one of the scanner's warnings already carries the text of failure: a package-loading
+// failure comes back both as the error and as a warning, and is said once.
+func saidByWarnings(warnings []string, failure error) bool {
 	line := errString(failure)
 	// A scan error's summary is not the first line of its warning, but its detail line is somewhere in it.
 	var se *scanner.ScanError
@@ -567,10 +573,10 @@ func appendScanFailure(dst, warnings []string, failure error) []string {
 	}
 	for _, w := range warnings {
 		if first, _, _ := strings.Cut(w, "\n"); first == line || (detail != line && strings.Contains(w, detail)) {
-			return dst
+			return true
 		}
 	}
-	return append(dst, "Vulnerability scan failed: "+line)
+	return false
 }
 
 // takeStdlibVulns removes the Go standard library's vulnerabilities from vulns

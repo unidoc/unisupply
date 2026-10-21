@@ -587,8 +587,9 @@ func callPath(trace []traceEntry) []string {
 // weight when this is false; see scorer.ScoreInput.VulnScanUnavailable.
 //
 // A failed scan returns a *ScanError (use errors.As): its Reason and Kind say what
-// went wrong and whether a retry can help. The failure text is also in warnings,
-// and a failed scan may still return the partial vulns it parsed.
+// went wrong and whether a retry can help. When govulncheck ran, the failure text
+// is also in warnings; a refused toolchain (CheckToolchain) is in the error only.
+// A failed scan may still return the partial vulns it parsed.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	return ScanVulnsWithOptions(ctx, projectDir, VulnScanOptions{GitHubToken: githubToken})
 }

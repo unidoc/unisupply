@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"errors"
 	"go/parser"
 	"go/token"
@@ -46,7 +47,7 @@ const (
 	ReasonModuleFetch       = "module_fetch"       // a module download failed
 	ReasonRateLimited       = "rate_limited"       // a service refused the request for rate limiting
 	ReasonVulnDBUnreachable = "vulndb_unreachable" // the vulnerability database could not be fetched
-	ReasonScanDeadline      = "scan_deadline"      // the scan used its whole time limit; FailTooLarge; set by the caller
+	ReasonScanDeadline      = "scan_deadline"      // the scan's context deadline passed before it finished; FailTooLarge
 	ReasonInternalPanic     = "internal_panic"     // a scanner panicked
 	ReasonUnknown           = "unknown"            // nothing matched; FailPermanent
 )
@@ -150,20 +151,25 @@ var scanFailureRules = []struct {
 	// caller tells them apart (ReasonCgoOnly) by looking at the files, since the message cannot.
 	{ReasonNoPackages, FailPermanent, regexp.MustCompile(`no packages matched the provided patterns`)},
 	{ReasonMissingGoSum, FailPermanent, regexp.MustCompile(`missing go\.sum entry`)},
-	{ReasonRateLimited, FailTransient, regexp.MustCompile(`(?i)too many requests|rate.?limit|(?:status|code|http|returned)[: ]+429\b`)},
+	// The wording of a refused request ("API rate limit exceeded", "secondary rate limit", "429 Too Many Requests"), with
+	// the space: a package path or identifier that names rate limiting ("internal/ratelimit/limiter.go:12:2: undefined:
+	// ...") is a build failure.
+	{ReasonRateLimited, FailTransient, regexp.MustCompile(`(?i)too many requests|\brate limit(?:ed|ing)?\b|(?:status|code|http|returned)[: ]+429\b`)},
 	{ReasonVulnDBUnreachable, FailTransient, regexp.MustCompile(`vuln\.go\.dev|GOVULNDB|HTTP (?:GET|POST) \S+ returned unexpected status`)},
 	{ReasonModuleFetch, FailTransient, regexp.MustCompile(`(?i)dial tcp|i/o timeout|TLS handshake|connection reset|connection refused|no such host|network is unreachable|\b50[0-4] (?:bad gateway|service unavailable|gateway timeout|internal server error)`)},
 }
 
 // classifyScanFailure types the message of a failed scan. ctxErr is the scan context's error: once the context has
 // ended, a timeout in the message is the scan's own limit and not a network fault, so only the permanent causes are
-// matched, and anything else is unknown.
+// matched. Past that, a context whose deadline passed is ReasonScanDeadline, and one the caller canceled is unknown: a
+// cancel is the caller's own decision, not something a retry answers.
 func classifyScanFailure(msg string, ctxErr error) *ScanError {
 	return WrapScanFailure(errors.New(msg), ctxErr)
 }
 
 // WrapScanFailure types err like classifyScanFailure does its message, and keeps err as the cause: its text is cut to the
-// tail, but errors.Is and errors.As still see it.
+// tail, but errors.Is and errors.As still see it. A ReasonScanDeadline error also carries ctxErr, so
+// errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text.
 func WrapScanFailure(err, ctxErr error) *ScanError {
 	msg := err.Error()
 	for _, r := range scanFailureRules {
@@ -173,6 +179,9 @@ func WrapScanFailure(err, ctxErr error) *ScanError {
 		if r.match.MatchString(msg) {
 			return &ScanError{Kind: r.kind, Reason: r.reason, Err: tailOf(err)}
 		}
+	}
+	if errors.Is(ctxErr, context.DeadlineExceeded) {
+		return &ScanError{Kind: FailTooLarge, Reason: ReasonScanDeadline, Err: &tailError{text: tailOf(err).Error(), err: errors.Join(err, ctxErr)}}
 	}
 	return &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: tailOf(err)}
 }

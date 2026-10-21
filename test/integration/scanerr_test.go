@@ -47,7 +47,7 @@ func TestScanErr_Fixtures(t *testing.T) {
 			// main.go:3:8: gopkg.in/yaml.v3@v3.0.1: Get "http://127.0.0.1:1/...": dial tcp 127.0.0.1:1: connect: connection refused
 			name: "module_fetch", reason: scanner.ReasonModuleFetch, kind: scanner.FailTransient,
 			env:  map[string]string{"GOPROXY": "http://127.0.0.1:1", "GOSUMDB": "off"},
-			text: "connection refused",
+			text: "dial tcp 127.0.0.1:1",
 		},
 		{
 			// Run fails before govulncheck: "no go.mod found in <dir>"

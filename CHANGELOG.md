@@ -17,14 +17,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   command's own output (the last 40 lines or 4 KiB). `Error()` is `reason: cause`, `Summary()` is the same on one line,
   and `Kind.String()` gives `transient`, `permanent` or `too_large`.
 - **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`,
-  `no_packages`, `cgo_only`, `missing_gosum`, `module_fetch`, `rate_limited`, `vulndb_unreachable`, `scan_deadline`
-  (never set by unisupply: a caller whose scan ran out of time uses it), `internal_panic` and `unknown`. An unknown
-  failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module imports `"C"`;
-  without that, "no packages matched" is `no_packages`.
+  `no_packages`, `cgo_only`, `missing_gosum`, `module_fetch`, `rate_limited`, `vulndb_unreachable`, `scan_deadline`,
+  `internal_panic` and `unknown`. An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the
+  scan and a file of the module imports `"C"`; without that, "no packages matched" is `no_packages`.
+- **A scan stopped by its context's deadline is `scan_deadline`** (`FailTooLarge`), and `errors.Is(err,
+  context.DeadlineExceeded)` holds for it. A permanent cause in the output still wins over the deadline, and a scan whose
+  context was canceled is `unknown`. Once the context has ended, network text in the output is not read as
+  `module_fetch` or `rate_limited`: the timeout is the scan's own.
+- **`rate_limited` matches the wording of a refused request** (`rate limit exceeded`, `secondary rate limit`, `429 Too
+  Many Requests`), not a package path such as `go.uber.org/ratelimit` in a build error.
 - **Where it appears:** `Result.VulnScanErr` (still typed `error`) when the vulnerability scan fails, the error of
   `scanner.ScanVulnsWithOptions`, and the early failures of `runner.Run` (no go.mod, an unreadable go.mod, dependency
-  resolution). Report warnings are unchanged, and so is `scanner.CheckToolchain`. The CLI prints only the cause, as
-  before.
+  resolution). `scanner.CheckToolchain` is unchanged, and the CLI's error line prints only the cause, as before. Report
+  warnings are unchanged except for a refused toolchain, whose line now carries the code
+  (`Vulnerability scan failed: needs_newer_go: this unisupply was built with ...`).
 
 ### Improvements
 

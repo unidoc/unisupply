@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -79,6 +80,13 @@ func TestClassifyScanFailure(t *testing.T) {
 		{"empty", "", ReasonUnknown, FailPermanent},
 		// a line number is not a status code
 		{"429 as a line number", "main.go:429:3: undefined: x", ReasonUnknown, FailPermanent},
+		// a package path that names rate limiting is a build failure, not a refused request
+		{"ratelimit in a local path", "govulncheck: loading packages: \n/home/u/proj/internal/ratelimit/limiter.go:12:2: undefined: tokenBucket", ReasonUnknown, FailPermanent},
+		{"ratelimit in a module path", "govulncheck: loading packages: \n/m/go.uber.org/ratelimit@v0.3.1/limiter.go:12:2: undefined: tokenBucket", ReasonUnknown, FailPermanent},
+		{"rate-limit in a path", "/p/rate-limit/a.go:1:1: undefined: x", ReasonUnknown, FailPermanent},
+		{"GitHub rate limit", "GET https://api.github.com/repos/x/y: 403 API rate limit exceeded for 1.2.3.4", ReasonRateLimited, FailTransient},
+		{"GitHub secondary rate limit", "You have exceeded a secondary rate limit", ReasonRateLimited, FailTransient},
+		{"rate limited", "request was rate limited", ReasonRateLimited, FailTransient},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,13 +101,31 @@ func TestClassifyScanFailure(t *testing.T) {
 	}
 }
 
-// Once the scan's context has ended, a timeout in the message is the scan's own limit, not a network fault.
-func TestClassifyScanFailure_EndedContextIsNotANetworkFault(t *testing.T) {
-	if se := classifyScanFailure(msgGoCmdDial, context.DeadlineExceeded); se.Reason != ReasonUnknown || se.Kind != FailPermanent {
-		t.Errorf("Reason, Kind = %q, %v, want unknown, permanent", se.Reason, se.Kind)
+// Once the scan's context has ended, a timeout in the message is the scan's own limit, not a network fault: a scan that
+// ran out of time is scan_deadline, and one the caller canceled is unknown. A permanent cause in the message still wins.
+func TestClassifyScanFailure_EndedContext(t *testing.T) {
+	se := classifyScanFailure(msgGoCmdDial, context.DeadlineExceeded)
+	if se.Reason != ReasonScanDeadline || se.Kind != FailTooLarge {
+		t.Errorf("deadline: Reason, Kind = %q, %v, want scan_deadline, too_large", se.Reason, se.Kind)
+	}
+	if !errors.Is(se, context.DeadlineExceeded) {
+		t.Errorf("deadline: errors.Is(%v, context.DeadlineExceeded) = false", se)
+	}
+	if !strings.Contains(se.Error(), "dial tcp") {
+		t.Errorf("deadline: Error() = %q, want the scan's own output kept", se.Error())
+	}
+	// a deadline wrapped by the caller's own context is still a deadline
+	if se := classifyScanFailure(msgGoCmdDial, fmt.Errorf("scan: %w", context.DeadlineExceeded)); se.Reason != ReasonScanDeadline {
+		t.Errorf("wrapped deadline: Reason = %q, want scan_deadline", se.Reason)
+	}
+	if se := classifyScanFailure(msgGoCmdDial, context.Canceled); se.Reason != ReasonUnknown || se.Kind != FailPermanent {
+		t.Errorf("canceled: Reason, Kind = %q, %v, want unknown, permanent", se.Reason, se.Kind)
 	}
 	if se := classifyScanFailure(msgMissingGoSum, context.Canceled); se.Reason != ReasonMissingGoSum {
-		t.Errorf("Reason = %q, a permanent cause is still found", se.Reason)
+		t.Errorf("canceled: Reason = %q, a permanent cause is still found", se.Reason)
+	}
+	if se := classifyScanFailure(msgMissingGoSum, context.DeadlineExceeded); se.Reason != ReasonMissingGoSum || se.Kind != FailPermanent {
+		t.Errorf("deadline: Reason, Kind = %q, %v, a permanent cause is still found", se.Reason, se.Kind)
 	}
 }
 
