@@ -129,6 +129,12 @@ func TestScanErr_Fixtures(t *testing.T) {
 			if abs, err := filepath.Abs(testdataPath("scanerr", tc.name)); err != nil || strings.Contains(se.Err.Error(), abs) {
 				t.Errorf("Err = %q, want it without the project's absolute path %q", se.Err, abs)
 			}
+			if !tc.viaErr && res.ScanStatus.Status != scanner.StatusFailed && res.ScanStatus.Status != scanner.StatusInterrupted {
+				t.Errorf("ScanStatus = %+v, want a failed scan", res.ScanStatus)
+			}
+			if !tc.viaErr && res.ScanStatus.Status == scanner.StatusFailed && res.ScanStatus.Reason != tc.reason {
+				t.Errorf("ScanStatus.Reason = %q, want %q", res.ScanStatus.Reason, tc.reason)
+			}
 			t.Logf("%s", se.Summary())
 		})
 	}
@@ -189,5 +195,8 @@ func TestScanErr_AutoGradesWhatTheImportedPassCanVouchFor(t *testing.T) {
 	}
 	if res.ScanInfo == nil || res.ScanInfo.CalledPass != scanner.CalledPassSkipped || res.ScanInfo.CalledPassReason == "" {
 		t.Errorf("ScanInfo = %+v, want the called pass skipped with a reason", res.ScanInfo)
+	}
+	if res.ScanStatus.Status != scanner.StatusComplete {
+		t.Errorf("ScanStatus = %+v", res.ScanStatus)
 	}
 }

@@ -72,6 +72,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   each pass), before the severity and threat-intel lookups that wait on the network. Nothing keeps the loaded packages or the
   call graph alive after the pass.
 
+#### Machine-readable scan status and the dependency graph in the JSON
+
+- **`scan_status`** (always present) says whether the result is final: `status` is `complete`, `pending` (the scan ran but a
+  check the letter needs did not, so there is no letter), `interrupted` (the scan's deadline passed or it was cancelled) or
+  `failed` (the vulnerability scan failed, even when the letter does not rest on it). `reason` is a stable code: the typed failure's reason (`missing_gosum`,
+  `scan_deadline`, ...) for `failed` and `interrupted`, the pending check (`dependency_maintenance`, ...) for `pending`;
+  `kind` says whether a retry can help (`transient`, `permanent`, `too_large`); `detail` is one sentence. Only `complete`
+  is a whole result. In Go: `runner.Result.ScanStatus`, `scanner.ScanStatusOf`, `report.JSONOptions.ScanStatus` (when it is
+  nil the writer works the status out from the grade alone).
+- **`dependency_graph`** (always present): `root`, `source` and `edges`, `[{"from": "a", "to": "b"}, ...]`, which module
+  requires which, by module path, sorted and without duplicates (`edges` is `[]`, never null). The selected version of
+  each module is in `dependencies[]`. `source` is `go_mod_graph` for the full graph; for `go_mod_requires` (the go command
+  could not run) and `direct_only` the edges are the main module's requirements only. In Go: `resolver.Graph.Edges()` and
+  `resolver.Graph.Source`.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause

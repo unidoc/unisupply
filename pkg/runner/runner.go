@@ -153,6 +153,9 @@ type Result struct {
 	// govulncheck and vulnerability-database versions. Nil when no scan ran
 	// (offline mode). Fields govulncheck did not report are empty.
 	ScanInfo *scanner.ScanInfo
+	// ScanStatus is whether this result is final: complete, pending, interrupted or failed, with the stable reason code.
+	// Pass it to report.JSONOptions.ScanStatus.
+	ScanStatus scanner.ScanStatus
 	// KEVStaleSince is the date of the CISA KEV catalog copy used when the
 	// catalog could not be refreshed. Zero when the catalog was fresh or
 	// unavailable.
@@ -317,7 +320,8 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		})
 		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
 			StdlibVulns: stdlibVulns, VulnScanErr: emptyVulnErr,
-			ScanInfo: scanInfoPtr(&scanInfo), KEVStaleSince: kevStaleSince(&scanInfo)}, nil
+			ScanInfo: scanInfoPtr(&scanInfo), KEVStaleSince: kevStaleSince(&scanInfo),
+			ScanStatus: scanStatusOf(g, emptyVulnErr, false)}, nil
 	}
 
 	// Pseudo-version audit needs the resolved graph (Direct/IsTestOnly).
@@ -519,11 +523,23 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		ScanInfo:        scanInfoPtr(&scanInfo),
 		KEVStaleSince:   kevStaleSince(&scanInfo),
 		Interrupted:     interrupted,
+		ScanStatus:      scanStatusOf(gradeResult, vulnScanErr, interrupted),
 
 		GithubTokenRejected: tokenStatus.rejected,
 		Maintainers:         maintainers,
 		Typosquats:          typosquats,
 	}, nil
+}
+
+// scanStatusOf is the status of a finished Run. A vulnerability scan that failed is a failed scan even when the grade does
+// not rest on it (a module with no dependencies and no --grade-stdlib still has a letter): the listing of its standard-library
+// findings is missing, and the typed reason is what a caller wants to see.
+func scanStatusOf(g *grade.Result, vulnErr error, interrupted bool) scanner.ScanStatus {
+	in := scanner.StatusInput{VulnErr: vulnErr, Interrupted: interrupted, Graded: g != nil}
+	if g != nil && g.Pending != nil {
+		in.PendingCheck, in.PendingReason = g.Pending.Check, g.Pending.Reason
+	}
+	return scanner.ScanStatusOf(in)
 }
 
 // calledPassTest is grade.CalledPassCanChangeLetter for this scan. The standard library's findings are listed but not graded

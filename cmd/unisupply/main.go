@@ -396,6 +396,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
 			Scan:            scanResult.ScanInfo,
+			ScanStatus:      &scanResult.ScanStatus,
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,

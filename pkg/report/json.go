@@ -26,6 +26,15 @@ type JSONReport struct {
 	// passes no result); a consumer that gates on the letter MUST treat null and a missing "letter" as "no result".
 	Grade *grade.Result `json:"grade"`
 
+	// ScanStatus says whether the result is final: complete, pending (a check the letter needs did not run), interrupted
+	// (the scan ran out of time or was cancelled) or failed (the vulnerability scan failed), with the stable reason code of
+	// the failure. A consumer reads it instead of inferring the state from warnings. Added in 0.8; always present.
+	ScanStatus scanner.ScanStatus `json:"scan_status"`
+
+	// DependencyGraph lists which module requires which, so a consumer can rebuild the graph without running the go
+	// command. Added in 0.8.
+	DependencyGraph JSONDependencyGraph `json:"dependency_graph"`
+
 	// Deprecated: kept for one release, derived from Grade (see json_deprecated.go). OverallRisk is the worst row's policy
 	// value, OverallLevel the coarse band of the letter (UNKNOWN without one) and Headline the deciding row in the old shape.
 	OverallRisk      *int         `json:"overall_risk_score,omitempty"`
@@ -65,6 +74,19 @@ type JSONReport struct {
 	// already reflects them. Emitted as an empty array (never null) when none
 	// are found.
 	TimeBombs []JSONTimeBomb `json:"time_bombs"`
+}
+
+// JSONDependencyGraph is the requirement graph of the scanned module.
+type JSONDependencyGraph struct {
+	// Root is the module path of the scanned module.
+	Root string `json:"root"`
+	// Source says where the edges come from: "go_mod_graph" (every module's own requirements; the only complete graph),
+	// "go_mod_requires" (go.mod's requirements only, because the go command could not run) or "direct_only" (--direct-only).
+	// Empty for a graph built by hand. Treat anything but "go_mod_graph" as the main module's requirements, not the tree.
+	Source string `json:"source,omitempty"`
+	// Edges are (from, to) pairs of module paths: from requires to. Versions are in dependencies[] (the selected version).
+	// Sorted by from, then to, without duplicates; never null.
+	Edges []resolver.Edge `json:"edges"`
 }
 
 // JSONFlatFinding is a normalized top-level finding entry for CI/CD and build-file
@@ -365,6 +387,10 @@ type JSONOptions struct {
 	// Scan says what the vulnerability scan ran with (platform, Go release, govulncheck version, vulnerability database and
 	// its last-modified time, and the age of the CISA catalog when it could not be refreshed). nil when no scan ran.
 	Scan *scanner.ScanInfo
+
+	// ScanStatus is the outcome of the scan (runner.Result.ScanStatus). nil means the writer works it out from the grade
+	// alone, which cannot tell an interrupted or failed scan from a pending one with the same missing check.
+	ScanStatus *scanner.ScanStatus
 }
 
 // toJSONVuln maps a scanned vulnerability to its JSON form. Dependency and
@@ -432,6 +458,8 @@ func WriteJSON(graph *resolver.Graph, ps *scorer.ProjectScore, opts JSONOptions,
 		Headline:         headline,
 		DeprecatedFields: deprecatedFields,
 		Scan:             opts.Scan,
+		ScanStatus:       jsonScanStatus(&opts),
+		DependencyGraph:  jsonDependencyGraph(graph),
 		Warnings:         publishedWarnings(ps.Warnings),
 		Notes:            ps.Notes,
 		TimeBombs:        collectJSONTimeBombs(ps),
@@ -723,6 +751,26 @@ func publishedWarnings(warnings []string) []string {
 		}
 		seen[w] = true
 		out = append(out, w)
+	}
+	return out
+}
+
+// jsonScanStatus is the status the caller gave, or the one the grade alone allows.
+func jsonScanStatus(opts *JSONOptions) scanner.ScanStatus {
+	if opts.ScanStatus != nil {
+		return *opts.ScanStatus
+	}
+	in := scanner.StatusInput{Graded: opts.Grade != nil}
+	if opts.Grade != nil && opts.Grade.Pending != nil {
+		in.PendingCheck, in.PendingReason = opts.Grade.Pending.Check, opts.Grade.Pending.Reason
+	}
+	return scanner.ScanStatusOf(in)
+}
+
+func jsonDependencyGraph(g *resolver.Graph) JSONDependencyGraph {
+	out := JSONDependencyGraph{Root: g.Root, Source: g.Source, Edges: g.Edges()}
+	if out.Edges == nil {
+		out.Edges = []resolver.Edge{}
 	}
 	return out
 }

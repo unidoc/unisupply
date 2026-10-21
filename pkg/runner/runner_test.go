@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -635,5 +636,19 @@ func TestCalledPassTest_Stdlib(t *testing.T) {
 	found["example.com/m"] = []scanner.Vulnerability{{ID: "GO-2", Severity: "HIGH", Reachability: "imported"}}
 	if need, _ := calledPassTest(false)(found); !need {
 		t.Error("a high advisory in a dependency still needs it")
+	}
+}
+
+func TestScanStatusOf_Runner(t *testing.T) {
+	failed := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonMissingGoSum, Err: errors.New("missing go.sum entry")}
+	pending := &grade.Result{Pending: &grade.Pending{Check: "vulnerability_scan", Reason: "x"}}
+	if st := scanStatusOf(pending, failed, false); st.Status != scanner.StatusFailed || st.Reason != scanner.ReasonMissingGoSum || st.Kind != "permanent" {
+		t.Errorf("failed: %+v", st)
+	}
+	if st := scanStatusOf(&grade.Result{Letter: grade.LetterA}, failed, false); st.Status != scanner.StatusFailed || st.Reason != scanner.ReasonMissingGoSum {
+		t.Errorf("a failure the letter does not rest on is still a failed scan: %+v", st)
+	}
+	if st := scanStatusOf(&grade.Result{Pending: &grade.Pending{Check: "scan_incomplete"}}, nil, true); st.Status != scanner.StatusInterrupted {
+		t.Errorf("interrupted: %+v", st)
 	}
 }

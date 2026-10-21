@@ -251,6 +251,8 @@ The `grade` object of `--format json`:
 }
 ```
 
+Next to `grade`, the JSON has `scan_status` (`{"status": "complete" | "pending" | "interrupted" | "failed", "reason": ..., "kind": ..., "detail": ...}`: whether the result is final, and why not) and `dependency_graph` (`{"root": ..., "source": ..., "edges": [{"from": ..., "to": ...}]}`: which module requires which). A gate should read `scan_status.status` and treat everything but `complete` as no result.
+
 `letter` is absent and `pending` present when the grade is Pending: `pending.check` names the check that did not run, and
 for a failed `vulnerability_scan` `pending.code` and `pending.kind` carry the scan failure's reason code and kind (see
 [Pending](#pending)). `estimated: true` marks a letter that an unpublished severity could change (`C*`).
