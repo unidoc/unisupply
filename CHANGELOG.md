@@ -36,9 +36,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 #### The published reason for a failed scan names the cause
 
-- `grade.pending.reason`, the text and PDF reports and the progress line used to end at `govulncheck: loading packages:`
-  when the packages could not be loaded, because only the first line of the error was kept and the cause is on the
-  following lines. They now give the reason code and the first real error, for example
+- `grade.pending.reason` and the text and PDF reports used to end at `govulncheck: loading packages:` when the packages
+  could not be loaded, because only the first line of the error was kept and the cause is on the following lines. They
+  now give the reason code and the first real error, for example
   `multiple_mains: b.go:3:6: main redeclared in this block`.
 
 #### `Options.Timeout` is a per-request limit
