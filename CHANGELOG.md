@@ -87,6 +87,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   could not run) and `direct_only` the edges are the main module's requirements only. In Go: `resolver.Graph.Edges()` and
   `resolver.Graph.Source`.
 
+#### Which modules' advisories changed: `pkg/vulndb`
+
+- **`vulndb.Client.ChangedModules(ctx, since)`** reads the Go vulnerability database's index
+  (`https://vuln.go.dev/index/modules.json.gz`, a gzip JSON array of `{"path", "vulns": [{"id", "modified", "fixed"}]}`, and
+  `index/db.json`, `{"modified"}`) and returns the modules that have an advisory modified after `since`, with the advisory IDs.
+  It reads `db.json` first and stops there when the database has not changed since. `Index.ChangedSince`,
+  `Index.ChangesSince` and `Index.Fingerprint(modules)` work on a fetched index; a fingerprint also sees an advisory that was
+  removed, which no timestamp can.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause
