@@ -30,6 +30,15 @@ type ScanInfo struct {
 	// KEVStaleSince is set when the CISA KEV catalog could not be refreshed
 	// and the copy from this date was used.
 	KEVStaleSince *time.Time `json:"kev_stale_since,omitempty"`
+
+	// CalledPassMode is the setting the scan ran with: "auto", "always" or "never".
+	CalledPassMode string `json:"called_pass_mode,omitempty"`
+	// CalledPass says whether govulncheck's called (symbol) pass ran: "ran", or "skipped" when only the imported (package)
+	// pass ran. A skipped called pass means every reached finding is reported as imported, with no call path; in auto
+	// mode that happens only when the called pass could not have changed the letter.
+	CalledPass string `json:"called_pass,omitempty"`
+	// CalledPassReason says in one sentence why the called pass ran or was skipped.
+	CalledPassReason string `json:"called_pass_reason,omitempty"`
 }
 
 // gvcConfig is govulncheck's leading {"config": {...}} message.

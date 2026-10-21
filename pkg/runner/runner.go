@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"runtime/debug"
 	"slices"
@@ -99,6 +100,13 @@ type Options struct {
 	// ResponseHistory turns on the fix-response-history lookup (extra module proxy and OSV requests): how fast the
 	// project has adopted its dependencies' fixes in the past. Needs SelfVersion. Off by default.
 	ResponseHistory bool
+
+	// CalledPass is when govulncheck's called pass (which vulnerable functions the code reaches) runs. The zero value is
+	// scanner.CalledPassAuto: the imported pass (which vulnerable packages it imports) runs first, and the called pass only
+	// when grade.CalledPassCanChangeLetter says it can change the letter. Findings that skip it are reported as imported,
+	// and Result.ScanInfo says the called pass was skipped and why. scanner.CalledPassAlways is the behaviour before the
+	// imported pass existed; scanner.CalledPassNever runs the imported pass only.
+	CalledPass scanner.CalledPassMode
 
 	// Now pins scanStart for deterministic scoring (all scanner age/activity
 	// classifications are computed against it). Defaults to
@@ -270,7 +278,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		// module's own row.
 		rep.Stage("Scanning vulnerabilities (govulncheck)")
 		var scanInfo scanner.ScanInfo
-		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
+		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
 		if verr != nil && !saidByWarnings(vulnWarnings, verr) {
 			rep.Warn("Vulnerability scan failed: %s", errString(verr))
 		}
@@ -324,7 +332,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 
 	rep.Stage("Scanning vulnerabilities (govulncheck)")
 	var scanInfo scanner.ScanInfo
-	vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, scanner.VulnScanOptions{GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: &scanInfo})
+	vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
 	// The scanner reports availability directly: a scan that did not run must
 	// not read as clean, whether it came back with an error or only a warning.
 	vulnScanUnavailable := !vulnScanned
@@ -516,6 +524,33 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		Maintainers:         maintainers,
 		Typosquats:          typosquats,
 	}, nil
+}
+
+// calledPassTest is grade.CalledPassCanChangeLetter for this scan. The standard library's findings are listed but not graded
+// unless the caller grades them (Options.GradeStdlib), so they cannot change the letter and are left out of the test; the
+// reason says so when they were there, because they are then shown as imported.
+func calledPassTest(gradeStdlib bool) scanner.NeedsCalledPassFunc {
+	return func(found map[string][]scanner.Vulnerability) (bool, string) {
+		listed := len(found[stdlibModule]) > 0
+		if !gradeStdlib && listed {
+			found = maps.Clone(found)
+			delete(found, stdlibModule)
+		}
+		needed, reason := grade.CalledPassCanChangeLetter(found)
+		if !needed && !gradeStdlib && listed {
+			reason += "; the standard library's advisories are listed, not graded, and are shown as imported"
+		}
+		return needed, reason
+	}
+}
+
+// vulnScanOptions is what the vulnerability scan runs with: the credentials, the called-pass setting and the grading
+// code's test for when the called pass can matter.
+func vulnScanOptions(opts *Options, githubToken string, info *scanner.ScanInfo) scanner.VulnScanOptions {
+	return scanner.VulnScanOptions{
+		GitHubToken: githubToken, NVDAPIKey: opts.NVDAPIKey, Info: info,
+		CalledPass: opts.CalledPass, NeedsCalledPass: calledPassTest(opts.GradeStdlib),
+	}
 }
 
 // panicScanError is the failure for a recovered panic. A panic from a worker goroutine arrives as a *safego.Panic that

@@ -44,6 +44,7 @@ func main() {
 		responseHistory        bool
 		gradeStdlib            bool
 		strictArchived         bool
+		calledPass             string
 		directOnly             bool
 		timeout                time.Duration
 		showHelp               bool
@@ -87,6 +88,7 @@ func main() {
 	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
 	flag.BoolVar(&gradeStdlib, "grade-stdlib", false, "Let the Go standard library decide the letter (it is always listed, with the Go release it was matched against, but not graded by default: its findings follow the Go toolchain that runs the scan)")
 	flag.BoolVar(&strictArchived, "strict-archived", false, "Make an archived flag that could not be read (GitHub rate limit without a token) make the grade Pending, instead of grading on what is known with a note")
+	flag.StringVar(&calledPass, "called-pass", "auto", "When govulncheck's called pass runs: auto (only when it can change the letter; the imported pass always runs first), always (as before), never (imported pass only)")
 	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
@@ -130,6 +132,7 @@ func main() {
 		responseHistory:        responseHistory,
 		gradeStdlib:            gradeStdlib,
 		strictArchived:         strictArchived,
+		calledPass:             calledPass,
 		directOnly:             directOnly,
 		timeout:                timeout,
 		scanWorkflows:          scanWorkflows,
@@ -182,6 +185,7 @@ type runConfig struct {
 	responseHistory        bool
 	gradeStdlib            bool
 	strictArchived         bool
+	calledPass             string
 	directOnly             bool
 	timeout                time.Duration
 	scanWorkflows          bool
@@ -204,6 +208,10 @@ func run(cfg *runConfig) error {
 	// otherwise be asked about a version no release has.
 	if cfg.responseHistory && cfg.moduleVersion == "" {
 		return fmt.Errorf("--response-history needs --module-version: the history is of the published module's releases")
+	}
+	calledPassMode, err := scanner.ParseCalledPassMode(cfg.calledPass)
+	if err != nil {
+		return fmt.Errorf("--called-pass: %w", err)
 	}
 	if cfg.moduleVersion != "" {
 		if err := scanner.CheckModuleVersion(cfg.moduleVersion); err != nil {
@@ -309,6 +317,7 @@ func run(cfg *runConfig) error {
 		ResponseHistory:        cfg.responseHistory,
 		GradeStdlib:            cfg.gradeStdlib,
 		StrictArchivedStatus:   cfg.strictArchived,
+		CalledPass:             calledPassMode,
 	})
 	if err != nil {
 		return err

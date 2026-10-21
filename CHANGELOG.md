@@ -47,6 +47,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   is not a `ScanError`. A caller that decides on a retry reads `kind`; `reason` keeps its text, with the code in front, and
   is for people.
 
+#### Imported pass first, called pass only when it can change the letter
+
+- **govulncheck now runs at package level first** (which vulnerable packages the code imports) and at symbol level (which
+  vulnerable functions it reaches, the called pass, the expensive one) only when `grade.CalledPassCanChangeLetter` says it
+  can change the letter: an imported advisory that is high or critical, known to be exploited (KEV), or has no severity yet.
+  The test asks the grading rules themselves (it scores each imported finding as imported and as called, alone and under
+  the whole-tree rules, and compares the bands), so it follows them if they change. The standard library's advisories do not
+  count unless `Options.GradeStdlib` grades them.
+- **Findings that skip the called pass are reported as imported**, with no call path. `scan.called_pass` (`ran` or
+  `skipped`), `scan.called_pass_reason` (one sentence) and `scan.called_pass_mode` say so in the JSON, and the text report
+  adds a line to its scan details.
+- **`runner.Options.CalledPass`** (`scanner.CalledPassAuto`, the default; `CalledPassAlways`, the previous behaviour;
+  `CalledPassNever`, the imported pass only) and the CLI flag **`--called-pass auto|always|never`**.
+  `scanner.VulnScanOptions` has `CalledPass` and `NeedsCalledPass`; without a predicate the scanner runs the called pass on
+  every scan, as before.
+- **A module whose packages do not compile is no longer a failed scan when the called pass is skipped.** govulncheck's
+  package level does not type-check, so a type error (two `main` functions in one package, say) shows only in the called pass.
+  When nothing the code imports could change the letter, the grade is given from the imports; when the called pass is needed
+  and fails, the scan fails as before. `--called-pass always` keeps the old behaviour for every module.
+- **A called pass that fails after the imported pass succeeded is a failed scan** (typed error, `Pending`), never an imported
+  listing that stands in for it.
+- **The heap govulncheck loaded is returned to the operating system as soon as it finishes** (`debug.FreeOSMemory` after
+  each pass), before the severity and threat-intel lookups that wait on the network. Nothing keeps the loaded packages or the
+  call graph alive after the pass.
+
 ### Improvements
 
 #### The published reason for a failed scan names the cause

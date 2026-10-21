@@ -217,6 +217,24 @@ left out, never 0: a v1 gate such as "overall_risk_score <= 60" must not pass a 
 The CI/CD audit (`--scan-ci`, `--scan-workflows`) is not part of the grade. It keeps its own 0 to 100 score, which is
 reported in the CI/CD section of the output and is what the policy field `max_ci_score` gates on.
 
+## When the called pass runs
+
+govulncheck gives each finding a tier, and the tier is what the table above scores. It finds the tiers in two passes: the
+imported pass (package level: is a package with an advisory imported?) is cheap, and the called pass (symbol level: does a
+path reach the vulnerable function?) loads and analyses the whole call graph, which takes most of the time and gigabytes of
+memory of a scan. unisupply runs the imported pass first and the called pass only when it can change the letter:
+`grade.CalledPassCanChangeLetter` answers by scoring every imported finding as imported and as called, alone and under the
+whole-tree rules, and asking whether the band differs. With the rules above that is true for any high or critical advisory, any
+known-exploited one (called is at least F), and any with no severity yet; medium and low advisories land in the same band
+either way. The standard library's advisories do not count unless `--grade-stdlib` grades them.
+
+When the called pass is skipped, the findings are reported as imported, with no call path, and `scan.called_pass` is `skipped`
+with `scan.called_pass_reason`. The imported pass does not type-check the packages (the called pass does), so a module whose packages do not compile is not a
+failed scan when the called pass is skipped: nothing it imports could change the letter, and the grade is given from the imports. If
+the called pass is needed and fails, the scan fails as before (`Pending`, with the typed reason). `--called-pass always` runs it on
+every scan (the previous behaviour); `never` runs the imported
+pass only, which can understate a letter and is for a quick listing, not for publishing one.
+
 ## JSON
 
 The `grade` object of `--format json`:
