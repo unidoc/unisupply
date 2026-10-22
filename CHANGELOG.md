@@ -3,6 +3,10 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+<!-- Add new entries here as they land on `development`. -->
+
 ## [0.8.0] - 2026-10-23
 
 Library-caller release. A failed scan now comes back as a typed
