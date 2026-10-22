@@ -157,7 +157,7 @@ func TestResolveGoEnv(t *testing.T) {
 		t.Skip("go is not on PATH")
 	}
 
-	version, goRoot, err := resolveGoEnv(context.Background(), t.TempDir())
+	version, goRoot, _, err := resolveGoEnv(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("resolveGoEnv: %v", err)
 	}
@@ -169,12 +169,29 @@ func TestResolveGoEnv(t *testing.T) {
 	}
 }
 
+// CGO_ENABLED comes from go env, so the setting of the scan's environment shows in it.
+func TestResolveGoEnv_CgoEnabled(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go is not on PATH")
+	}
+	for _, want := range []string{"0", "1"} {
+		t.Setenv("CGO_ENABLED", want)
+		_, _, got, err := resolveGoEnv(context.Background(), t.TempDir())
+		if err != nil {
+			t.Fatalf("resolveGoEnv: %v", err)
+		}
+		if got != want {
+			t.Errorf("CGO_ENABLED=%s: cgoEnabled = %q", want, got)
+		}
+	}
+}
+
 func TestResolveGoEnv_EmptyDirUsesProcessDirectory(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go is not on PATH")
 	}
 
-	version, goRoot, err := resolveGoEnv(context.Background(), "")
+	version, goRoot, _, err := resolveGoEnv(context.Background(), "")
 	if err != nil {
 		t.Fatalf("resolveGoEnv: %v", err)
 	}
@@ -189,7 +206,7 @@ func TestResolveGoEnv_BadDirFails(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if _, _, err := resolveGoEnv(context.Background(), missing); err == nil {
+	if _, _, _, err := resolveGoEnv(context.Background(), missing); err == nil {
 		t.Error("resolveGoEnv in a missing directory returned no error")
 	}
 }

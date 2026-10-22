@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
@@ -110,10 +111,12 @@ func (ms *MaintenanceScanner) ScanActivity(ctx context.Context, graph *resolver.
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 10)
 	var failed, done atomic.Int64
+	var panics safego.Catcher
 	for _, dep := range todo {
 		wg.Add(1)
 		go func(modPath string) {
 			defer wg.Done()
+			defer panics.Recover()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -125,6 +128,7 @@ func (ms *MaintenanceScanner) ScanActivity(ctx context.Context, graph *resolver.
 		}(dep.Module.Path)
 	}
 	wg.Wait()
+	panics.Repanic()
 
 	if n := failed.Load(); n > 0 {
 		return fmt.Errorf("default-branch activity lookup failed for %d of %d module(s) (module proxy unreachable or erroring); their maintenance uses the release age alone", n, total)

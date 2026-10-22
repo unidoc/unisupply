@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -582,10 +583,13 @@ func callPath(trace []traceEntry) []string {
 // additional CLI flag is needed to enable reachability data.
 // The `scanned` return reports whether govulncheck actually analyzed the module
 // graph. It exists because an empty vulns map is ambiguous — "scanned, nothing
-// found" and "never ran" look identical — and because most failures here surface
-// as a warning with a nil error, so a caller checking only err would read a
-// failed scan as a clean one. The scorer excludes the 40% vulnerability weight
-// when this is false; see scorer.ScoreInput.VulnScanUnavailable.
+// found" and "never ran" look identical. The scorer excludes the 40% vulnerability
+// weight when this is false; see scorer.ScoreInput.VulnScanUnavailable.
+//
+// A failed scan returns a *ScanError (use errors.As): its Reason and Kind say what
+// went wrong and whether a retry can help. When govulncheck ran, the failure text
+// is also in warnings; a refused toolchain (CheckToolchain) is in the error only.
+// A failed scan may still return the partial vulns it parsed.
 func ScanVulns(ctx context.Context, projectDir, githubToken string) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	return ScanVulnsWithOptions(ctx, projectDir, VulnScanOptions{GitHubToken: githubToken})
 }
@@ -624,18 +628,18 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	// and GOROOT for the standard library in this process's working directory.
 	// Resolve the project's own so the result does not depend on where
 	// unisupply was launched from.
-	projectGoVersion, projectGoRoot, projectErr := resolveGoEnv(ctx, projectDir)
+	projectGoVersion, projectGoRoot, projectCgo, projectErr := resolveGoEnv(ctx, projectDir)
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
 	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
 	if projectErr == nil {
 		if err := CheckToolchain(projectGoVersion); err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, &ScanError{Kind: FailPermanent, Reason: ReasonNeedsNewerGo, Err: err}
 		}
 	}
 	// A failure here only costs stdlib file positions, so it is not reported.
-	_, scannerGoRoot, scannerErr := resolveGoEnv(ctx, "")
+	_, scannerGoRoot, _, scannerErr := resolveGoEnv(ctx, "")
 	parseOpts := gvcParseOptions{}
 	if projectErr == nil && scannerErr == nil {
 		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
@@ -660,6 +664,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	// fall back to exitErr.Error() for the common in-process case.
 	exitErr := cmd.Wait()
 
+	// scanErr is the typed failure the caller gets next to the warnings; nil while the scan is sound.
+	var scanErr *ScanError
 	if exitErr != nil {
 		// scan.Command runs govulncheck in-process; errors surface via Wait(), not stderr.
 		// The library already prefixes errors with "govulncheck:" (derrors.Wrap).
@@ -673,17 +679,31 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		if terr := toolchainErrorFrom(msg); terr != nil {
 			msg = terr.Error()
 		}
+		// The warning and the reason are published: neither carries the path of the project on this machine.
+		msg = trimProjectDir(msg, projectDir)
 		warnings = append(warnings, msg)
+		scanErr = classifyScanFailure(msg, ctx.Err())
+		// "no packages matched" is also what a module whose files all need cgo gives when cgo is off: say so, but only
+		// when the go command confirms cgo is off and a file of the module imports "C".
+		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectCgo == "0" && hasCgoImport(projectDir) {
+			scanErr.Reason = ReasonCgoOnly
+		}
 	}
 
 	if stdout.Len() == 0 {
 		warnings = append(warnings, "govulncheck produced no output")
-		return nil, warnings, false, nil
+		if scanErr == nil {
+			scanErr = &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: errors.New("govulncheck produced no output")}
+		}
+		return nil, warnings, false, scanErr
 	}
 
 	results, err := parseGovulncheckJSONWithOptions(&stdout, parseOpts)
 	if err != nil {
-		return nil, append(warnings, err.Error()), false, nil
+		if scanErr == nil {
+			scanErr = &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: err}
+		}
+		return nil, append(warnings, err.Error()), false, scanErr
 	}
 
 	// Enrich UNKNOWN-severity vulnerabilities via OSV + GHSA.
@@ -712,7 +732,10 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	// A non-nil exitErr means govulncheck failed even though it emitted parseable
 	// output, so the results are partial. Report the axis as unmeasured rather
 	// than scoring an incomplete scan as a complete one.
-	return results, warnings, exitErr == nil, nil
+	if scanErr != nil {
+		return results, warnings, false, scanErr
+	}
+	return results, warnings, true, nil
 }
 
 // CVEAlias returns the CVE ID to use for threat-intel lookups on v: the ID

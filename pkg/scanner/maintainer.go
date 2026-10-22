@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
@@ -273,12 +274,14 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	total := len(ghDeps)
 
 	var done int64
+	var panics safego.Catcher
 
 	for _, dep := range ghDeps {
 		or := repos[dep]
 		wg.Add(1)
 		go func(d *resolver.Dependency, owner, repo string) {
 			defer wg.Done()
+			defer panics.Recover()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -301,6 +304,7 @@ func (ms *MaintainerScanner) ScanAll(ctx context.Context, graph *resolver.Graph)
 	}
 
 	wg.Wait()
+	panics.Repanic()
 	return results
 }
 
