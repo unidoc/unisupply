@@ -9,17 +9,19 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
-// FailKind says whether a failed scan is worth retrying.
+// FailKind says whether a failed scan is worth retrying. The zero value is FailPermanent, so a ScanError built without
+// a Kind is never retried.
 type FailKind int
 
 const (
-	FailTransient FailKind = iota // network, timeout, rate limit
-	FailPermanent                 // examples layout, cgo-only deps, no go.mod, needs newer Go
+	FailPermanent FailKind = iota // examples layout, cgo-only deps, no go.mod, needs newer Go
+	FailTransient                 // network, timeout, rate limit
 	FailTooLarge                  // exceeded limits
 )
 
@@ -40,7 +42,8 @@ func (k FailKind) String() string {
 const (
 	ReasonNeedsNewerGo      = "needs_newer_go"     // the project needs a newer Go than this unisupply was built with
 	ReasonNoGoMod           = "no_go_mod"          // no go.mod to scan
-	ReasonMultipleMains     = "multiple_mains"     // several package main files in one directory
+	ReasonMultipleMains     = "multiple_mains"     // func main declared in more than one file of a package
+	ReasonMixedPackages     = "mixed_packages"     // files of two different packages in one directory
 	ReasonNoPackages        = "no_packages"        // the scan found no package to load
 	ReasonCgoOnly           = "cgo_only"           // no package to load: cgo is off and the module's files import "C"
 	ReasonMissingGoSum      = "missing_gosum"      // a go.sum entry is missing and -mod=readonly forbids adding it
@@ -49,7 +52,7 @@ const (
 	ReasonVulnDBUnreachable = "vulndb_unreachable" // the vulnerability database could not be fetched
 	ReasonScanDeadline      = "scan_deadline"      // the scan's context deadline passed before it finished; FailTooLarge
 	ReasonInternalPanic     = "internal_panic"     // a scanner panicked
-	ReasonUnknown           = "unknown"            // nothing matched; FailPermanent
+	ReasonUnknown           = "unknown"            // nothing matched; FailPermanent (a caller may still retry it a bounded number of times)
 )
 
 // ScanError is a scan that failed, with the cause and whether a retry can help.
@@ -84,7 +87,8 @@ func (e *ScanError) Summary() string {
 		return e.Reason
 	}
 	for _, line := range strings.Split(e.Err.Error(), "\n") {
-		line = strings.TrimSpace(line)
+		// "-: " is the position of a package error that has none ("-: found packages main (a.go) and ...").
+		line = strings.TrimPrefix(strings.TrimSpace(line), "-: ")
 		if line == "" || line == "..." || scanErrorNoise[line] {
 			continue
 		}
@@ -146,7 +150,9 @@ var scanFailureRules = []struct {
 	// CheckToolchain's sentence, and x/vuln's own version-mismatch text (a newline sits inside its sentence).
 	{ReasonNeedsNewerGo, FailPermanent, regexp.MustCompile(`requires go >= ?\d|requires newer Go version|cannot scan code that needs go\d|mismatch between the Go version\s+used to build govulncheck`)},
 	{ReasonNoGoMod, FailPermanent, regexp.MustCompile(`no go\.mod file|go\.mod file not found|no go\.mod found in|cannot find main module`)},
-	{ReasonMultipleMains, FailPermanent, regexp.MustCompile(`main redeclared in this block|found packages main \(`)},
+	{ReasonMultipleMains, FailPermanent, regexp.MustCompile(`main redeclared in this block`)},
+	// "found packages main (a.go) and other (b.go) in <dir>", in either order.
+	{ReasonMixedPackages, FailPermanent, regexp.MustCompile(`found packages \S+ \([^)]*\) and \S+ \(`)},
 	// x/vuln's errNoPackagesMatched, which a module with no Go files gives as well as one whose files all need cgo; the
 	// caller tells them apart (ReasonCgoOnly) by looking at the files, since the message cannot.
 	{ReasonNoPackages, FailPermanent, regexp.MustCompile(`no packages matched the provided patterns`)},
@@ -156,7 +162,9 @@ var scanFailureRules = []struct {
 	// ...") is a build failure.
 	{ReasonRateLimited, FailTransient, regexp.MustCompile(`(?i)too many requests|\brate limit(?:ed|ing)?\b|(?:status|code|http|returned)[: ]+429\b`)},
 	{ReasonVulnDBUnreachable, FailTransient, regexp.MustCompile(`vuln\.go\.dev|GOVULNDB|HTTP (?:GET|POST) \S+ returned unexpected status`)},
-	{ReasonModuleFetch, FailTransient, regexp.MustCompile(`(?i)dial tcp|i/o timeout|TLS handshake|connection reset|connection refused|no such host|network is unreachable|\b50[0-4] (?:bad gateway|service unavailable|gateway timeout|internal server error)`)},
+	// A cut download ("unexpected EOF"), a TCP timeout ("read: connection timed out") and an HTTP/2 stream reset
+	// ("stream error: stream ID 3; INTERNAL_ERROR") are network faults too.
+	{ReasonModuleFetch, FailTransient, regexp.MustCompile(`(?i)dial tcp|i/o timeout|TLS handshake|connection reset|connection refused|connection timed out|no such host|network is unreachable|unexpected EOF|stream error: stream ID \d+|\b50[0-4] (?:bad gateway|service unavailable|gateway timeout|internal server error)`)},
 }
 
 // classifyScanFailure types the message of a failed scan. ctxErr is the scan context's error: once the context has
@@ -164,38 +172,70 @@ var scanFailureRules = []struct {
 // matched. Past that, a context whose deadline passed is ReasonScanDeadline, and one the caller canceled is unknown: a
 // cancel is the caller's own decision, not something a retry answers.
 func classifyScanFailure(msg string, ctxErr error) *ScanError {
-	return WrapScanFailure(errors.New(msg), ctxErr)
+	return WrapScanFailure(errors.New(msg), ctxErr, "")
 }
 
 // WrapScanFailure types err like classifyScanFailure does its message, and keeps err as the cause: its text is cut to the
 // tail, but errors.Is and errors.As still see it. A ReasonScanDeadline error also carries ctxErr, so
-// errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text.
-func WrapScanFailure(err, ctxErr error) *ScanError {
-	msg := err.Error()
+// errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text. projectDir, when not
+// empty, is cut from the text (see trimProjectDir), so that the published reason does not carry a path of the scanning
+// machine.
+func WrapScanFailure(err, ctxErr error, projectDir string) *ScanError {
+	msg := trimProjectDir(err.Error(), projectDir)
 	for _, r := range scanFailureRules {
 		if ctxErr != nil && r.kind == FailTransient {
 			continue
 		}
 		if r.match.MatchString(msg) {
-			return &ScanError{Kind: r.kind, Reason: r.reason, Err: tailOf(err)}
+			return &ScanError{Kind: r.kind, Reason: r.reason, Err: tailOf(err, msg)}
 		}
 	}
 	if errors.Is(ctxErr, context.DeadlineExceeded) {
-		return &ScanError{Kind: FailTooLarge, Reason: ReasonScanDeadline, Err: &tailError{text: tailOf(err).Error(), err: errors.Join(err, ctxErr)}}
+		return &ScanError{Kind: FailTooLarge, Reason: ReasonScanDeadline, Err: &tailError{text: tailOf(err, msg).Error(), err: errors.Join(err, ctxErr)}}
 	}
-	return &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: tailOf(err)}
+	return &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: tailOf(err, msg)}
 }
 
-// tailOf cuts err to its tail; an error with no text gets a placeholder, so that a ScanError always says something.
-func tailOf(err error) error {
-	msg := strings.TrimSpace(err.Error())
+// tailOf is err with its text msg (err's own text, or that text with the project directory cut) cut to the tail; an
+// error with no text gets a placeholder, so that a ScanError always says something.
+func tailOf(err error, msg string) error {
+	msg = strings.TrimSpace(msg)
 	if msg == "" {
 		return &tailError{text: "no error text", err: err}
 	}
-	if tail := stderrTail(msg); tail != msg {
+	if tail := stderrTail(msg); tail != strings.TrimSpace(err.Error()) {
 		return &tailError{text: tail, err: err}
 	}
 	return err
+}
+
+// trimProjectDir cuts the project directory out of a go command's message: "<dir>/b.go:3:6: ..." becomes
+// "b.go:3:6: ...", and "<dir>" on its own ("found packages a (a.go) and b (b.go) in <dir>") becomes ".". The directory
+// is matched absolute and with its symlinks resolved, since the go command reports the resolved path (/private/tmp for
+// /tmp on macOS); a sibling such as "<dir>2" is left alone. An empty dir leaves msg as it is.
+func trimProjectDir(msg, dir string) string {
+	if dir == "" {
+		return msg
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return msg
+	}
+	forms := []string{abs}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil && resolved != abs {
+		forms = append(forms, resolved)
+	}
+	// The longer form first: one can contain the other ("/tmp/x" is in "/private/tmp/x").
+	slices.SortFunc(forms, func(a, b string) int { return len(b) - len(a) })
+	sep := string(filepath.Separator)
+	for _, d := range forms {
+		if d == sep || filepath.Dir(d) == d {
+			continue // a volume root would cut every path
+		}
+		msg = strings.ReplaceAll(msg, d+sep, "")
+		msg = regexp.MustCompile(regexp.QuoteMeta(d)+`([\s"'):,;]|$)`).ReplaceAllString(msg, ".${1}")
+	}
+	return msg
 }
 
 // hasCgoImport reports whether a non-test Go file of the module in dir imports "C". It reads the import clauses only, and

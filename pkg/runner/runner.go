@@ -235,7 +235,7 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	rep.Stage("Resolving dependency graph")
 	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
 	if err != nil {
-		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err())
+		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err(), projectDir)
 	}
 	for _, w := range resolverWarnings {
 		rep.Warn("%s", w)

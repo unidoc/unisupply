@@ -109,7 +109,7 @@ func TestErrString(t *testing.T) {
 		t.Errorf("%q", got)
 	}
 	// a scan error is its summary, even inside another error, where the first line of its text says nothing
-	se := &scanner.ScanError{Reason: scanner.ReasonMultipleMains, Err: errors.New("\nThere are errors with the provided package patterns:\n\nb.go:3:6: main redeclared in this block")}
+	se := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonMultipleMains, Err: errors.New("\nThere are errors with the provided package patterns:\n\nb.go:3:6: main redeclared in this block")}
 	for _, err := range []error{se, fmt.Errorf("wrapped: %w", se)} {
 		if got := errString(err); got != "multiple_mains: b.go:3:6: main redeclared in this block" {
 			t.Errorf("errString = %q", got)

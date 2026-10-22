@@ -679,6 +679,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		if terr := toolchainErrorFrom(msg); terr != nil {
 			msg = terr.Error()
 		}
+		// The warning and the reason are published: neither carries the path of the project on this machine.
+		msg = trimProjectDir(msg, projectDir)
 		warnings = append(warnings, msg)
 		scanErr = classifyScanFailure(msg, ctx.Err())
 		// "no packages matched" is also what a module whose files all need cgo gives when cgo is off: say so, but only

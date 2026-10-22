@@ -32,7 +32,15 @@ const (
 		"main.go:3:8: gopkg.in/yaml.v3@v3.0.1: Get \"http://127.0.0.1:1/gopkg.in/yaml.v3/@v/v3.0.1.zip\": dial tcp 127.0.0.1:1: connect: connection refused\n" +
 		"/p/module_fetch/main.go:3:8: could not import gopkg.in/yaml.v3 (invalid package name: \"\")\n\n" +
 		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
-	msgNoPackages = "govulncheck: no packages matched the provided patterns"
+	msgNoPackages    = "govulncheck: no packages matched the provided patterns"
+	msgMixedPackages = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"-: found packages main (a.go) and other (b.go) in /p/mixed_packages\n" +
+		"/p/mixed_packages/b.go:1:1: package other; expected package main\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	msgMixedPackagesMainLast = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"-: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last\n" +
+		"/p/mixed_packages_main_last/b.go:1:1: package main; expected package alpha\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
 	// x/vuln's errNoGoMod, from the source (constructed).
 	msgNoGoMod = "govulncheck: no go.mod file\n\ngovulncheck only works with Go modules. Try navigating to your module directory.\n"
 	// x/vuln's errGoVersionMismatch followed by the loader's error, from the source (constructed).
@@ -60,6 +68,9 @@ func TestClassifyScanFailure(t *testing.T) {
 		kind   FailKind
 	}{
 		{"multiple mains", msgMultipleMains, ReasonMultipleMains, FailPermanent},
+		// two package names in one directory, whichever comes first
+		{"mixed packages", msgMixedPackages, ReasonMixedPackages, FailPermanent},
+		{"mixed packages, main last", msgMixedPackagesMainLast, ReasonMixedPackages, FailPermanent},
 		{"needs newer go (recorded)", msgNeedsNewerGo, ReasonNeedsNewerGo, FailPermanent},
 		{"needs newer go (CheckToolchain)", msgToolchain, ReasonNeedsNewerGo, FailPermanent},
 		{"needs newer go (x/vuln mismatch)", msgVersionMismatch, ReasonNeedsNewerGo, FailPermanent},
@@ -87,6 +98,14 @@ func TestClassifyScanFailure(t *testing.T) {
 		{"GitHub rate limit", "GET https://api.github.com/repos/x/y: 403 API rate limit exceeded for 1.2.3.4", ReasonRateLimited, FailTransient},
 		{"GitHub secondary rate limit", "You have exceeded a secondary rate limit", ReasonRateLimited, FailTransient},
 		{"rate limited", "request was rate limited", ReasonRateLimited, FailTransient},
+		// network wording reported on the PR (constructed, go command and net/http shapes)
+		{"cut download", "govulncheck: loading packages: err: exit status 1: stderr: go: github.com/x/y@v1.2.3: unexpected EOF", ReasonModuleFetch, FailTransient},
+		{"TCP timeout", "go: github.com/x/y@v1.2.3: read tcp 10.0.0.2:51234->142.250.1.1:443: read: connection timed out", ReasonModuleFetch, FailTransient},
+		{"HTTP/2 stream reset", "go: github.com/x/y@v1.2.3: Get \"https://proxy.golang.org/github.com/x/y/@v/v1.2.3.zip\": stream error: stream ID 3; INTERNAL_ERROR; received from peer", ReasonModuleFetch, FailTransient},
+		// not a network fault: a source file that ends early (recorded; go/parser's wording, not the compiler's
+		// "unexpected EOF"), and an identifier that names a stream error
+		{"source file cut short", "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\na.go:3:15: expected ';', found 'EOF'\na.go:3:15: expected '}', found 'EOF'\n", ReasonUnknown, FailPermanent},
+		{"streamError identifier", "/p/a.go:3:2: undefined: streamError", ReasonUnknown, FailPermanent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,6 +154,10 @@ func TestFailKindString(t *testing.T) {
 			t.Errorf("FailKind(%d) = %q, want %q", int(k), got, want)
 		}
 	}
+	// a ScanError built without a Kind must not be retried
+	if k := (ScanError{}).Kind; k != FailPermanent {
+		t.Errorf("zero Kind = %v, want permanent", k)
+	}
 }
 
 func TestScanErrorSummary(t *testing.T) {
@@ -146,6 +169,8 @@ func TestScanErrorSummary(t *testing.T) {
 		// the message starts with a blank line and a header: the first line of Error() says nothing
 		{"package errors", classifyScanFailure(msgMultipleMains, nil), "multiple_mains: /p/multiple_mains/b.go:3:6: main redeclared in this block"},
 		{"loader message", classifyScanFailure(msgNeedsNewerGo, nil), "needs_newer_go: govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)"},
+		// a package error without a position starts with "-: "
+		{"no position", classifyScanFailure(msgMixedPackagesMainLast, nil), "mixed_packages: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last"},
 		{"cut tail", &ScanError{Reason: ReasonUnknown, Err: errors.New("...\nsecond\nthird")}, "unknown: second"},
 		{"bare prefix only", &ScanError{Reason: ReasonUnknown, Err: errors.New("govulncheck: loading packages: \n\n")}, "unknown"},
 		{"no Err", &ScanError{Reason: ReasonUnknown}, "unknown"},
@@ -239,7 +264,7 @@ func TestClassifyScanFailure_ErrIsTheTail(t *testing.T) {
 
 func TestWrapScanFailure_KeepsTheChain(t *testing.T) {
 	long := errors.New(strings.Repeat("a long line of go output\n", 100) + "dial tcp 1.1.1.1:443: i/o timeout")
-	wrapped := WrapScanFailure(errors.Join(fs.ErrNotExist, long), nil)
+	wrapped := WrapScanFailure(errors.Join(fs.ErrNotExist, long), nil, "")
 	if !errors.Is(wrapped, fs.ErrNotExist) || !errors.Is(wrapped, long) {
 		t.Error("errors.Is must see through the ScanError and the cut")
 	}
@@ -250,6 +275,47 @@ func TestWrapScanFailure_KeepsTheChain(t *testing.T) {
 	plain := &ScanError{Reason: ReasonUnknown, Err: fs.ErrPermission}
 	if !errors.Is(plain, fs.ErrPermission) || errors.Unwrap(plain) != fs.ErrPermission {
 		t.Error("Unwrap must return Err")
+	}
+}
+
+func TestTrimProjectDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proj")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	// t.TempDir can itself sit behind a symlink (/var -> /private/var on macOS): the go command reports the resolved path.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	tests := []struct {
+		name, msg, dir, want string
+	}{
+		{"file in the project", resolved + sep + "b.go:3:6: main redeclared in this block", dir, "b.go:3:6: main redeclared in this block"},
+		{"file in a subdirectory", resolved + sep + "sub" + sep + "a.go:1:1: x", dir, "sub" + sep + "a.go:1:1: x"},
+		{"the directory itself", "found packages a (a.go) and b (b.go) in " + resolved + "\nnext", dir, "found packages a (a.go) and b (b.go) in .\nnext"},
+		{"the directory at the end", "no Go files in " + resolved, dir, "no Go files in ."},
+		{"through a symlink", resolved + sep + "b.go:1:1: x", link, "b.go:1:1: x"},
+		{"a sibling is kept", resolved + "2" + sep + "b.go:1:1: x", dir, resolved + "2" + sep + "b.go:1:1: x"},
+		{"no directory", resolved + sep + "b.go:1:1: x", "", resolved + sep + "b.go:1:1: x"},
+	}
+	for _, tc := range tests {
+		if got := trimProjectDir(tc.msg, tc.dir); got != tc.want {
+			t.Errorf("%s: trimProjectDir = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// WrapScanFailure cuts it from the text it keeps, and errors.Is still sees the original error.
+	cause := errors.New(resolved + sep + "go.mod:3: unknown directive: x")
+	se := WrapScanFailure(cause, nil, dir)
+	if got := se.Err.Error(); got != "go.mod:3: unknown directive: x" || !errors.Is(se, cause) {
+		t.Errorf("Err = %q, errors.Is = %v", got, errors.Is(se, cause))
 	}
 }
 

@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,16 @@ func TestScanErr_Fixtures(t *testing.T) {
 			// b.go:3:6: main redeclared in this block
 			name: "multiple_mains", reason: scanner.ReasonMultipleMains, kind: scanner.FailPermanent,
 			text: "main redeclared in this block",
+		},
+		{
+			// -: found packages main (a.go) and other (b.go) in <dir>
+			name: "mixed_packages", reason: scanner.ReasonMixedPackages, kind: scanner.FailPermanent,
+			text: "found packages main (a.go) and other (b.go) in .",
+		},
+		{
+			// -: found packages alpha (a.go) and main (b.go) in <dir>
+			name: "mixed_packages_main_last", reason: scanner.ReasonMixedPackages, kind: scanner.FailPermanent,
+			text: "found packages alpha (a.go) and main (b.go) in .",
 		},
 		{
 			// go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)
@@ -97,6 +108,10 @@ func TestScanErr_Fixtures(t *testing.T) {
 			if !strings.Contains(se.Err.Error(), tc.text) {
 				t.Errorf("Err = %q, want it to contain the cause %q", se.Err, tc.text)
 			}
+			// the published text names files relative to the project, never by this machine's path
+			if abs, err := filepath.Abs(testdataPath("scanerr", tc.name)); err != nil || strings.Contains(se.Err.Error(), abs) {
+				t.Errorf("Err = %q, want it without the project's absolute path %q", se.Err, abs)
+			}
 			t.Logf("%s", se.Summary())
 		})
 	}
@@ -122,7 +137,7 @@ func TestScanErr_PendingReasonNamesTheCause(t *testing.T) {
 		t.Fatalf("Grade = %+v, want Pending (vulnerability_scan)", res.Grade)
 	}
 	reason := res.Grade.Pending.Reason
-	if strings.Contains(reason, "\n") || !strings.Contains(reason, "main redeclared in this block") {
-		t.Errorf("pending reason = %q, want one line naming the duplicate main", reason)
+	if want := ": multiple_mains: b.go:3:6: main redeclared in this block"; !strings.HasSuffix(reason, want) || strings.Contains(reason, "\n") {
+		t.Errorf("pending reason = %q, want one line ending in %q: the duplicate main, without the project's path", reason, want)
 	}
 }
