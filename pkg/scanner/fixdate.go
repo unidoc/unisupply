@@ -14,6 +14,7 @@ import (
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/offline"
 )
 
@@ -201,16 +202,19 @@ func fetchProxyTimes(ctx context.Context, opts FixDateOptions, lookups []fixLook
 		out = make(map[fixLookup]time.Time, len(lookups))
 		sem = make(chan struct{}, fixDateMaxConcurrency)
 	)
+	var panics safego.Catcher
 	for _, l := range lookups {
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
 			wg.Wait()
+			panics.Repanic()
 			return out
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			defer func() { <-sem }()
 			if t, ok := proxyInfoTime(ctx, client, proxy, u.Host, l); ok {
 				mu.Lock()
@@ -220,6 +224,7 @@ func fetchProxyTimes(ctx context.Context, opts FixDateOptions, lookups []fixLook
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 	return out
 }
 

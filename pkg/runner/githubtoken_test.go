@@ -298,3 +298,35 @@ func TestRun_GithubTokenPrecondition(t *testing.T) {
 		})
 	}
 }
+
+// Options.Timeout is the per-request limit of the scanner clients, even when the scan's context has no deadline. The token
+// probe is the one request Run sends in a test without a network, through the same scanner.NewClient the other scanners
+// use: the deadline its request carries must be Options.Timeout, not the probe's own 5s.
+func TestRun_OptionsTimeoutReachesTheRequest(t *testing.T) {
+	var remaining time.Duration
+	var hasDeadline bool
+	original := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/rate_limit" {
+			return nil, fmt.Errorf("no network in this test: %s", req.URL)
+		}
+		var dl time.Time
+		if dl, hasDeadline = req.Context().Deadline(); hasDeadline {
+			remaining = time.Until(dl)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header), Request: req}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	const limit = 300 * time.Millisecond
+	_, err := Run(context.Background(), Options{
+		Path: writeEmptyModule(t), GithubToken: "tok", RequireGithubToken: true, Timeout: limit,
+		Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !hasDeadline || remaining <= 0 || remaining > limit {
+		t.Errorf("the request carried a deadline of %v (set: %v), want at most Options.Timeout (%v)", remaining, hasDeadline, limit)
+	}
+}

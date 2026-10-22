@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,7 +85,8 @@ func TestScanVulns_ToolchainTooOld(t *testing.T) {
 
 	vulns, _, scanned, err := ScanVulnsWithOptions(context.Background(), t.TempDir(), VulnScanOptions{})
 	want := "this unisupply was built with go1.26.9 and cannot scan code that needs go1.99; rebuild unisupply with go1.99 or newer"
-	if err == nil || err.Error() != want || scanned || vulns != nil {
+	var se *ScanError
+	if !errors.As(err, &se) || se.Err.Error() != want || se.Reason != ReasonNeedsNewerGo || se.Kind != FailPermanent || scanned || vulns != nil {
 		t.Errorf("err = %v scanned = %v", err, scanned)
 	}
 }

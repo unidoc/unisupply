@@ -17,6 +17,7 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
 
+	"github.com/unidoc/unisupply/internal/safego"
 	"github.com/unidoc/unisupply/pkg/offline"
 )
 
@@ -421,14 +422,17 @@ func ScanResponseHistory(ctx context.Context, opts ResponseHistoryOptions, modul
 
 	results := make([]*ResponseHistory, len(deps))
 	var wg sync.WaitGroup
+	var panics safego.Catcher
 	for i, dep := range deps {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			results[i] = f.history(ctx, dep, releases)
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 
 	out := make(map[string]*ResponseHistory)
 	for i, h := range results {
@@ -444,10 +448,12 @@ func ScanResponseHistory(ctx context.Context, opts ResponseHistoryOptions, modul
 func (f *responseHistoryFetcher) loadReleases(ctx context.Context, module string, versions []string) []responseHistoryRelease {
 	loaded := make([]*responseHistoryRelease, len(versions))
 	var wg sync.WaitGroup
+	var panics safego.Catcher
 	for i, v := range versions {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer panics.Recover()
 			t, err := f.releaseTime(ctx, module, v)
 			if err != nil {
 				return
@@ -460,6 +466,7 @@ func (f *responseHistoryFetcher) loadReleases(ctx context.Context, module string
 		}()
 	}
 	wg.Wait()
+	panics.Repanic()
 	var out []responseHistoryRelease
 	for _, r := range loaded {
 		if r != nil {

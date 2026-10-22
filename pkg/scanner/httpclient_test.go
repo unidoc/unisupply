@@ -165,6 +165,61 @@ func TestHTTPClient_TimeoutEnforced(t *testing.T) {
 	}
 }
 
+// ClientOptions.Timeout bounds one request and nothing else: it fires on a context with no deadline, and a shorter
+// deadline on the scan's context still wins over a longer Timeout. A caller must therefore pass its scan limit as the
+// context deadline, not as the timeout.
+func TestHTTPClient_TimeoutIsPerRequestAndTheContextDeadlineStillWins(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// never answers; release only lets the server shut down when a request outlives its limit
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	host := mustHost(t, srv.URL)
+
+	// get runs the request off the test goroutine, so a client with no limit fails the test instead of hanging it.
+	get := func(t *testing.T, ctx context.Context, c *Client) (time.Duration, error) {
+		type result struct{ err error }
+		done := make(chan result, 1)
+		start := time.Now()
+		go func() {
+			_, _, err := c.Get(ctx, srv.URL, GetOptions{Host: host})
+			done <- result{err}
+		}()
+		select {
+		case r := <-done:
+			return time.Since(start), r.err
+		case <-time.After(2 * time.Second):
+			t.Fatal("the request was still running after 2s: nothing bounded it")
+			return 0, nil
+		}
+	}
+
+	t.Run("client timeout fires without a context deadline", func(t *testing.T) {
+		c := NewClient(ClientOptions{Timeout: 200 * time.Millisecond})
+		_, err := get(t, context.Background(), c)
+		// The context has no deadline, so a deadline error can only be the client's own timeout. net/http words it
+		// either way ("... (Client.Timeout exceeded ...)" or a plain "context deadline exceeded"), so match the error.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want the client's own timeout", err)
+		}
+	})
+
+	t.Run("context deadline wins over a longer client timeout", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		c := NewClient(ClientOptions{Timeout: 10 * time.Second})
+		_, err := get(t, ctx, c)
+		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "Client.Timeout") {
+			t.Errorf("err = %v, want the context's deadline, not the client's timeout", err)
+		}
+	})
+}
+
 func TestHTTPClient_HostMatchesIgnoresPort(t *testing.T) {
 	if !hostMatches("example.com:8080", "example.com") {
 		t.Error("host-with-port should match host-without-port")
