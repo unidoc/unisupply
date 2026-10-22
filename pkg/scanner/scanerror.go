@@ -60,6 +60,10 @@ type ScanError struct {
 	Kind   FailKind
 	Reason string // stable code, e.g. "multiple_mains", "needs_newer_go"
 	Err    error  // the underlying govulncheck/go output
+
+	// decidingLine is the line of the failure message that the classifying rule matched, set by WrapScanFailure. It is kept
+	// apart from Err, since the tail cut can drop it from there, and Summary publishes it in place of the first line.
+	decidingLine string
 }
 
 func (e *ScanError) Error() string {
@@ -79,20 +83,37 @@ var scanErrorNoise = map[string]bool{
 	"There are errors with the provided package patterns:": true,
 }
 
-// Summary is Reason and the first meaningful line of Err, on one line, for places that cannot show the whole tail (the
-// grade's pending reason, the progress output). A package-loading failure starts with a blank line and a header, so the
-// first line of Error() says nothing; this is the first line that does.
+// summaryWrapper is the chain of prefixes that govulncheck and the go command put in front of a cause ("govulncheck:
+// loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.27.0"), each one optional and in this order.
+var summaryWrapper = regexp.MustCompile(`^(?:govulncheck: )?(?:loading packages: )?(?:err: )?(?:exit status \d+: )?(?:stderr: )?(?:go: )?`)
+
+// summaryLine is line as a summary shows it: trimmed, without the "-: " position of a package error that has none
+// ("-: found packages main (a.go) and ..."), and without the wrapper chain, so that it starts at the cause. It is empty
+// for a line that says nothing about the cause.
+func summaryLine(line string) string {
+	line = strings.TrimPrefix(strings.TrimSpace(line), "-: ")
+	if line == "" || line == "..." || scanErrorNoise[line] {
+		return ""
+	}
+	return summaryWrapper.ReplaceAllString(line, "")
+}
+
+// Summary is Reason and one line of Err, on one line, for places that cannot show the whole tail (the grade's pending
+// reason, the progress output). That line is the one that decided the Reason when WrapScanFailure remembered it: a
+// package-loading failure can list an unrelated error first. Without it (a failure no rule matched, a deadline, a
+// ScanError built by hand) it is the first meaningful line, which skips the blank line and the header that a
+// package-loading failure starts with. Either way the wrapper in front of the cause is dropped.
 func (e *ScanError) Summary() string {
 	if e.Err == nil {
 		return e.Reason
 	}
-	for _, line := range strings.Split(e.Err.Error(), "\n") {
-		// "-: " is the position of a package error that has none ("-: found packages main (a.go) and ...").
-		line = strings.TrimPrefix(strings.TrimSpace(line), "-: ")
-		if line == "" || line == "..." || scanErrorNoise[line] {
-			continue
-		}
+	if line := summaryLine(e.decidingLine); line != "" {
 		return e.Reason + ": " + line
+	}
+	for _, line := range strings.Split(e.Err.Error(), "\n") {
+		if line = summaryLine(line); line != "" {
+			return e.Reason + ": " + line
+		}
 	}
 	return e.Reason
 }
@@ -179,21 +200,41 @@ func classifyScanFailure(msg string, ctxErr error) *ScanError {
 // tail, but errors.Is and errors.As still see it. A ReasonScanDeadline error also carries ctxErr, so
 // errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text. projectDir, when not
 // empty, is cut from the text (see trimProjectDir), so that the published reason does not carry a path of the scanning
-// machine.
+// machine. The line that the classifying rule matched is kept for Summary, whatever the tail cut leaves.
 func WrapScanFailure(err, ctxErr error, projectDir string) *ScanError {
 	msg := trimProjectDir(err.Error(), projectDir)
 	for _, r := range scanFailureRules {
 		if ctxErr != nil && r.kind == FailTransient {
 			continue
 		}
-		if r.match.MatchString(msg) {
-			return &ScanError{Kind: r.kind, Reason: r.reason, Err: tailOf(err, msg)}
+		if loc := r.match.FindStringIndex(msg); loc != nil {
+			return &ScanError{Kind: r.kind, Reason: r.reason, Err: tailOf(err, msg), decidingLine: lineAt(msg, loc[0])}
 		}
 	}
 	if errors.Is(ctxErr, context.DeadlineExceeded) {
 		return &ScanError{Kind: FailTooLarge, Reason: ReasonScanDeadline, Err: &tailError{text: tailOf(err, msg).Error(), err: errors.Join(err, ctxErr)}}
 	}
 	return &ScanError{Kind: FailPermanent, Reason: ReasonUnknown, Err: tailOf(err, msg)}
+}
+
+// lineAt is the line of msg that contains the byte at offset i, held to tailMaxBytes like the tail of an error is: the
+// summary is published, and one go error line can be arbitrarily long. An over-long line keeps its head, which has the
+// position and the start of the cause, cut at a character boundary and followed by "...".
+func lineAt(msg string, i int) string {
+	start := strings.LastIndex(msg[:i], "\n") + 1
+	end := len(msg)
+	if n := strings.Index(msg[i:], "\n"); n >= 0 {
+		end = i + n
+	}
+	line := msg[start:end]
+	if len(line) <= tailMaxBytes {
+		return line
+	}
+	cut := tailMaxBytes
+	for !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + "..."
 }
 
 // tailOf is err with its text msg (err's own text, or that text with the project directory cut) cut to the tail; an

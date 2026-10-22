@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The messages below are what govulncheck returned for the fixtures under test/integration/testdata/scanerr (paths
@@ -168,7 +169,7 @@ func TestScanErrorSummary(t *testing.T) {
 	}{
 		// the message starts with a blank line and a header: the first line of Error() says nothing
 		{"package errors", classifyScanFailure(msgMultipleMains, nil), "multiple_mains: /p/multiple_mains/b.go:3:6: main redeclared in this block"},
-		{"loader message", classifyScanFailure(msgNeedsNewerGo, nil), "needs_newer_go: govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)"},
+		{"loader message", classifyScanFailure(msgNeedsNewerGo, nil), "needs_newer_go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)"},
 		// a package error without a position starts with "-: "
 		{"no position", classifyScanFailure(msgMixedPackagesMainLast, nil), "mixed_packages: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last"},
 		{"cut tail", &ScanError{Reason: ReasonUnknown, Err: errors.New("...\nsecond\nthird")}, "unknown: second"},
@@ -182,6 +183,102 @@ func TestScanErrorSummary(t *testing.T) {
 	}
 	if s := classifyScanFailure(msgMultipleMains, nil).Summary(); strings.Contains(s, "\n") {
 		t.Errorf("Summary() = %q, want one line", s)
+	}
+}
+
+// The summary names the line that decided the Reason, not the first meaningful line: an unrelated error can come first
+// in the package-loading list, and a cause that comes later must still be the one published.
+func TestScanErrorSummary_DecidingLine(t *testing.T) {
+	const msgUnrelatedFirst = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"x.go:1:2: undefined: foo.Bar\n" +
+		"b.go:3:6: main redeclared in this block\n" +
+		"a.go:3:6: \tother declaration of main\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	se := classifyScanFailure(msgUnrelatedFirst, nil)
+	if se.Reason != ReasonMultipleMains {
+		t.Fatalf("Reason = %q, want %q", se.Reason, ReasonMultipleMains)
+	}
+	if got, want := se.Summary(), "multiple_mains: b.go:3:6: main redeclared in this block"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+
+	// The matching line is kept whole even when the tail cut drops it from Err.
+	var b strings.Builder
+	b.WriteString("b.go:3:6: main redeclared in this block\n")
+	for i := range tailMaxLines + 5 {
+		fmt.Fprintf(&b, "x.go:%d:1: undefined: foo.Bar\n", i)
+	}
+	se = classifyScanFailure(b.String(), nil)
+	if se.Reason != ReasonMultipleMains {
+		t.Fatalf("Reason = %q, want %q", se.Reason, ReasonMultipleMains)
+	}
+	if got, want := se.Summary(), "multiple_mains: b.go:3:6: main redeclared in this block"; got != want {
+		t.Errorf("cut tail: Summary() = %q, want %q", got, want)
+	}
+}
+
+// A single over-long line is held to tailMaxBytes, like Err is: the summary is published, and a go error line can be
+// arbitrarily long.
+func TestScanErrorSummary_LongDecidingLine(t *testing.T) {
+	const head = "b.go:3:6: main redeclared in this block "
+	tests := []struct {
+		name string
+		line string
+	}{
+		{"ascii", head + strings.Repeat("x", 100000)},
+		// a three-byte rune starts one byte before the cut, so the cut falls inside it
+		{"rune at the cut", head + strings.Repeat("x", tailMaxBytes-1-len(head)) + strings.Repeat("\u4e16", 1000)},
+	}
+	for _, tc := range tests {
+		se := classifyScanFailure("header\n"+tc.line, nil)
+		if se.Reason != ReasonMultipleMains {
+			t.Fatalf("%s: Reason = %q, want %q", tc.name, se.Reason, ReasonMultipleMains)
+		}
+		got := se.Summary()
+		if max := len(se.Reason) + 2 + tailMaxBytes + len("..."); len(got) > max {
+			t.Errorf("%s: len(Summary()) = %d, want at most %d", tc.name, len(got), max)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("%s: Summary() is not valid UTF-8", tc.name)
+		}
+		if want := "multiple_mains: " + head; !strings.HasPrefix(got, want) {
+			t.Errorf("%s: Summary() = %.80q..., want it to start with %q", tc.name, got, want)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("%s: Summary() does not end with an ellipsis", tc.name)
+		}
+	}
+}
+
+// The summary starts at the cause: the wrapper that govulncheck and the go command put in front of it is dropped.
+func TestScanErrorSummary_WrapperChain(t *testing.T) {
+	const wantNewerGo = "needs_newer_go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)"
+	tests := []struct {
+		name string
+		se   *ScanError
+		want string
+	}{
+		{"needs newer go", classifyScanFailure("govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)\n", nil), wantNewerGo},
+		{"needs newer go, exit status 2", classifyScanFailure("govulncheck: loading packages: err: exit status 2: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)", nil), wantNewerGo},
+		{"header lines first", classifyScanFailure("\ngovulncheck: loading packages: \nerr: exit status 1: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)\n", nil), wantNewerGo},
+		// no rule matches: the first meaningful line, with its wrapper dropped too
+		{"unknown", classifyScanFailure("govulncheck: loading packages: err: exit status 1: stderr: go: something odd happened\n", nil), "unknown: something odd happened"},
+		// a message that has none of the wrapper is left alone
+		{"no wrapper", classifyScanFailure("b.go:3:6: main redeclared in this block", nil), "multiple_mains: b.go:3:6: main redeclared in this block"},
+		// a ScanError built by hand has no remembered line and keeps the first-meaningful-line behaviour
+		{"hand built", &ScanError{Reason: ReasonUnknown, Err: errors.New("first\nb.go:3:6: main redeclared in this block")}, "unknown: first"},
+		{"hand built, wrapper", &ScanError{Reason: ReasonNeedsNewerGo, Err: errors.New("govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.27.0")}, "needs_newer_go: go.mod requires go >= 1.27.0"},
+	}
+	for _, tc := range tests {
+		got := tc.se.Summary()
+		if got != tc.want {
+			t.Errorf("%s: Summary() = %q, want %q", tc.name, got, tc.want)
+		}
+		for _, w := range []string{"govulncheck:", "exit status", "stderr:"} {
+			if strings.Contains(got, w) {
+				t.Errorf("%s: Summary() = %q, still carries %q", tc.name, got, w)
+			}
+		}
 	}
 }
 
