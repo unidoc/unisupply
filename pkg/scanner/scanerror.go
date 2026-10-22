@@ -20,7 +20,7 @@ import (
 type FailKind int
 
 const (
-	FailPermanent FailKind = iota // examples layout, cgo-only deps, no go.mod, needs newer Go
+	FailPermanent FailKind = iota // examples layout, cgo-only or excluded deps, no go.mod, needs newer Go
 	FailTransient                 // network, timeout, rate limit
 	FailTooLarge                  // exceeded limits
 )
@@ -46,6 +46,8 @@ const (
 	ReasonMixedPackages     = "mixed_packages"     // files of two different packages in one directory
 	ReasonNoPackages        = "no_packages"        // the scan found no package to load
 	ReasonCgoOnly           = "cgo_only"           // no package to load: cgo is off and the module's files import "C"
+	ReasonBuildConstraints  = "build_constraints"  // a dependency has no Go file for this build (cgo off, another GOOS, a tag)
+	ReasonCgoDependency     = "cgo_dependency"     // the same, and cgo is off while the excluded package's files import "C"
 	ReasonMissingGoSum      = "missing_gosum"      // a go.sum entry is missing and -mod=readonly forbids adding it
 	ReasonModuleFetch       = "module_fetch"       // a module download failed
 	ReasonRateLimited       = "rate_limited"       // a service refused the request for rate limiting
@@ -178,6 +180,10 @@ var scanFailureRules = []struct {
 	// caller tells them apart (ReasonCgoOnly) by looking at the files, since the message cannot.
 	{ReasonNoPackages, FailPermanent, regexp.MustCompile(`no packages matched the provided patterns`)},
 	{ReasonMissingGoSum, FailPermanent, regexp.MustCompile(`missing go\.sum entry`)},
+	// An imported package with no Go file for this build (cgo off, another GOOS, a build tag). It comes after no_packages
+	// and missing_gosum, whose messages it can accompany and which say more, and before the transient rules, since a
+	// permanent cause wins over network text. The caller tells ReasonCgoDependency apart by looking at the files.
+	{ReasonBuildConstraints, FailPermanent, regexp.MustCompile(`build constraints exclude all Go files in`)},
 	// The wording of a refused request ("API rate limit exceeded", "secondary rate limit", "429 Too Many Requests"), with
 	// the space: a package path or identifier that names rate limiting ("internal/ratelimit/limiter.go:12:2: undefined:
 	// ...") is a build failure.
@@ -200,7 +206,8 @@ func classifyScanFailure(msg string, ctxErr error) *ScanError {
 // tail, but errors.Is and errors.As still see it. A ReasonScanDeadline error also carries ctxErr, so
 // errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text. projectDir, when not
 // empty, and the module cache (see modCacheFromEnv) are cut from the text (see trimPaths), so that the published reason
-// does not carry a path of the scanning machine. The line that the classifying rule matched is kept for Summary, whatever the tail cut leaves.
+// does not carry a path of the scanning machine. The line that the classifying rule matched is kept for Summary,
+// whatever the tail cut leaves.
 func WrapScanFailure(err, ctxErr error, projectDir string) *ScanError {
 	msg := trimPaths(err.Error(), projectDir, modCacheFromEnv())
 	for _, r := range scanFailureRules {
@@ -308,6 +315,62 @@ func modCacheFromEnv() string {
 	return ""
 }
 
+// excludedDirRe is the line of the go command's error for a package that has no Go file for this build.
+var excludedDirRe = regexp.MustCompile(`build constraints exclude all Go files in (.+)`)
+
+// excludedDir is the directory that the first "build constraints exclude all Go files in <dir>" line of msg names, or ""
+// when there is none. It is the excluded package's own directory (the go command prints the directory of the import
+// path, not of the module). The caller reads it before the module cache is cut from msg, to look at the files in it.
+func excludedDir(msg string) string {
+	m := excludedDirRe.FindStringSubmatch(msg)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+// dirImportsC reports whether a non-test Go file directly in dir imports "C": the files of one package, with no walk
+// into subdirectories. It reads the import clauses only, and skips the files the go command does not build (names that
+// start with "." or "_").
+func dirImportsC(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !isBuildableGoFile(name) {
+			continue
+		}
+		if importsC(filepath.Join(dir, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBuildableGoFile reports whether name is a non-test Go file that the go command builds with its package.
+func isBuildableGoFile(name string) bool {
+	return strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") && !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
+}
+
+// importsC reports whether the Go file at path imports "C". A file that cannot be read or parsed does not.
+func importsC(path string) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+	if err != nil && f == nil {
+		return false
+	}
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == "C" {
+			return true
+		}
+	}
+	return false
+}
+
 // hasCgoImport reports whether a non-test Go file of the module in dir imports "C". It reads the import clauses only, and
 // skips what the go command does not build with the module: testdata, vendor, hidden and underscore-prefixed
 // directories, and nested modules. It stops at the first hit. A scan calls it only after a failure that could be a
@@ -331,18 +394,9 @@ func hasCgoImport(dir string) bool {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-			return nil
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
-		if err != nil && f == nil {
-			return nil
-		}
-		for _, imp := range f.Imports {
-			if p, err := strconv.Unquote(imp.Path.Value); err == nil && p == "C" {
-				found = true
-				return filepath.SkipAll
-			}
+		if isBuildableGoFile(name) && importsC(path) {
+			found = true
+			return filepath.SkipAll
 		}
 		return nil
 	})

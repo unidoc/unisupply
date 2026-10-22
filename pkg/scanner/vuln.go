@@ -685,6 +685,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		if projectErr != nil && scannerErr == nil {
 			modCache = scannerEnv.modCache
 		}
+		// The excluded package's directory is read before the cut, which takes the module cache out of it.
+		excluded := excludedDir(msg)
 		msg = trimPaths(msg, projectDir, modCache)
 		warnings = append(warnings, msg)
 		scanErr = classifyScanFailure(msg, ctx.Err())
@@ -692,6 +694,10 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		// when the go command confirms cgo is off and a file of the module imports "C".
 		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectEnv.cgo == "0" && hasCgoImport(projectDir) {
 			scanErr.Reason = ReasonCgoOnly
+		}
+		// Likewise a dependency that the build leaves out is a cgo dependency when cgo is off and its files import "C".
+		if scanErr.Reason == ReasonBuildConstraints && projectErr == nil && projectEnv.cgo == "0" && dirImportsC(excluded) {
+			scanErr.Reason = ReasonCgoDependency
 		}
 	}
 

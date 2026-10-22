@@ -42,6 +42,12 @@ const (
 		"-: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last\n" +
 		"/p/mixed_packages_main_last/b.go:1:1: package main; expected package alpha\n\n" +
 		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	// A dependency with no Go file for this build, after an unrelated error that the go command lists first (the shape of
+	// a reviewer's scan; constructed from the recorded fixture, which lists the cause line first).
+	msgBuildConstraints = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow\n" +
+		"-: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
 	// x/vuln's errNoGoMod, from the source (constructed).
 	msgNoGoMod = "govulncheck: no go.mod file\n\ngovulncheck only works with Go modules. Try navigating to your module directory.\n"
 	// x/vuln's errGoVersionMismatch followed by the loader's error, from the source (constructed).
@@ -88,6 +94,12 @@ func TestClassifyScanFailure(t *testing.T) {
 		{"missing go.sum and a dial", msgMissingGoSum + "dial tcp 1.1.1.1:443: i/o timeout", ReasonMissingGoSum, FailPermanent},
 		// recorded; a cgo-only module gives the same text, which ScanVulnsWithOptions tells apart by looking at the files
 		{"no packages matched", msgNoPackages, ReasonNoPackages, FailPermanent},
+		// a dependency that the build leaves out, with an unrelated error listed before it
+		{"build constraints", msgBuildConstraints, ReasonBuildConstraints, FailPermanent},
+		// the earlier permanent causes win over it: "no packages matched" is what the cgo_only upgrade reads, and a missing
+		// go.sum entry is the cause that a build-constraints line would only follow
+		{"no packages and build constraints", msgNoPackages + "\n-: build constraints exclude all Go files in /p/dep", ReasonNoPackages, FailPermanent},
+		{"missing go.sum and build constraints", msgMissingGoSum + "-: build constraints exclude all Go files in /p/dep\n", ReasonMissingGoSum, FailPermanent},
 		{"unknown", "govulncheck: something nobody planned for", ReasonUnknown, FailPermanent},
 		{"empty", "", ReasonUnknown, FailPermanent},
 		// a line number is not a status code
@@ -478,7 +490,7 @@ func TestWrapScanFailure_CutsTheModCache(t *testing.T) {
 			t.Errorf("%s = %q, want it without the module cache %q", name, got, resolved)
 		}
 	}
-	if got, want := se.Summary(), "unknown: fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow"; got != want {
+	if got, want := se.Summary(), "build_constraints: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x"; got != want {
 		t.Errorf("Summary() = %q, want %q", got, want)
 	}
 	if !strings.Contains(se.Err.Error(), "build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x") {
@@ -503,6 +515,74 @@ func TestModCacheFromEnv(t *testing.T) {
 		t.Setenv("GOPATH", tc.gopath)
 		if got := modCacheFromEnv(); got != tc.want {
 			t.Errorf("%s: modCacheFromEnv = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A build-constraints failure is published by the line that says so, not by the unrelated error that comes first.
+func TestScanErrorSummary_BuildConstraints(t *testing.T) {
+	se := classifyScanFailure(msgBuildConstraints, nil)
+	want := "build_constraints: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x"
+	if got := se.Summary(); got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+}
+
+func TestExcludedDir(t *testing.T) {
+	tests := []struct{ name, msg, want string }{
+		{"in a list", msgBuildConstraints, "github.com/gordonklaus/portaudio@v0.0.0-x"},
+		{"absolute", "-: build constraints exclude all Go files in /m/github.com/x/y@v1.0.0/sub\nnext line", "/m/github.com/x/y@v1.0.0/sub"},
+		{"with a trailing space", "build constraints exclude all Go files in /p/dep \n", "/p/dep"},
+		{"the first one", "build constraints exclude all Go files in /p/one\nbuild constraints exclude all Go files in /p/two", "/p/one"},
+		{"none", "main.go:3:8: undefined: x", ""},
+		{"no directory", "build constraints exclude all Go files in \n", ""},
+	}
+	for _, tc := range tests {
+		if got := excludedDir(tc.msg); got != tc.want {
+			t.Errorf("%s: excludedDir = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDirImportsC(t *testing.T) {
+	const cgoFile = "package p\n\n// #include <stdlib.h>\nimport \"C\"\n\nfunc F() {}\n"
+	const plainFile = "package p\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"a cgo file", map[string]string{"c.go": cgoFile, "a.go": plainFile}, true},
+		{"a cgo file behind a build constraint", map[string]string{"c.go": "//go:build cgo\n\n" + cgoFile}, true},
+		{"a file that does not parse is skipped", map[string]string{"bad.go": "package", "c.go": cgoFile}, true},
+		{"only a test file imports C", map[string]string{"c_test.go": cgoFile, "a.go": plainFile}, false},
+		{"only a hidden file imports C", map[string]string{".c.go": cgoFile}, false},
+		{"only an underscore file imports C", map[string]string{"_c.go": cgoFile}, false},
+		{"only a subdirectory imports C", map[string]string{"a.go": plainFile, "sub/c.go": cgoFile}, false},
+		{"no cgo", map[string]string{"a.go": plainFile}, false},
+		{"not a Go file", map[string]string{"c.txt": cgoFile}, false},
+		{"empty directory", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				path := filepath.Join(dir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := dirImportsC(dir); got != tc.want {
+				t.Errorf("dirImportsC = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	for name, dir := range map[string]string{"missing": filepath.Join(t.TempDir(), "nope"), "empty": ""} {
+		if dirImportsC(dir) {
+			t.Errorf("%s directory: dirImportsC = true", name)
 		}
 	}
 }
