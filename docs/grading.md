@@ -117,10 +117,9 @@ b.go:3:6: main redeclared in this block`) and may change its wording.
 "pending": { "check": "vulnerability_scan", "code": "multiple_mains", "kind": "permanent", "reason": "the vulnerability scan did not run: multiple_mains: b.go:3:6: main redeclared in this block" }
 ```
 
-A failure of `runner.Run` itself (no `go.mod`, an unreadable `go.mod`, the dependency graph could not be resolved, an
-internal panic) is not a Pending grade: there is no grade and no JSON report at all. The CLI prints the cause on stderr and
-exits 1; a Go caller gets the `*scanner.ScanError` as the error of `runner.Run`, which is the only place its code and kind
-appear then.
+A failure of `runner.Run` itself (no `go.mod`, an unreadable `go.mod`, an internal panic) is not a Pending grade: there is
+no grade and no JSON report at all. The CLI prints the cause on stderr and exits 1; a Go caller gets the
+`*scanner.ScanError` as the error of `runner.Run`, which is the only place its code and kind appear then.
 
 **A scan that needs a newer Go than unisupply was built with.** govulncheck runs inside unisupply, compiled with one Go release. When
 the Go the scan resolves for the project (its `go` directive or `toolchain` line) is a newer minor version, the scan stops before loading anything

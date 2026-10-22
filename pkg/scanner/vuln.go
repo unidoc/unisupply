@@ -695,7 +695,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectEnv.cgo == "0" && hasCgoImport(projectDir) {
 			scanErr.Reason = ReasonCgoOnly
 		}
-		// Likewise a dependency that the build leaves out is a cgo dependency when cgo is off and its files import "C".
+		// Likewise an imported package that the build leaves out, a dependency or one of the project's own, is
+		// cgo_dependency when cgo is off and its files import "C".
 		if scanErr.Reason == ReasonBuildConstraints && projectErr == nil && projectEnv.cgo == "0" && dirImportsC(excluded) {
 			scanErr.Reason = ReasonCgoDependency
 		}

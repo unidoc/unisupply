@@ -19,8 +19,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `ScanError` built without one is never retried.
 - **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`
   (`func main` declared twice), `mixed_packages` (two package names in one directory), `no_packages`, `cgo_only`,
-  `build_constraints` (a dependency has no Go file for this build: cgo off, another GOOS, a build tag), `cgo_dependency`,
-  `missing_gosum`, `module_fetch`, `rate_limited`, `vulndb_unreachable`, `scan_deadline`, `internal_panic` and `unknown`.
+  `build_constraints` (an imported package, a dependency or one of the project's own, has no Go file for this build: cgo
+  off, another GOOS, a build tag), `cgo_dependency`, `missing_gosum`, `module_fetch`, `rate_limited`,
+  `vulndb_unreachable`, `scan_deadline`, `internal_panic` and `unknown`.
   An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module
   imports `"C"`; without that, "no packages matched" is `no_packages`. `cgo_dependency` is reported when cgo is off for
   the scan and the excluded package's own files import `"C"`; without that, the failure is `build_constraints`.

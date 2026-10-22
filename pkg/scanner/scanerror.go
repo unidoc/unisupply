@@ -46,7 +46,7 @@ const (
 	ReasonMixedPackages     = "mixed_packages"     // files of two different packages in one directory
 	ReasonNoPackages        = "no_packages"        // the scan found no package to load
 	ReasonCgoOnly           = "cgo_only"           // no package to load: cgo is off and the module's files import "C"
-	ReasonBuildConstraints  = "build_constraints"  // a dependency has no Go file for this build (cgo off, another GOOS, a tag)
+	ReasonBuildConstraints  = "build_constraints"  // an imported package has no Go file for this build (cgo off, another GOOS, a tag)
 	ReasonCgoDependency     = "cgo_dependency"     // the same, and cgo is off while the excluded package's files import "C"
 	ReasonMissingGoSum      = "missing_gosum"      // a go.sum entry is missing and -mod=readonly forbids adding it
 	ReasonModuleFetch       = "module_fetch"       // a module download failed

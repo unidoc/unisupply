@@ -235,6 +235,9 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	rep.Stage("Resolving dependency graph")
 	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
 	if err != nil {
+		// Resolve fails only when go.mod cannot be read, and it was just read above. The package errors of go list
+		// ("build constraints exclude all Go files in ...") come back as a note, so build_constraints and cgo_dependency
+		// are decided by the vulnerability scan alone.
 		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err(), projectDir)
 	}
 	for _, w := range resolverWarnings {
