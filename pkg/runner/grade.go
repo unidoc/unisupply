@@ -235,7 +235,9 @@ type gradeRun struct {
 	// VulnScanned is false when the vulnerability scan did not complete; the reason goes to the Pending line.
 	VulnScanned    bool
 	VulnScanReason string
-	Interrupted    bool
+	// VulnScanCode and VulnScanKind are the scan failure's reason code and kind (see scanFailureCode).
+	VulnScanCode, VulnScanKind string
+	Interrupted                bool
 
 	// StdlibScanned is true when govulncheck ran (the standard library was matched against the scan's Go release).
 	StdlibScanned bool
@@ -259,6 +261,16 @@ func errString(err error) string {
 	return line
 }
 
+// scanFailureCode is the reason code and the kind of a typed scan failure, for the grade's Pending: a caller that decides
+// on a retry reads them instead of parsing the reason. Any other error, and nil, has neither.
+func scanFailureCode(err error) (code, kind string) {
+	var se *scanner.ScanError
+	if errors.As(err, &se) {
+		return se.Reason, se.Kind.String()
+	}
+	return "", ""
+}
+
 // gradeAll builds the grade: the module's own row (status and advisories), every dependency's row, and the checks the
 // grade depends on. It never fails: a lookup that did not work is recorded in Checks, and the grade says Pending.
 func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
@@ -275,6 +287,8 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 		Checks: grade.Checks{
 			VulnScanFailed: !r.VulnScanned,
 			VulnScanReason: r.VulnScanReason,
+			VulnScanCode:   r.VulnScanCode,
+			VulnScanKind:   r.VulnScanKind,
 			ScanTimedOut:   r.Interrupted,
 
 			ArchiveUnchecked: archiveUnchecked(r.Maintenance, local),

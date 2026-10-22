@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -152,5 +153,12 @@ func TestScanErr_PendingReasonNamesTheCause(t *testing.T) {
 	reason := res.Grade.Pending.Reason
 	if want := ": multiple_mains: b.go:3:6: main redeclared in this block"; !strings.HasSuffix(reason, want) || strings.Contains(reason, "\n") {
 		t.Errorf("pending reason = %q, want one line ending in %q: the duplicate main, without the project's path", reason, want)
+	}
+	// the code and the kind are their own fields: a caller deciding on a retry does not parse the reason
+	if p := res.Grade.Pending; p.Code != scanner.ReasonMultipleMains || p.Kind != scanner.FailPermanent.String() {
+		t.Errorf("pending code, kind = %q, %q; want %q, %q", p.Code, p.Kind, scanner.ReasonMultipleMains, scanner.FailPermanent)
+	}
+	if out, err := json.Marshal(res.Grade); err != nil || !strings.Contains(string(out), `"code":"multiple_mains","kind":"permanent"`) {
+		t.Errorf("grade JSON = %s (%v), want the pending code and kind", out, err)
 	}
 }

@@ -387,6 +387,9 @@ func TestRun_ScanErrorReachesTheCaller(t *testing.T) {
 	if want := "the vulnerability scan did not run: multiple_mains: /p/b.go:3:6: main redeclared in this block"; res.Grade.Pending.Reason != want {
 		t.Errorf("pending reason = %q, want %q", res.Grade.Pending.Reason, want)
 	}
+	if p := res.Grade.Pending; p.Code != scanner.ReasonMultipleMains || p.Kind != "permanent" {
+		t.Errorf("pending code, kind = %q, %q; want multiple_mains, permanent", p.Code, p.Kind)
+	}
 	// the scanner's warning is in the report whole, and the failure is not said a second time
 	var said, failed int
 	for _, w := range res.ProjectScore.Warnings {
@@ -423,6 +426,9 @@ func TestRun_ScanErrorWithDependencies(t *testing.T) {
 	}
 	if res.Grade.Pending == nil || !strings.HasSuffix(res.Grade.Pending.Reason, "multiple_mains: /p/b.go:3:6: main redeclared in this block") || strings.Contains(res.Grade.Pending.Reason, "\n") {
 		t.Errorf("Pending = %+v, want one line naming the cause", res.Grade.Pending)
+	}
+	if p := res.Grade.Pending; p == nil || p.Code != scanner.ReasonMultipleMains || p.Kind != "permanent" {
+		t.Errorf("Pending = %+v, want code multiple_mains and kind permanent", p)
 	}
 }
 

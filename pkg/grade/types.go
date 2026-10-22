@@ -132,6 +132,9 @@ type Row struct {
 type Checks struct {
 	VulnScanFailed bool
 	VulnScanReason string
+	// VulnScanCode and VulnScanKind are the reason code and the kind of the scan failure, when it has them; see Pending.
+	VulnScanCode string
+	VulnScanKind string
 	// ScanTimedOut is true when the scan as a whole did not finish (timeout or interruption).
 	ScanTimedOut bool
 	// SelfStatusFailed: the module's own archived/deprecated status could not be read. SelfAdvisoriesFailed: the lookup of
@@ -275,7 +278,12 @@ type TreeRow struct {
 
 // Pending is the answer when a check the letter depends on did not run: no letter, the reason, and what is known.
 type Pending struct {
-	Check  string   `json:"check"` // vulnerability_scan | scan_incomplete | checksum | known_exploited | module_status | module_advisories | dependency_maintenance
+	Check string `json:"check"` // vulnerability_scan | scan_incomplete | checksum | known_exploited | module_status | module_advisories | dependency_maintenance
+	// Code and Kind are set only for vulnerability_scan, and only when the failure is a typed scan failure: its reason
+	// code ("multiple_mains") and kind ("transient", "permanent" or "too_large"). They are a contract for a caller that
+	// decides on a retry; Reason is for people and may change its wording.
+	Code   string   `json:"code,omitempty"`
+	Kind   string   `json:"kind,omitempty"`
 	Reason string   `json:"reason"`
 	Known  []string `json:"known,omitempty"` // what is known anyway, e.g. "Archived"
 }
