@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,19 @@ func TestScanErr_Fixtures(t *testing.T) {
 			name: "cgo_only", reason: scanner.ReasonCgoOnly, kind: scanner.FailPermanent,
 			text: "no packages matched the provided patterns",
 		},
+		{
+			// -: build constraints exclude all Go files in <dir of dep_cgo>
+			// The project imports a package whose only file imports "C", and cgo is off for the scan. The directory is
+			// printed absolute: it is neither the project nor the module cache.
+			name: "cgo_dependency", reason: scanner.ReasonCgoDependency, kind: scanner.FailPermanent,
+			text: "build constraints exclude all Go files in",
+		},
+		{
+			// -: build constraints exclude all Go files in <dir of dep_tagged>
+			// The same, for a package whose only file carries a custom build tag: excluded on every platform.
+			name: "build_constraints", reason: scanner.ReasonBuildConstraints, kind: scanner.FailPermanent,
+			text: "build constraints exclude all Go files in",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,5 +153,12 @@ func TestScanErr_PendingReasonNamesTheCause(t *testing.T) {
 	reason := res.Grade.Pending.Reason
 	if want := ": multiple_mains: b.go:3:6: main redeclared in this block"; !strings.HasSuffix(reason, want) || strings.Contains(reason, "\n") {
 		t.Errorf("pending reason = %q, want one line ending in %q: the duplicate main, without the project's path", reason, want)
+	}
+	// the code and the kind are their own fields: a caller deciding on a retry does not parse the reason
+	if p := res.Grade.Pending; p.Code != scanner.ReasonMultipleMains || p.Kind != scanner.FailPermanent.String() {
+		t.Errorf("pending code, kind = %q, %q; want %q, %q", p.Code, p.Kind, scanner.ReasonMultipleMains, scanner.FailPermanent)
+	}
+	if out, err := json.Marshal(res.Grade); err != nil || !strings.Contains(string(out), `"code":"multiple_mains","kind":"permanent"`) {
+		t.Errorf("grade JSON = %s (%v), want the pending code and kind", out, err)
 	}
 }

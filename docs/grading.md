@@ -104,6 +104,23 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 
 A Pending result publishes no letter, no deciding row and no score; `pending.known` says what is known.
 
+**`pending.code` and `pending.kind`.** When the check is `vulnerability_scan` and the failure is a typed scan failure,
+`pending` also has `code`, the failure's reason code (`multiple_mains`, `needs_newer_go`, `cgo_dependency`, `module_fetch`,
+...), and `kind`, which says whether a retry can help: `transient` (network, timeout, rate limit), `permanent` (the
+project cannot be scanned as it is) or `too_large` (a limit was exceeded). Both are absent for every other check, and for
+a scan that failed with an error that is not a scan failure (the scan was skipped offline, for example). The codes are the
+`scanner.Reason*` constants, listed in the CHANGELOG. A caller that decides on a retry reads `kind`, and `code` for what to
+tell the user; `reason` is text for people, starts with the code (`the vulnerability scan did not run: multiple_mains:
+b.go:3:6: main redeclared in this block`) and may change its wording.
+
+```json
+"pending": { "check": "vulnerability_scan", "code": "multiple_mains", "kind": "permanent", "reason": "the vulnerability scan did not run: multiple_mains: b.go:3:6: main redeclared in this block" }
+```
+
+A failure of `runner.Run` itself (no `go.mod`, an unreadable `go.mod`, an internal panic) is not a Pending grade: there is
+no grade and no JSON report at all. The CLI prints the cause on stderr and exits 1; a Go caller gets the
+`*scanner.ScanError` as the error of `runner.Run`, which is the only place its code and kind appear then.
+
 **A scan that needs a newer Go than unisupply was built with.** govulncheck runs inside unisupply, compiled with one Go release. When
 the Go the scan resolves for the project (its `go` directive or `toolchain` line) is a newer minor version, the scan stops before loading anything
 and the grade is Pending (`vulnerability_scan`) with the reason "this unisupply was built with go1.26.9 and cannot scan code that
@@ -216,7 +233,9 @@ The `grade` object of `--format json`:
 }
 ```
 
-`letter` is absent and `pending` present when the grade is Pending. `estimated: true` marks a letter that an unpublished severity could change (`C*`).
+`letter` is absent and `pending` present when the grade is Pending: `pending.check` names the check that did not run, and
+for a failed `vulnerability_scan` `pending.code` and `pending.kind` carry the scan failure's reason code and kind (see
+[Pending](#pending)). `estimated: true` marks a letter that an unpublished severity could change (`C*`).
 
 ## Policy
 

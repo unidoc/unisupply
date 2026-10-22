@@ -157,15 +157,18 @@ func TestResolveGoEnv(t *testing.T) {
 		t.Skip("go is not on PATH")
 	}
 
-	version, goRoot, _, err := resolveGoEnv(context.Background(), t.TempDir())
+	env, err := resolveGoEnv(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("resolveGoEnv: %v", err)
 	}
-	if !strings.HasPrefix(version, "go") {
-		t.Errorf("version = %q, want a go-prefixed version", version)
+	if !strings.HasPrefix(env.version, "go") {
+		t.Errorf("version = %q, want a go-prefixed version", env.version)
 	}
-	if !filepath.IsAbs(goRoot) {
-		t.Errorf("goRoot = %q, want an absolute path", goRoot)
+	if !filepath.IsAbs(env.root) {
+		t.Errorf("goRoot = %q, want an absolute path", env.root)
+	}
+	if !filepath.IsAbs(env.modCache) {
+		t.Errorf("modCache = %q, want an absolute path", env.modCache)
 	}
 }
 
@@ -176,13 +179,29 @@ func TestResolveGoEnv_CgoEnabled(t *testing.T) {
 	}
 	for _, want := range []string{"0", "1"} {
 		t.Setenv("CGO_ENABLED", want)
-		_, _, got, err := resolveGoEnv(context.Background(), t.TempDir())
+		env, err := resolveGoEnv(context.Background(), t.TempDir())
 		if err != nil {
 			t.Fatalf("resolveGoEnv: %v", err)
 		}
-		if got != want {
-			t.Errorf("CGO_ENABLED=%s: cgoEnabled = %q", want, got)
+		if env.cgo != want {
+			t.Errorf("CGO_ENABLED=%s: cgoEnabled = %q", want, env.cgo)
 		}
+	}
+}
+
+// GOMODCACHE comes from go env too, so a cache that the scan's environment moves shows in it.
+func TestResolveGoEnv_ModCache(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go is not on PATH")
+	}
+	cache := t.TempDir()
+	t.Setenv("GOMODCACHE", cache)
+	env, err := resolveGoEnv(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveGoEnv: %v", err)
+	}
+	if env.modCache != cache {
+		t.Errorf("modCache = %q, want %q", env.modCache, cache)
 	}
 }
 
@@ -191,12 +210,12 @@ func TestResolveGoEnv_EmptyDirUsesProcessDirectory(t *testing.T) {
 		t.Skip("go is not on PATH")
 	}
 
-	version, goRoot, _, err := resolveGoEnv(context.Background(), "")
+	env, err := resolveGoEnv(context.Background(), "")
 	if err != nil {
 		t.Fatalf("resolveGoEnv: %v", err)
 	}
-	if version == "" || goRoot == "" {
-		t.Errorf("got empty values: %q, %q", version, goRoot)
+	if env.version == "" || env.root == "" {
+		t.Errorf("got empty values: %q, %q", env.version, env.root)
 	}
 }
 
@@ -206,7 +225,7 @@ func TestResolveGoEnv_BadDirFails(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	if _, _, _, err := resolveGoEnv(context.Background(), missing); err == nil {
+	if _, err := resolveGoEnv(context.Background(), missing); err == nil {
 		t.Error("resolveGoEnv in a missing directory returned no error")
 	}
 }

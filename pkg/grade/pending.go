@@ -29,7 +29,7 @@ func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 		if c.VulnScanReason != "" {
 			reason += ": " + c.VulnScanReason
 		}
-		return &Pending{Check: "vulnerability_scan", Reason: reason, Known: known}
+		return &Pending{Check: "vulnerability_scan", Code: c.VulnScanCode, Kind: c.VulnScanKind, Reason: reason, Known: known}
 	case c.ScanTimedOut:
 		return &Pending{Check: "scan_incomplete", Reason: "the scan did not finish (it timed out or was interrupted), so some checks never ran", Known: known}
 	case c.ChecksumUnverified && bandOf(treeFScore) > bandOf(score):

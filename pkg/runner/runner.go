@@ -235,6 +235,9 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	rep.Stage("Resolving dependency graph")
 	graph, resolverWarnings, err := resolver.Resolve(ctx, gomodPath, opts.DirectOnly)
 	if err != nil {
+		// Resolve fails only when go.mod cannot be read, and it was just read above. The package errors of go list
+		// ("build constraints exclude all Go files in ...") come back as a note, so build_constraints and cgo_dependency
+		// are decided by the vulnerability scan alone.
 		return nil, scanner.WrapScanFailure(fmt.Errorf("resolving dependencies: %w", err), ctx.Err(), projectDir)
 	}
 	for _, w := range resolverWarnings {
@@ -295,11 +298,13 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		if !opts.GradeStdlib {
 			scanMissing = nil
 		}
+		missingCode, missingKind := scanFailureCode(scanMissing)
 		g := gradeAll(ctx, &gradeRun{
 			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 			Timeout: timeout, ScanStart: scanStart, ProjectDir: projectDir,
 			Stdlib:      gradedStdlib(&opts, stdlibVulns),
 			VulnScanned: scanMissing == nil, VulnScanReason: errString(scanMissing), StdlibScanned: emptyVulnErr == nil,
+			VulnScanCode: missingCode, VulnScanKind: missingKind,
 			KEVStaleSince: kevStaleSince(&scanInfo),
 		})
 		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
@@ -483,12 +488,14 @@ func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 		rep.Warn("scan was interrupted — report may be incomplete (some scanners were cancelled)")
 	}
 
+	vulnCode, vulnKind := scanFailureCode(vulnScanErr)
 	gradeResult := gradeAll(ctx, &gradeRun{
 		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 		Timeout: timeout, ScanStart: scanStart,
 		ProjectDir: projectDir,
 		Vulns:      vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
+		VulnScanCode: vulnCode, VulnScanKind: vulnKind,
 		StdlibScanned: vulnScanErr == nil, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
 	})
 

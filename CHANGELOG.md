@@ -18,9 +18,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and `Kind.String()` gives `transient`, `permanent` or `too_large`. The zero `Kind` is `FailPermanent`, so a
   `ScanError` built without one is never retried.
 - **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`
-  (`func main` declared twice), `mixed_packages` (two package names in one directory), `no_packages`, `cgo_only`, `missing_gosum`, `module_fetch`, `rate_limited`, `vulndb_unreachable`, `scan_deadline`,
-  `internal_panic` and `unknown`. An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the
-  scan and a file of the module imports `"C"`; without that, "no packages matched" is `no_packages`.
+  (`func main` declared twice), `mixed_packages` (two package names in one directory), `no_packages`, `cgo_only`,
+  `build_constraints` (an imported package, a dependency or one of the project's own, has no Go file for this build: cgo
+  off, another GOOS, a build tag), `cgo_dependency`, `missing_gosum`, `module_fetch`, `rate_limited`,
+  `vulndb_unreachable`, `scan_deadline`, `internal_panic` and `unknown`.
+  An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module
+  imports `"C"`; without that, "no packages matched" is `no_packages`. `cgo_dependency` is reported when cgo is off for
+  the scan and the excluded package's own files import `"C"`; without that, the failure is `build_constraints`.
 - **A scan stopped by its context's deadline is `scan_deadline`** (`FailTooLarge`), and `errors.Is(err,
   context.DeadlineExceeded)` holds for it. A permanent cause in the output still wins over the deadline, and a scan whose
   context was canceled is `unknown`. Once the context has ended, network text in the output is not read as
@@ -37,6 +41,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   warnings change in two ways: a refused toolchain's line now carries the code
   (`Vulnerability scan failed: needs_newer_go: this unisupply was built with ...`), and a package-loading failure names
   the project's files relative to the project (`b.go:3:6: ...`), not by their path on the scanning machine.
+- **`grade.pending` in the JSON has `code` and `kind`** when the vulnerability scan failed with a typed scan failure:
+  the reason code (`"code": "multiple_mains"`) and the kind (`"kind": "permanent"`, or `transient`, `too_large`). They are
+  set only for the `vulnerability_scan` check and are absent for any other, and for a scan that failed with an error that
+  is not a `ScanError`. A caller that decides on a retry reads `kind`; `reason` keeps its text, with the code in front, and
+  is for people.
 
 ### Improvements
 
@@ -44,10 +53,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - `grade.pending.reason` and the text and PDF reports used to end at `govulncheck: loading packages:` when the packages
   could not be loaded, because only the first line of the error was kept and the cause is on the following lines. They
-  now give the reason code and the first real error, for example
-  `multiple_mains: b.go:3:6: main redeclared in this block`. The project's directory is cut from the text (as the go
-  command reports it, symlinks resolved), so the reason does not carry a path of the scanning machine. Paths outside the
-  project, such as the module cache or GOROOT in a dependency's error, are kept.
+  now give the reason code and the line that decided it, for example
+  `multiple_mains: b.go:3:6: main redeclared in this block`, even when an unrelated error is listed before it. The line
+  starts at the cause, without govulncheck's `loading packages: err: exit status 1: stderr:` wrapper
+  (`needs_newer_go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)`), and is held to 4 KiB. The
+  project's directory and the module cache are cut from the text (as the go command reports them, symlinks resolved), so
+  the reason does not carry a path of the scanning machine: a dependency reads `github.com/x/y@v1.2.3/...`. GOROOT paths
+  are kept.
 
 #### Behaviour change: `ScanVulns` returns an error when govulncheck fails
 

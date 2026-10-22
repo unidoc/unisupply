@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // The messages below are what govulncheck returned for the fixtures under test/integration/testdata/scanerr (paths
@@ -40,6 +41,12 @@ const (
 	msgMixedPackagesMainLast = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
 		"-: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last\n" +
 		"/p/mixed_packages_main_last/b.go:1:1: package main; expected package alpha\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	// A dependency with no Go file for this build, after an unrelated error that the go command lists first (the shape of
+	// a reviewer's scan; constructed from the recorded fixture, which lists the cause line first).
+	msgBuildConstraints = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow\n" +
+		"-: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x\n\n" +
 		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
 	// x/vuln's errNoGoMod, from the source (constructed).
 	msgNoGoMod = "govulncheck: no go.mod file\n\ngovulncheck only works with Go modules. Try navigating to your module directory.\n"
@@ -87,6 +94,12 @@ func TestClassifyScanFailure(t *testing.T) {
 		{"missing go.sum and a dial", msgMissingGoSum + "dial tcp 1.1.1.1:443: i/o timeout", ReasonMissingGoSum, FailPermanent},
 		// recorded; a cgo-only module gives the same text, which ScanVulnsWithOptions tells apart by looking at the files
 		{"no packages matched", msgNoPackages, ReasonNoPackages, FailPermanent},
+		// a dependency that the build leaves out, with an unrelated error listed before it
+		{"build constraints", msgBuildConstraints, ReasonBuildConstraints, FailPermanent},
+		// the earlier permanent causes win over it: "no packages matched" is what the cgo_only upgrade reads, and a missing
+		// go.sum entry is the cause that a build-constraints line would only follow
+		{"no packages and build constraints", msgNoPackages + "\n-: build constraints exclude all Go files in /p/dep", ReasonNoPackages, FailPermanent},
+		{"missing go.sum and build constraints", msgMissingGoSum + "-: build constraints exclude all Go files in /p/dep\n", ReasonMissingGoSum, FailPermanent},
 		{"unknown", "govulncheck: something nobody planned for", ReasonUnknown, FailPermanent},
 		{"empty", "", ReasonUnknown, FailPermanent},
 		// a line number is not a status code
@@ -168,7 +181,7 @@ func TestScanErrorSummary(t *testing.T) {
 	}{
 		// the message starts with a blank line and a header: the first line of Error() says nothing
 		{"package errors", classifyScanFailure(msgMultipleMains, nil), "multiple_mains: /p/multiple_mains/b.go:3:6: main redeclared in this block"},
-		{"loader message", classifyScanFailure(msgNeedsNewerGo, nil), "needs_newer_go: govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)"},
+		{"loader message", classifyScanFailure(msgNeedsNewerGo, nil), "needs_newer_go: go.mod requires go >= 1.99 (running go 1.26.9; GOTOOLCHAIN=local)"},
 		// a package error without a position starts with "-: "
 		{"no position", classifyScanFailure(msgMixedPackagesMainLast, nil), "mixed_packages: found packages alpha (a.go) and main (b.go) in /p/mixed_packages_main_last"},
 		{"cut tail", &ScanError{Reason: ReasonUnknown, Err: errors.New("...\nsecond\nthird")}, "unknown: second"},
@@ -182,6 +195,102 @@ func TestScanErrorSummary(t *testing.T) {
 	}
 	if s := classifyScanFailure(msgMultipleMains, nil).Summary(); strings.Contains(s, "\n") {
 		t.Errorf("Summary() = %q, want one line", s)
+	}
+}
+
+// The summary names the line that decided the Reason, not the first meaningful line: an unrelated error can come first
+// in the package-loading list, and a cause that comes later must still be the one published.
+func TestScanErrorSummary_DecidingLine(t *testing.T) {
+	const msgUnrelatedFirst = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		"x.go:1:2: undefined: foo.Bar\n" +
+		"b.go:3:6: main redeclared in this block\n" +
+		"a.go:3:6: \tother declaration of main\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	se := classifyScanFailure(msgUnrelatedFirst, nil)
+	if se.Reason != ReasonMultipleMains {
+		t.Fatalf("Reason = %q, want %q", se.Reason, ReasonMultipleMains)
+	}
+	if got, want := se.Summary(), "multiple_mains: b.go:3:6: main redeclared in this block"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+
+	// The matching line is kept whole even when the tail cut drops it from Err.
+	var b strings.Builder
+	b.WriteString("b.go:3:6: main redeclared in this block\n")
+	for i := range tailMaxLines + 5 {
+		fmt.Fprintf(&b, "x.go:%d:1: undefined: foo.Bar\n", i)
+	}
+	se = classifyScanFailure(b.String(), nil)
+	if se.Reason != ReasonMultipleMains {
+		t.Fatalf("Reason = %q, want %q", se.Reason, ReasonMultipleMains)
+	}
+	if got, want := se.Summary(), "multiple_mains: b.go:3:6: main redeclared in this block"; got != want {
+		t.Errorf("cut tail: Summary() = %q, want %q", got, want)
+	}
+}
+
+// A single over-long line is held to tailMaxBytes, like Err is: the summary is published, and a go error line can be
+// arbitrarily long.
+func TestScanErrorSummary_LongDecidingLine(t *testing.T) {
+	const head = "b.go:3:6: main redeclared in this block "
+	tests := []struct {
+		name string
+		line string
+	}{
+		{"ascii", head + strings.Repeat("x", 100000)},
+		// a three-byte rune starts one byte before the cut, so the cut falls inside it
+		{"rune at the cut", head + strings.Repeat("x", tailMaxBytes-1-len(head)) + strings.Repeat("\u4e16", 1000)},
+	}
+	for _, tc := range tests {
+		se := classifyScanFailure("header\n"+tc.line, nil)
+		if se.Reason != ReasonMultipleMains {
+			t.Fatalf("%s: Reason = %q, want %q", tc.name, se.Reason, ReasonMultipleMains)
+		}
+		got := se.Summary()
+		if max := len(se.Reason) + 2 + tailMaxBytes + len("..."); len(got) > max {
+			t.Errorf("%s: len(Summary()) = %d, want at most %d", tc.name, len(got), max)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("%s: Summary() is not valid UTF-8", tc.name)
+		}
+		if want := "multiple_mains: " + head; !strings.HasPrefix(got, want) {
+			t.Errorf("%s: Summary() = %.80q..., want it to start with %q", tc.name, got, want)
+		}
+		if !strings.HasSuffix(got, "...") {
+			t.Errorf("%s: Summary() does not end with an ellipsis", tc.name)
+		}
+	}
+}
+
+// The summary starts at the cause: the wrapper that govulncheck and the go command put in front of it is dropped.
+func TestScanErrorSummary_WrapperChain(t *testing.T) {
+	const wantNewerGo = "needs_newer_go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)"
+	tests := []struct {
+		name string
+		se   *ScanError
+		want string
+	}{
+		{"needs newer go", classifyScanFailure("govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)\n", nil), wantNewerGo},
+		{"needs newer go, exit status 2", classifyScanFailure("govulncheck: loading packages: err: exit status 2: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)", nil), wantNewerGo},
+		{"header lines first", classifyScanFailure("\ngovulncheck: loading packages: \nerr: exit status 1: stderr: go: go.mod requires go >= 1.27.0 (running go 1.26.9; GOTOOLCHAIN=local)\n", nil), wantNewerGo},
+		// no rule matches: the first meaningful line, with its wrapper dropped too
+		{"unknown", classifyScanFailure("govulncheck: loading packages: err: exit status 1: stderr: go: something odd happened\n", nil), "unknown: something odd happened"},
+		// a message that has none of the wrapper is left alone
+		{"no wrapper", classifyScanFailure("b.go:3:6: main redeclared in this block", nil), "multiple_mains: b.go:3:6: main redeclared in this block"},
+		// a ScanError built by hand has no remembered line and keeps the first-meaningful-line behaviour
+		{"hand built", &ScanError{Reason: ReasonUnknown, Err: errors.New("first\nb.go:3:6: main redeclared in this block")}, "unknown: first"},
+		{"hand built, wrapper", &ScanError{Reason: ReasonNeedsNewerGo, Err: errors.New("govulncheck: loading packages: err: exit status 1: stderr: go: go.mod requires go >= 1.27.0")}, "needs_newer_go: go.mod requires go >= 1.27.0"},
+	}
+	for _, tc := range tests {
+		got := tc.se.Summary()
+		if got != tc.want {
+			t.Errorf("%s: Summary() = %q, want %q", tc.name, got, tc.want)
+		}
+		for _, w := range []string{"govulncheck:", "exit status", "stderr:"} {
+			if strings.Contains(got, w) {
+				t.Errorf("%s: Summary() = %q, still carries %q", tc.name, got, w)
+			}
+		}
 	}
 }
 
@@ -306,8 +415,8 @@ func TestTrimProjectDir(t *testing.T) {
 		{"no directory", resolved + sep + "b.go:1:1: x", "", resolved + sep + "b.go:1:1: x"},
 	}
 	for _, tc := range tests {
-		if got := trimProjectDir(tc.msg, tc.dir); got != tc.want {
-			t.Errorf("%s: trimProjectDir = %q, want %q", tc.name, got, tc.want)
+		if got := trimPaths(tc.msg, tc.dir, ""); got != tc.want {
+			t.Errorf("%s: trimPaths = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 
@@ -316,6 +425,165 @@ func TestTrimProjectDir(t *testing.T) {
 	se := WrapScanFailure(cause, nil, dir)
 	if got := se.Err.Error(); got != "go.mod:3: unknown directive: x" || !errors.Is(se, cause) {
 		t.Errorf("Err = %q, errors.Is = %v", got, errors.Is(se, cause))
+	}
+}
+
+func TestTrimPaths_ModCache(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "pkg", "mod")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(cache, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	// t.TempDir can itself sit behind a symlink (/var -> /private/var on macOS): the go command reports the resolved path.
+	resolved, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(root, "proj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	tests := []struct {
+		name, msg, projectDir, modCache, want string
+	}{
+		{"a module", resolved + sep + "github.com/gordonklaus/portaudio@v0.0.0-x", "", cache, "github.com/gordonklaus/portaudio@v0.0.0-x"},
+		{"a file of a module", resolved + sep + "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow", "", cache, "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow"},
+		{"in a sentence", "build constraints exclude all Go files in " + resolved + sep + "a.example/m@v1.0.0\nnext", "", cache, "build constraints exclude all Go files in a.example/m@v1.0.0\nnext"},
+		{"through a symlink", resolved + sep + "a.example/m@v1.0.0/x.go:1:1: x", "", link, "a.example/m@v1.0.0/x.go:1:1: x"},
+		{"the symlink in the text", link + sep + "a.example/m@v1.0.0/x.go:1:1: x", "", link, "a.example/m@v1.0.0/x.go:1:1: x"},
+		{"a sibling is kept", resolved + "2" + sep + "a.example/m@v1.0.0", "", cache, resolved + "2" + sep + "a.example/m@v1.0.0"},
+		{"the cache on its own is kept", "cache is " + resolved + "\nnext", "", cache, "cache is " + resolved + "\nnext"},
+		{"an escaped path stays as printed", resolved + sep + "github.com/!burnt!sushi/toml@v1.0.0/a.go:1:1: x", "", cache, "github.com/!burnt!sushi/toml@v1.0.0/a.go:1:1: x"},
+		{"no cache", resolved + sep + "a.example/m@v1.0.0", "", "", resolved + sep + "a.example/m@v1.0.0"},
+		// the project's bare directory is still ".", the cache's is not
+		{"both", "in " + proj + " and " + resolved + sep + "a.example/m@v1.0.0", proj, cache, "in . and a.example/m@v1.0.0"},
+	}
+	for _, tc := range tests {
+		if got := trimPaths(tc.msg, tc.projectDir, tc.modCache); got != tc.want {
+			t.Errorf("%s: trimPaths = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A package-loading failure for a dependency names it by its place in the module cache; the published reason names the
+// module and its version only, wherever the cache is.
+func TestWrapScanFailure_CutsTheModCache(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("GOMODCACHE", cache)
+	resolved, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	msg := "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		resolved + sep + "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow\n" +
+		"-: build constraints exclude all Go files in " + resolved + sep + "github.com/gordonklaus/portaudio@v0.0.0-x\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	se := classifyScanFailure(msg, nil)
+	for name, got := range map[string]string{"Err": se.Err.Error(), "Summary": se.Summary()} {
+		if strings.Contains(got, cache) || strings.Contains(got, resolved) {
+			t.Errorf("%s = %q, want it without the module cache %q", name, got, resolved)
+		}
+	}
+	if got, want := se.Summary(), "build_constraints: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+	if !strings.Contains(se.Err.Error(), "build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x") {
+		t.Errorf("Err = %q, want the excluded module named by module@version", se.Err)
+	}
+}
+
+func TestModCacheFromEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	pathList := func(a, b string) string { return a + string(filepath.ListSeparator) + b }
+	tests := []struct {
+		name, gomodcache, gopath, want string
+	}{
+		{"GOMODCACHE wins", "/m/cache", "/g/one", "/m/cache"},
+		{"first GOPATH entry", "", pathList("/g/one", "/g/two"), filepath.Join("/g/one", "pkg", "mod")},
+		{"default", "", "", filepath.Join(home, "go", "pkg", "mod")},
+	}
+	for _, tc := range tests {
+		t.Setenv("GOMODCACHE", tc.gomodcache)
+		t.Setenv("GOPATH", tc.gopath)
+		if got := modCacheFromEnv(); got != tc.want {
+			t.Errorf("%s: modCacheFromEnv = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A build-constraints failure is published by the line that says so, not by the unrelated error that comes first.
+func TestScanErrorSummary_BuildConstraints(t *testing.T) {
+	se := classifyScanFailure(msgBuildConstraints, nil)
+	want := "build_constraints: build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x"
+	if got := se.Summary(); got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+}
+
+func TestExcludedDir(t *testing.T) {
+	tests := []struct{ name, msg, want string }{
+		{"in a list", msgBuildConstraints, "github.com/gordonklaus/portaudio@v0.0.0-x"},
+		{"absolute", "-: build constraints exclude all Go files in /m/github.com/x/y@v1.0.0/sub\nnext line", "/m/github.com/x/y@v1.0.0/sub"},
+		{"with a trailing space", "build constraints exclude all Go files in /p/dep \n", "/p/dep"},
+		{"the first one", "build constraints exclude all Go files in /p/one\nbuild constraints exclude all Go files in /p/two", "/p/one"},
+		{"none", "main.go:3:8: undefined: x", ""},
+		{"no directory", "build constraints exclude all Go files in \n", ""},
+	}
+	for _, tc := range tests {
+		if got := excludedDir(tc.msg); got != tc.want {
+			t.Errorf("%s: excludedDir = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDirImportsC(t *testing.T) {
+	const cgoFile = "package p\n\n// #include <stdlib.h>\nimport \"C\"\n\nfunc F() {}\n"
+	const plainFile = "package p\n\nimport \"fmt\"\n\nvar _ = fmt.Sprint\n"
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"a cgo file", map[string]string{"c.go": cgoFile, "a.go": plainFile}, true},
+		{"a cgo file behind a build constraint", map[string]string{"c.go": "//go:build cgo\n\n" + cgoFile}, true},
+		{"a file that does not parse is skipped", map[string]string{"bad.go": "package", "c.go": cgoFile}, true},
+		{"only a test file imports C", map[string]string{"c_test.go": cgoFile, "a.go": plainFile}, false},
+		{"only a hidden file imports C", map[string]string{".c.go": cgoFile}, false},
+		{"only an underscore file imports C", map[string]string{"_c.go": cgoFile}, false},
+		{"only a subdirectory imports C", map[string]string{"a.go": plainFile, "sub/c.go": cgoFile}, false},
+		{"no cgo", map[string]string{"a.go": plainFile}, false},
+		{"not a Go file", map[string]string{"c.txt": cgoFile}, false},
+		{"empty directory", nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				path := filepath.Join(dir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := dirImportsC(dir); got != tc.want {
+				t.Errorf("dirImportsC = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	for name, dir := range map[string]string{"missing": filepath.Join(t.TempDir(), "nope"), "empty": ""} {
+		if dirImportsC(dir) {
+			t.Errorf("%s directory: dirImportsC = true", name)
+		}
 	}
 }
 

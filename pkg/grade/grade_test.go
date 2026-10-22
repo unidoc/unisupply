@@ -377,6 +377,56 @@ func TestTiesDecideByVulnerabilityThenSelfThenDirectThenPath(t *testing.T) {
 	_ = vuln
 }
 
+// A failed vulnerability scan carries its reason code and kind into the Pending, as their own JSON fields; no other
+// Pending has them.
+func TestPending_ScanFailureCodeAndKind(t *testing.T) {
+	failed := run(Input{Self: self(), Deps: []Row{dep("example.com/x")}, Checks: Checks{
+		VulnScanFailed: true, VulnScanReason: "multiple_mains: b.go:3:6: main redeclared in this block",
+		VulnScanCode: "multiple_mains", VulnScanKind: "permanent",
+	}})
+	if failed.Pending == nil || failed.Pending.Check != "vulnerability_scan" || failed.Pending.Code != "multiple_mains" || failed.Pending.Kind != "permanent" {
+		t.Fatalf("Pending = %+v, want vulnerability_scan with code multiple_mains and kind permanent", failed.Pending)
+	}
+	if want := "the vulnerability scan did not run: multiple_mains: b.go:3:6: main redeclared in this block"; failed.Pending.Reason != want {
+		t.Errorf("Reason = %q, want %q: the text keeps its code prefix", failed.Pending.Reason, want)
+	}
+	out, err := json.Marshal(failed.Pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"code":"multiple_mains","kind":"permanent"`) {
+		t.Errorf("JSON = %s, want code and kind", out)
+	}
+
+	// no code and no kind: a failure that is not a typed scan failure
+	untyped := run(Input{Self: self(), Deps: []Row{dep("example.com/x")}, Checks: Checks{VulnScanFailed: true, VulnScanReason: "offline"}})
+	// every other check
+	others := map[string]Input{
+		"scan_incomplete": {Self: self(), Deps: []Row{dep("example.com/x")}, Checks: Checks{ScanTimedOut: true}},
+		"checksum":        {Self: self(), Checks: Checks{ChecksumUnverified: true}},
+		"known_exploited": {Self: self(), Deps: []Row{dep("example.com/x", called("M", "example.com/x", "MEDIUM"))}, Checks: Checks{KEVUnchecked: 1}},
+	}
+	pendings := map[string]*Pending{"vulnerability_scan without a code": untyped.Pending}
+	for name, in := range others {
+		// the scan's code and kind never leak into another check
+		in.Checks.VulnScanCode, in.Checks.VulnScanKind = "multiple_mains", "permanent"
+		pendings[name] = run(in).Pending
+	}
+	for name, p := range pendings {
+		if p == nil {
+			t.Errorf("%s: not Pending", name)
+			continue
+		}
+		out, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), `"code"`) || strings.Contains(string(out), `"kind"`) {
+			t.Errorf("%s: JSON = %s, want neither code nor kind", name, out)
+		}
+	}
+}
+
 func TestPending(t *testing.T) {
 	selfArchived := self()
 	selfArchived.Upkeep = Upkeep{Archived: true}
