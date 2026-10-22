@@ -403,8 +403,8 @@ func TestTrimProjectDir(t *testing.T) {
 		{"no directory", resolved + sep + "b.go:1:1: x", "", resolved + sep + "b.go:1:1: x"},
 	}
 	for _, tc := range tests {
-		if got := trimProjectDir(tc.msg, tc.dir); got != tc.want {
-			t.Errorf("%s: trimProjectDir = %q, want %q", tc.name, got, tc.want)
+		if got := trimPaths(tc.msg, tc.dir, ""); got != tc.want {
+			t.Errorf("%s: trimPaths = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 
@@ -413,6 +413,97 @@ func TestTrimProjectDir(t *testing.T) {
 	se := WrapScanFailure(cause, nil, dir)
 	if got := se.Err.Error(); got != "go.mod:3: unknown directive: x" || !errors.Is(se, cause) {
 		t.Errorf("Err = %q, errors.Is = %v", got, errors.Is(se, cause))
+	}
+}
+
+func TestTrimPaths_ModCache(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "pkg", "mod")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(cache, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	// t.TempDir can itself sit behind a symlink (/var -> /private/var on macOS): the go command reports the resolved path.
+	resolved, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(root, "proj")
+	if err := os.Mkdir(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	tests := []struct {
+		name, msg, projectDir, modCache, want string
+	}{
+		{"a module", resolved + sep + "github.com/gordonklaus/portaudio@v0.0.0-x", "", cache, "github.com/gordonklaus/portaudio@v0.0.0-x"},
+		{"a file of a module", resolved + sep + "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow", "", cache, "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow"},
+		{"in a sentence", "build constraints exclude all Go files in " + resolved + sep + "a.example/m@v1.0.0\nnext", "", cache, "build constraints exclude all Go files in a.example/m@v1.0.0\nnext"},
+		{"through a symlink", resolved + sep + "a.example/m@v1.0.0/x.go:1:1: x", "", link, "a.example/m@v1.0.0/x.go:1:1: x"},
+		{"the symlink in the text", link + sep + "a.example/m@v1.0.0/x.go:1:1: x", "", link, "a.example/m@v1.0.0/x.go:1:1: x"},
+		{"a sibling is kept", resolved + "2" + sep + "a.example/m@v1.0.0", "", cache, resolved + "2" + sep + "a.example/m@v1.0.0"},
+		{"the cache on its own is kept", "cache is " + resolved + "\nnext", "", cache, "cache is " + resolved + "\nnext"},
+		{"an escaped path stays as printed", resolved + sep + "github.com/!burnt!sushi/toml@v1.0.0/a.go:1:1: x", "", cache, "github.com/!burnt!sushi/toml@v1.0.0/a.go:1:1: x"},
+		{"no cache", resolved + sep + "a.example/m@v1.0.0", "", "", resolved + sep + "a.example/m@v1.0.0"},
+		// the project's bare directory is still ".", the cache's is not
+		{"both", "in " + proj + " and " + resolved + sep + "a.example/m@v1.0.0", proj, cache, "in . and a.example/m@v1.0.0"},
+	}
+	for _, tc := range tests {
+		if got := trimPaths(tc.msg, tc.projectDir, tc.modCache); got != tc.want {
+			t.Errorf("%s: trimPaths = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A package-loading failure for a dependency names it by its place in the module cache; the published reason names the
+// module and its version only, wherever the cache is.
+func TestWrapScanFailure_CutsTheModCache(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("GOMODCACHE", cache)
+	resolved, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sep := string(filepath.Separator)
+	msg := "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n" +
+		resolved + sep + "fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow\n" +
+		"-: build constraints exclude all Go files in " + resolved + sep + "github.com/gordonklaus/portaudio@v0.0.0-x\n\n" +
+		"For details on package patterns, see https://pkg.go.dev/cmd/go#hdr-Package_lists_and_patterns.\n"
+	se := classifyScanFailure(msg, nil)
+	for name, got := range map[string]string{"Err": se.Err.Error(), "Summary": se.Summary()} {
+		if strings.Contains(got, cache) || strings.Contains(got, resolved) {
+			t.Errorf("%s = %q, want it without the module cache %q", name, got, resolved)
+		}
+	}
+	if got, want := se.Summary(), "unknown: fyne.io/fyne/v2@v2.4.0/window_desktop.go:819:19: undefined: glfw.CreateWindow"; got != want {
+		t.Errorf("Summary() = %q, want %q", got, want)
+	}
+	if !strings.Contains(se.Err.Error(), "build constraints exclude all Go files in github.com/gordonklaus/portaudio@v0.0.0-x") {
+		t.Errorf("Err = %q, want the excluded module named by module@version", se.Err)
+	}
+}
+
+func TestModCacheFromEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	pathList := func(a, b string) string { return a + string(filepath.ListSeparator) + b }
+	tests := []struct {
+		name, gomodcache, gopath, want string
+	}{
+		{"GOMODCACHE wins", "/m/cache", "/g/one", "/m/cache"},
+		{"first GOPATH entry", "", pathList("/g/one", "/g/two"), filepath.Join("/g/one", "pkg", "mod")},
+		{"default", "", "", filepath.Join(home, "go", "pkg", "mod")},
+	}
+	for _, tc := range tests {
+		t.Setenv("GOMODCACHE", tc.gomodcache)
+		t.Setenv("GOPATH", tc.gopath)
+		if got := modCacheFromEnv(); got != tc.want {
+			t.Errorf("%s: modCacheFromEnv = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

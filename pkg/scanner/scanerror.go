@@ -199,10 +199,10 @@ func classifyScanFailure(msg string, ctxErr error) *ScanError {
 // WrapScanFailure types err like classifyScanFailure does its message, and keeps err as the cause: its text is cut to the
 // tail, but errors.Is and errors.As still see it. A ReasonScanDeadline error also carries ctxErr, so
 // errors.Is(err, context.DeadlineExceeded) holds even when err is only the scan's output text. projectDir, when not
-// empty, is cut from the text (see trimProjectDir), so that the published reason does not carry a path of the scanning
-// machine. The line that the classifying rule matched is kept for Summary, whatever the tail cut leaves.
+// empty, and the module cache (see modCacheFromEnv) are cut from the text (see trimPaths), so that the published reason
+// does not carry a path of the scanning machine. The line that the classifying rule matched is kept for Summary, whatever the tail cut leaves.
 func WrapScanFailure(err, ctxErr error, projectDir string) *ScanError {
-	msg := trimProjectDir(err.Error(), projectDir)
+	msg := trimPaths(err.Error(), projectDir, modCacheFromEnv())
 	for _, r := range scanFailureRules {
 		if ctxErr != nil && r.kind == FailTransient {
 			continue
@@ -250,11 +250,20 @@ func tailOf(err error, msg string) error {
 	return err
 }
 
-// trimProjectDir cuts the project directory out of a go command's message: "<dir>/b.go:3:6: ..." becomes
-// "b.go:3:6: ...", and "<dir>" on its own ("found packages a (a.go) and b (b.go) in <dir>") becomes ".". The directory
-// is matched absolute and with its symlinks resolved, since the go command reports the resolved path (/private/tmp for
-// /tmp on macOS); a sibling such as "<dir>2" is left alone. An empty dir leaves msg as it is.
-func trimProjectDir(msg, dir string) string {
+// trimPaths cuts the paths of the scanning machine out of a go command's message. The project directory: "<dir>/b.go:3:6:
+// ..." becomes "b.go:3:6: ...", and "<dir>" on its own ("found packages a (a.go) and b (b.go) in <dir>") becomes ".". The
+// module cache: "<cache>/github.com/x/y@v1.2.3/a.go:1:1: ..." becomes "github.com/x/y@v1.2.3/a.go:1:1: ...", so that a
+// dependency reads the same on every machine; the cache on its own is left, as "." would mean the project. Escaped module
+// paths ("!burnt!sushi") stay as the go command prints them. An empty dir or modCache leaves msg as it is.
+func trimPaths(msg, projectDir, modCache string) string {
+	msg = trimDir(msg, projectDir, true)
+	return trimDir(msg, modCache, false)
+}
+
+// trimDir cuts "<dir>/" from msg, and with bare also replaces "<dir>" on its own by ".". The directory is matched absolute
+// and with its symlinks resolved, since the go command reports the resolved path (/private/tmp for /tmp on macOS); a
+// sibling such as "<dir>2" is left alone.
+func trimDir(msg, dir string, bare bool) string {
 	if dir == "" {
 		return msg
 	}
@@ -274,9 +283,29 @@ func trimProjectDir(msg, dir string) string {
 			continue // a volume root would cut every path
 		}
 		msg = strings.ReplaceAll(msg, d+sep, "")
-		msg = regexp.MustCompile(regexp.QuoteMeta(d)+`([\s"'):,;]|$)`).ReplaceAllString(msg, ".${1}")
+		if bare {
+			msg = regexp.MustCompile(regexp.QuoteMeta(d)+`([\s"'):,;]|$)`).ReplaceAllString(msg, ".${1}")
+		}
 	}
 	return msg
+}
+
+// modCacheFromEnv is the module cache of this process's environment, the way the go command finds it: GOMODCACHE, else
+// the first GOPATH entry's pkg/mod, else $HOME/go/pkg/mod. It does not run `go env`: WrapScanFailure runs on the failure
+// path of runner.Run, which has no go environment at hand and must not start a process to describe an error. A cache that
+// `go env -w` moved is not seen here; the scan, which has run `go env`, cuts that one itself. It is empty when none of
+// the three is known.
+func modCacheFromEnv() string {
+	if d := os.Getenv("GOMODCACHE"); d != "" {
+		return d
+	}
+	if gopath := filepath.SplitList(os.Getenv("GOPATH")); len(gopath) > 0 && gopath[0] != "" {
+		return filepath.Join(gopath[0], "pkg", "mod")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, "go", "pkg", "mod")
+	}
+	return ""
 }
 
 // hasCgoImport reports whether a non-test Go file of the module in dir imports "C". It reads the import clauses only, and

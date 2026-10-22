@@ -13,33 +13,42 @@ import (
 // Go version it matches standard-library vulnerabilities against.
 const goVersionEnvPrefix = "GOVERSION="
 
-// resolveGoEnv returns the Go version, GOROOT and CGO_ENABLED ("0" or "1") that the go command resolves
+// goEnv is what the go command resolves for a directory.
+type goEnv struct {
+	version  string // GOVERSION
+	root     string // GOROOT
+	cgo      string // CGO_ENABLED, "0" or "1"
+	modCache string // GOMODCACHE; may be empty
+}
+
+// resolveGoEnv returns the Go version, GOROOT, CGO_ENABLED and GOMODCACHE that the go command resolves
 // when run in dir. An empty dir uses the process working directory, which is
 // where govulncheck resolves its own values, so comparing the two results
 // shows whether the project and the scanner use different toolchains.
 // CGO_ENABLED is read from go env, not the process environment, so the default
 // the go command applies (off without a C compiler) counts.
-func resolveGoEnv(ctx context.Context, dir string) (goVersion, goRoot, cgoEnabled string, err error) {
-	cmd := exec.CommandContext(ctx, "go", "env", "-json", "GOVERSION", "GOROOT", "CGO_ENABLED")
+func resolveGoEnv(ctx context.Context, dir string) (goEnv, error) {
+	cmd := exec.CommandContext(ctx, "go", "env", "-json", "GOVERSION", "GOROOT", "CGO_ENABLED", "GOMODCACHE")
 	cmd.Dir = dir
 
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", "", fmt.Errorf("go env: %w", err)
+		return goEnv{}, fmt.Errorf("go env: %w", err)
 	}
 
 	var env struct {
 		GoVersion  string `json:"GOVERSION"`
 		GoRoot     string `json:"GOROOT"`
 		CgoEnabled string `json:"CGO_ENABLED"`
+		ModCache   string `json:"GOMODCACHE"`
 	}
 	if err := json.Unmarshal(out, &env); err != nil {
-		return "", "", "", fmt.Errorf("decoding go env output: %w", err)
+		return goEnv{}, fmt.Errorf("decoding go env output: %w", err)
 	}
 	if env.GoVersion == "" || env.GoRoot == "" {
-		return "", "", "", fmt.Errorf("go env returned an empty GOVERSION (%q) or GOROOT (%q)", env.GoVersion, env.GoRoot)
+		return goEnv{}, fmt.Errorf("go env returned an empty GOVERSION (%q) or GOROOT (%q)", env.GoVersion, env.GoRoot)
 	}
-	return env.GoVersion, env.GoRoot, env.CgoEnabled, nil
+	return goEnv{version: env.GoVersion, root: env.GoRoot, cgo: env.CgoEnabled, modCache: env.ModCache}, nil
 }
 
 // govulncheckEnv returns the environment for the in-process govulncheck run:

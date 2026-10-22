@@ -628,21 +628,21 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	// and GOROOT for the standard library in this process's working directory.
 	// Resolve the project's own so the result does not depend on where
 	// unisupply was launched from.
-	projectGoVersion, projectGoRoot, projectCgo, projectErr := resolveGoEnv(ctx, projectDir)
+	projectEnv, projectErr := resolveGoEnv(ctx, projectDir)
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
 	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
 	if projectErr == nil {
-		if err := CheckToolchain(projectGoVersion); err != nil {
+		if err := CheckToolchain(projectEnv.version); err != nil {
 			return nil, nil, false, &ScanError{Kind: FailPermanent, Reason: ReasonNeedsNewerGo, Err: err}
 		}
 	}
 	// A failure here only costs stdlib file positions, so it is not reported.
-	_, scannerGoRoot, _, scannerErr := resolveGoEnv(ctx, "")
+	scannerEnv, scannerErr := resolveGoEnv(ctx, "")
 	parseOpts := gvcParseOptions{}
 	if projectErr == nil && scannerErr == nil {
-		parseOpts = gvcParseOptions{scannerGOROOT: scannerGoRoot, projectGOROOT: projectGoRoot}
+		parseOpts = gvcParseOptions{scannerGOROOT: scannerEnv.root, projectGOROOT: projectEnv.root}
 	}
 	if opts.Info != nil {
 		*opts.Info = ScanInfo{Platform: scanPlatform(), GovulncheckVersion: govulncheckVersion(readBuildInfo)}
@@ -650,7 +650,7 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	}
 
 	cmd := scan.Command(ctx, "-json", "-C", projectDir, "./...")
-	cmd.Env = govulncheckEnv(os.Environ(), projectGoVersion)
+	cmd.Env = govulncheckEnv(os.Environ(), projectEnv.version)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderrBuf
 
@@ -679,13 +679,18 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		if terr := toolchainErrorFrom(msg); terr != nil {
 			msg = terr.Error()
 		}
-		// The warning and the reason are published: neither carries the path of the project on this machine.
-		msg = trimProjectDir(msg, projectDir)
+		// The warning and the reason are published: neither carries the path of the project or of the module cache on this
+		// machine. The project's go env gives the cache; when it failed (the project needs a newer Go), the scanner's does.
+		modCache := projectEnv.modCache
+		if projectErr != nil && scannerErr == nil {
+			modCache = scannerEnv.modCache
+		}
+		msg = trimPaths(msg, projectDir, modCache)
 		warnings = append(warnings, msg)
 		scanErr = classifyScanFailure(msg, ctx.Err())
 		// "no packages matched" is also what a module whose files all need cgo gives when cgo is off: say so, but only
 		// when the go command confirms cgo is off and a file of the module imports "C".
-		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectCgo == "0" && hasCgoImport(projectDir) {
+		if scanErr.Reason == ReasonNoPackages && projectErr == nil && projectEnv.cgo == "0" && hasCgoImport(projectDir) {
 			scanErr.Reason = ReasonCgoOnly
 		}
 	}
