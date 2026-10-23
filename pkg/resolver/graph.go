@@ -28,12 +28,12 @@ import (
 
 // Dependency represents a resolved dependency with graph info.
 type Dependency struct {
-	Module         parser.Module
-	Direct         bool
-	Depth          int      // 0 = direct, 1 = one level transitive, etc.
-	UsedBy         []string // module paths that depend on this
-	Replaced       bool     // whether this module is replaced in go.mod
-	TransitiveDeps int      // how many dependencies this module itself pulls in
+	Module         parser.Module `json:"module"`
+	Direct         bool          `json:"direct,omitempty"`
+	Depth          int           `json:"depth"`              // 0 = direct, 1 = one level transitive, etc.
+	UsedBy         []string      `json:"used_by,omitempty"`  // module paths that depend on this
+	Replaced       bool          `json:"replaced,omitempty"` // whether this module is replaced in go.mod
+	TransitiveDeps int           `json:"transitive_deps"`    // how many dependencies this module itself pulls in
 
 	// IsTestOnly is a three-state field indicating whether this module is
 	// exclusively required for testing. It is derived from the main module's
@@ -50,7 +50,7 @@ type Dependency struct {
 	//            GOOS.
 	//   &true  - confirmed test-only dependency: imported by the main module's
 	//            tests but by no production package on any GOOS.
-	IsTestOnly *bool
+	IsTestOnly *bool `json:"test_only,omitempty"`
 
 	// InBuild is a three-state field indicating whether any package of this
 	// module is compiled into the main module's production code or tests
@@ -69,7 +69,7 @@ type Dependency struct {
 	//            required by a dependency that the main module uses only in
 	//            part, or only by a go 1.24 `tool` directive). Dependencies'
 	//            own tests do not count.
-	InBuild *bool
+	InBuild *bool `json:"in_build,omitempty"`
 
 	// Platforms lists the GOOS values on which a production module is built
 	// (on any listed GOARCH), sorted. It is set only when the module is in the
@@ -78,21 +78,61 @@ type Dependency struct {
 	// "none". It is left nil when any GOOS/GOARCH target could not be listed,
 	// because a subset claim over a platform that was not observed cannot be
 	// backed.
-	Platforms []string
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 // Graph holds the resolved dependency graph.
 type Graph struct {
-	Root         string
-	Dependencies map[string]*Dependency // keyed by module path
-	EdgeCount    int                    // total edges in the dependency graph
+	Root         string                 `json:"root"`
+	Dependencies map[string]*Dependency `json:"dependencies"` // keyed by module path
+	EdgeCount    int                    `json:"edge_count"`   // total edges in the dependency graph
+
+	// Source says where the requirement edges came from (the Source* constants): only "go_mod_graph" lists every module's
+	// own requirements. The other two list the main module's requirements only, so a consumer must not read their edges as
+	// the whole graph.
+	Source string `json:"source,omitempty"`
 
 	// Notes holds informational messages from resolution that do not make the
 	// results incomplete, such as per-package go list errors that leave module
 	// classification unaffected. Resolve's warnings, by contrast, name a
 	// degradation. Reports must show notes apart from warnings so a note is not
 	// read as a scan limitation.
-	Notes []string
+	Notes []string `json:"notes,omitempty"`
+}
+
+// Where Graph.Source's edges came from.
+const (
+	SourceGoModGraph    = "go_mod_graph"    // `go mod graph`: every module's own requirements
+	SourceGoModRequires = "go_mod_requires" // go.mod's requirements only (the go command could not run), plus go.sum
+	SourceDirectOnly    = "direct_only"     // direct requirements of go.mod only (--direct-only)
+	SourceUnknown       = ""                // a graph built by hand
+)
+
+// Edge says that module From requires module To. Both are module paths; the selected version of each is in
+// Graph.Dependencies (the main module has none).
+type Edge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// Edges returns the requirement edges of the graph, one per (module, requirement) pair of module paths, sorted by From and
+// then To. The main module is a From like any other. They come from each dependency's UsedBy list.
+func (g *Graph) Edges() []Edge {
+	var edges []Edge
+	for _, to := range g.SortedPaths() {
+		for _, from := range g.Dependencies[to].UsedBy {
+			if from != to {
+				edges = append(edges, Edge{From: from, To: to})
+			}
+		}
+	}
+	slices.SortFunc(edges, func(a, b Edge) int {
+		if c := strings.Compare(a.From, b.From); c != 0 {
+			return c
+		}
+		return strings.Compare(a.To, b.To)
+	})
+	return slices.Compact(edges)
 }
 
 // SortedPaths returns the module paths in Dependencies in ascending order.
@@ -127,6 +167,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 	}
 
 	if directOnly {
+		graph.Source = SourceDirectOnly
 		// Only include direct dependencies from go.mod.
 		for _, req := range gomod.Requirements {
 			if req.Indirect {
@@ -149,6 +190,7 @@ func Resolve(ctx context.Context, gomodPath string, directOnly bool) (*Graph, []
 	err = resolveWithGoModGraph(ctx, gomodPath, graph, gomod, directPaths)
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("Could not run 'go mod graph': %v. Falling back to go.mod/go.sum parsing (may miss transitive dependencies).", err))
+		graph.Source = SourceGoModRequires
 		// Fall back: add everything from go.mod.
 		for _, req := range gomod.Requirements {
 			_, replaced := gomod.ReplacementFor(req.Path, req.Version)
@@ -259,6 +301,7 @@ func resolveWithGoModGraph(ctx context.Context, gomodPath string, graph *Graph, 
 	}
 
 	graph.EdgeCount = len(edges)
+	graph.Source = SourceGoModGraph
 
 	// BFS from root to compute depth.
 	depths := make(map[string]int)

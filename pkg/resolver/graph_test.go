@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/parser"
@@ -489,6 +490,9 @@ require (
 	if graph == nil {
 		t.Fatal("Expected non-nil graph")
 	}
+	if graph.Source != SourceDirectOnly {
+		t.Errorf("Source = %q, want %q", graph.Source, SourceDirectOnly)
+	}
 
 	if graph.Root != "github.com/test/pkg" {
 		t.Errorf("Root = %q, want %q", graph.Root, "github.com/test/pkg")
@@ -916,4 +920,20 @@ require (
 // Helper function to write test files
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func TestGraphEdges(t *testing.T) {
+	g := &Graph{Root: "r", Dependencies: map[string]*Dependency{
+		"a": {UsedBy: []string{"r"}},
+		"b": {UsedBy: []string{"a", "r", "a"}},
+		"c": {UsedBy: []string{"b", "c"}}, // a self edge is not an edge
+		"d": {},
+	}}
+	want := []Edge{{"a", "b"}, {"b", "c"}, {"r", "a"}, {"r", "b"}}
+	if got := g.Edges(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Edges() = %v, want %v", got, want)
+	}
+	if got := (&Graph{Root: "r"}).Edges(); len(got) != 0 {
+		t.Errorf("empty graph: %v", got)
+	}
 }

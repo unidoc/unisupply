@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/internal/version"
+	"github.com/unidoc/unisupply/pkg/facts"
 	"github.com/unidoc/unisupply/pkg/netlog"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/policy"
@@ -27,6 +29,10 @@ import (
 // errPolicyViolation is returned when the dependency graph fails policy evaluation.
 var errPolicyViolation = errors.New("policy violation")
 
+// errScanFailed is returned when the scan failed or was interrupted but a report could still be written (scan_status.status
+// is "failed" or "interrupted" in the JSON). The report is written first; the exit code is 4.
+var errScanFailed = errors.New("scan failed")
+
 // errTokenPrecondition is returned when --require-github-token is set but the
 // token is missing, rejected, or could not be validated. Exit code 3 is
 // reserved for this precondition failure so CI pipelines can distinguish it
@@ -38,12 +44,19 @@ func main() {
 	var (
 		format                 string
 		output                 string
+		sbomOut                string
+		analysisOut            string
+		privateModules         string
+		factsURL               string
+		factsKeyFlag           string
+		factsKeyFile           string
 		verbose                bool
 		noColor                bool
 		moduleVersion          string
 		responseHistory        bool
 		gradeStdlib            bool
 		strictArchived         bool
+		calledPass             string
 		directOnly             bool
 		timeout                time.Duration
 		showHelp               bool
@@ -65,6 +78,13 @@ func main() {
 
 	flag.StringVarP(&format, "format", "f", "text", "Output format: text, json, pdf, sbom-cyclonedx, sbom-spdx")
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
+	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
+	flag.StringVar(&analysisOut, "analysis-out", "", "Also write the stored Analysis (JSON) of the same scan to this file; runner.Grade grades it again later without the module's files")
+	flag.StringVar(&privateModules, "private-modules", "", "Comma-separated module path patterns (GOPRIVATE syntax) of private modules: never looked up (no proxy, GitHub or facts request carries their path) and not graded on upkeep. Replaces GOPRIVATE/GONOPROXY from the environment when set")
+	flag.StringVar(&factsURL, "facts-url", "", "Read module and advisory facts from a gorisk facts API (e.g. https://gorisk.dev) instead of looking them up (env UNISUPPLY_FACTS_URL); the key comes from UNISUPPLY_FACTS_KEY or --facts-key-file")
+	flag.StringVar(&factsKeyFile, "facts-key-file", "", "File holding the facts API key (gk_...); the env var UNISUPPLY_FACTS_KEY works too")
+	flag.StringVar(&factsKeyFlag, "facts-key", "", "Refused: a flag value shows in the process list. Use UNISUPPLY_FACTS_KEY or --facts-key-file")
+	_ = flag.CommandLine.MarkHidden("facts-key")
 	flag.BoolVarP(&verbose, "verbose", "v", false, "Show detailed information for each dependency")
 	flag.BoolVar(&noColor, "no-color", false, "Disable color output")
 	flag.BoolVar(&directOnly, "direct-only", false, "Only analyze direct dependencies")
@@ -87,6 +107,7 @@ func main() {
 	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
 	flag.BoolVar(&gradeStdlib, "grade-stdlib", false, "Let the Go standard library decide the letter (it is always listed, with the Go release it was matched against, but not graded by default: its findings follow the Go toolchain that runs the scan)")
 	flag.BoolVar(&strictArchived, "strict-archived", false, "Make an archived flag that could not be read (GitHub rate limit without a token) make the grade Pending, instead of grading on what is known with a note")
+	flag.StringVar(&calledPass, "called-pass", "auto", "When govulncheck's called pass runs: auto (only when it can change the letter; the imported pass always runs first), always (as before), never (imported pass only)")
 	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
@@ -124,12 +145,19 @@ func main() {
 		path:                   path,
 		format:                 format,
 		output:                 output,
+		sbomOut:                sbomOut,
+		analysisOut:            analysisOut,
+		privateModules:         privateModules,
+		factsURL:               factsURL,
+		factsKeyFlag:           factsKeyFlag,
+		factsKeyFile:           factsKeyFile,
 		verbose:                verbose,
 		noColor:                noColor,
 		moduleVersion:          moduleVersion,
 		responseHistory:        responseHistory,
 		gradeStdlib:            gradeStdlib,
 		strictArchived:         strictArchived,
+		calledPass:             calledPass,
 		directOnly:             directOnly,
 		timeout:                timeout,
 		scanWorkflows:          scanWorkflows,
@@ -151,6 +179,11 @@ func main() {
 		// Policy violation should exit with code 2 for CI/CD integration.
 		if errors.Is(err, errPolicyViolation) {
 			os.Exit(2)
+		}
+		// A scan that failed or was interrupted, with its report written, exits with code 4.
+		if errors.Is(err, errScanFailed) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(4)
 		}
 		// Token precondition failure exits with code 3.
 		if errors.Is(err, errTokenPrecondition) {
@@ -176,12 +209,19 @@ type runConfig struct {
 	path                   string
 	format                 string
 	output                 string
+	sbomOut                string
+	analysisOut            string
+	privateModules         string
+	factsURL               string
+	factsKeyFlag           string
+	factsKeyFile           string
 	verbose                bool
 	noColor                bool
 	moduleVersion          string
 	responseHistory        bool
 	gradeStdlib            bool
 	strictArchived         bool
+	calledPass             string
 	directOnly             bool
 	timeout                time.Duration
 	scanWorkflows          bool
@@ -204,6 +244,10 @@ func run(cfg *runConfig) error {
 	// otherwise be asked about a version no release has.
 	if cfg.responseHistory && cfg.moduleVersion == "" {
 		return fmt.Errorf("--response-history needs --module-version: the history is of the published module's releases")
+	}
+	calledPassMode, err := scanner.ParseCalledPassMode(cfg.calledPass)
+	if err != nil {
+		return fmt.Errorf("--called-pass: %w", err)
 	}
 	if cfg.moduleVersion != "" {
 		if err := scanner.CheckModuleVersion(cfg.moduleVersion); err != nil {
@@ -229,6 +273,16 @@ func run(cfg *runConfig) error {
 	case "", "strict", "moderate":
 	default:
 		return fmt.Errorf("unknown policy preset: %s (supported: strict, moderate)", cfg.policyPreset)
+	}
+	factsStore, err := factsStoreFor(cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.analysisOut != "" && (cfg.analysisOut == cfg.output || cfg.analysisOut == cfg.sbomOut) {
+		return fmt.Errorf("--analysis-out names the same file as --output or --sbom-out (%s): it would overwrite it", cfg.analysisOut)
+	}
+	if cfg.sbomOut != "" && cfg.sbomOut == cfg.output {
+		return fmt.Errorf("--sbom-out and --output name the same file (%s): the SBOM would overwrite the report", cfg.output)
 	}
 
 	if cfg.policyFile != "" && cfg.policyPreset != "" {
@@ -293,7 +347,7 @@ func run(cfg *runConfig) error {
 	defer stop()
 	ctx = progress.WithReporter(ctx, rep)
 
-	scanResult, err := runner.Run(ctx, runner.Options{
+	runOpts := runner.Options{
 		Path:                   cfg.path,
 		Timeout:                cfg.timeout,
 		DirectOnly:             cfg.directOnly,
@@ -309,9 +363,29 @@ func run(cfg *runConfig) error {
 		ResponseHistory:        cfg.responseHistory,
 		GradeStdlib:            cfg.gradeStdlib,
 		StrictArchivedStatus:   cfg.strictArchived,
-	})
+		CalledPass:             calledPassMode,
+		Facts:                  factsStore,
+		PrivatePatterns:        privatePatterns(cfg.privateModules),
+	}
+	var scanResult *runner.Result
+	var analysis *runner.Analysis
+	if cfg.analysisOut != "" {
+		scanResult, analysis, err = runner.RunAnalysed(ctx, runOpts)
+	} else {
+		scanResult, err = runner.Run(ctx, runOpts)
+	}
 	if err != nil {
+		// A scan that could not start still leaves a machine-readable answer when JSON was asked for: the typed reason.
+		if cfg.format == "json" {
+			writeFailureJSON(cfg, err)
+		}
 		return err
+	}
+
+	if analysis != nil {
+		if err := writeAnalysisFile(cfg.analysisOut, analysis); err != nil {
+			return err
+		}
 	}
 
 	// A module with nothing to scan and no published version to grade has no report. A policy is still evaluated: a gate
@@ -325,12 +399,115 @@ func run(cfg *runConfig) error {
 		if err := writeReport(ctx, cfg, rep, scanResult); err != nil {
 			return err
 		}
+		if cfg.sbomOut != "" {
+			if err := writeSBOMFile(cfg.sbomOut, scanResult); err != nil {
+				return err
+			}
+		}
 	}
 
 	if cfg.policyFile != "" || cfg.policyPreset != "" {
-		return evaluatePolicy(cfg, rep, scanResult)
+		if err := evaluatePolicy(cfg, rep, scanResult); err != nil {
+			return err
+		}
+	}
+	// The report is written either way; a failed or interrupted scan is said in its scan_status and by the exit code.
+	if st := scanResult.ScanStatus; !noReport && (st.Status == scanner.StatusFailed || st.Status == scanner.StatusInterrupted) {
+		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 	}
 	return nil
+}
+
+// privatePatterns splits --private-modules; nil (the environment's GOPRIVATE and GONOPROXY apply) when it is empty.
+func privatePatterns(flagValue string) []string {
+	if strings.TrimSpace(flagValue) == "" {
+		return nil
+	}
+	return strings.Split(flagValue, ",")
+}
+
+// factsStoreFor is the facts store the flags and environment ask for: nil without a facts URL. The key is never a flag value
+// (it would show in the process list); it comes from --facts-key-file or UNISUPPLY_FACTS_KEY.
+func factsStoreFor(cfg *runConfig) (facts.Store, error) {
+	if cfg.factsKeyFlag != "" {
+		return nil, errors.New("--facts-key is refused: a flag value shows in the process list; use UNISUPPLY_FACTS_KEY or --facts-key-file")
+	}
+	base := cfg.factsURL
+	if base == "" {
+		base = strings.TrimSpace(os.Getenv("UNISUPPLY_FACTS_URL"))
+	}
+	if base == "" {
+		return nil, nil
+	}
+	if cfg.offlineMode {
+		return nil, errors.New("--offline cannot be combined with a facts URL: the facts API is a network service")
+	}
+	key := strings.TrimSpace(os.Getenv("UNISUPPLY_FACTS_KEY"))
+	if cfg.factsKeyFile != "" {
+		b, err := os.ReadFile(cfg.factsKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading --facts-key-file: %w", err)
+		}
+		key = strings.TrimSpace(string(b))
+	}
+	if key == "" {
+		return nil, errors.New("a facts URL needs its API key: set UNISUPPLY_FACTS_KEY or --facts-key-file")
+	}
+	store, err := facts.NewHTTPStore(base, key)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// writeAnalysisFile writes the Analysis as JSON, for --analysis-out.
+func writeAnalysisFile(path string, an *runner.Analysis) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating analysis file: %w", err)
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(an); err != nil {
+		f.Close()
+		return fmt.Errorf("writing analysis: %w", err)
+	}
+	return f.Close()
+}
+
+// writeSBOMFile writes the CycloneDX SBOM of the scan to path, for --sbom-out.
+func writeSBOMFile(path string, scanResult *runner.Result) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("creating SBOM file: %w", err)
+	}
+	opts := report.SBOMOptions{GoVersion: scanResult.GoMod.GoVersion, Grade: scanResult.Grade}
+	if err := report.WriteCycloneDX(scanResult.Graph, scanResult.ProjectScore, opts, f); err != nil {
+		f.Close()
+		return fmt.Errorf("writing SBOM: %w", err)
+	}
+	return f.Close()
+}
+
+// writeFailureJSON writes the JSON of a scan that could not start (no go.mod, the dependency graph cannot be resolved,
+// ...) to the output file or stdout, with the typed reason in scan_status. It does nothing for an error that is not a
+// scan failure (a bad flag, the token precondition) and never turns a failure into a second one: the error the caller
+// returns is the one that is reported.
+func writeFailureJSON(cfg *runConfig, cause error) {
+	var se *scanner.ScanError
+	if !errors.As(cause, &se) {
+		return
+	}
+	w := os.Stdout
+	if cfg.output != "" {
+		f, err := os.Create(cfg.output)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		w = f
+	}
+	_ = report.WriteJSONFailure(cause, w)
 }
 
 // writeReport renders the scan result in the format asked for.
@@ -387,6 +564,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
 			Scan:            scanResult.ScanInfo,
+			ScanStatus:      &scanResult.ScanStatus,
 			GoVersion:       gomod.GoVersion,
 			CIReport:        ciReport,
 			IntegrityReport: integrityReport,
@@ -489,6 +667,7 @@ func printUsage() {
 	fmt.Println("  unisupply ./myproject                        # Analyze specific project")
 	fmt.Println("  unisupply -f json -o report.json             # JSON output to file")
 	fmt.Println("  unisupply -f pdf                             # Generate PDF report")
+	fmt.Println("  unisupply -f json -o r.json --sbom-out s.json # JSON report and CycloneDX SBOM from one scan")
 	fmt.Println("  unisupply -f sbom-cyclonedx -o sbom.json     # CycloneDX SBOM")
 	fmt.Println("  unisupply -f sbom-spdx -o sbom.spdx.json     # SPDX SBOM")
 	fmt.Println("  unisupply --module-version v1.4.0            # Also grade the module itself at a published version")
@@ -508,6 +687,9 @@ func printUsage() {
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
 	fmt.Println("  2  Policy violation — one or more policy rules failed (max_grade: a grade worse than the limit, or Pending unless allow_pending)")
 	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
+	fmt.Println("  4  The scan failed or was interrupted, and the report was still written: scan_status.status is \"failed\" or \"interrupted\" with the typed")
+	fmt.Println("     reason in scan_status.reason. A policy violation (2) takes precedence. A scan that could not start (1) writes the same scan_status")
+	fmt.Println("     as the whole JSON when --format json is used")
 	fmt.Println()
 	fmt.Println("Flags:")
 	flag.PrintDefaults()

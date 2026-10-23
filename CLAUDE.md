@@ -79,6 +79,16 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   published)" in `docs/scanners.md`); only its signals (reachability, build membership, test-only, maintenance state)
   feed the grade.
 
+## Analysis and grading (engine v2)
+
+`runner.Run` is `runner.Analyse` followed by `runner.Grade`. `Analyse` returns an `Analysis` (build list and requirement
+graph, go.mod/go.sum audit, govulncheck findings with tiers and call paths, `Identity` with a `Key()`); it is JSON and meant to
+be stored. `Grade(ctx, analysis, facts.Store, date, opts)` applies Grading v2 with the facts and the date of the day and never
+changes the analysis. `pkg/facts` is the store interface (`Memory`, `None`; the CLI passes none); `pkg/vulndb` reads the Go
+vulnerability database's index (which modules' advisories changed since a time, and the fingerprint in `Identity`).
+govulncheck runs at package level first and at symbol level only when `grade.CalledPassCanChangeLetter` says it can change the
+letter (`--called-pass auto|always|never`, `scan.called_pass` in the JSON). The JSON has `scan_status` and `dependency_graph`.
+
 ## The 9 Scanners
 
 | Scanner | What it checks | Data source |
