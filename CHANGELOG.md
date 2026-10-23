@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+## [0.8.0] - 2026-10-23
+
+Library-caller release. A failed scan now comes back as a typed
+`*scanner.ScanError` with a `Kind` (transient, permanent, too large) and a
+stable reason code, so a service that embeds `runner.Run` can decide whether to
+retry; the JSON carries the same `code` and `kind` under `grade.pending`. A
+panic in a scanner worker is returned as an error instead of ending the
+process, and `Options.Timeout` is documented and tested as a per-request limit.
+`scanner.ScanVulns` now returns an error when govulncheck fails (see
+Improvements). The grading rules are unchanged from v0.7.0.
+
+Known issue: the v0.8.0 release binaries are built with Go 1.26.9, which has
+GO-2026-6809 (`crypto/x509` does not distrust compromised intermediate
+certificates; fixed in Go 1.26.10). govulncheck reports it as reachable from
+unisupply. To get the fix, install with Go 1.26.10 or newer
+(`go install github.com/unidoc/unisupply/cmd/unisupply@v0.8.0`).
+
 ### New Features
 
 #### Typed scan failures with stable reason codes
@@ -77,6 +94,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   documentation now says so, and tests pin it: the timeout fires without a context deadline, and a shorter context
   deadline wins. govulncheck's fetch of the vulnerability database and the go command's module downloads are bounded
   only by the context.
+
+#### Dependencies
+
+- Upgraded `golang.org/x/vuln` `v1.8.0` → `v1.9.0` (direct dependency). govulncheck runs in-process, so
+  `scan.govulncheck_version` now reads `v1.9.0`.
+- Upgraded `golang.org/x/mod` `v0.41.0` → `v0.42.0` and `golang.org/x/term` `v0.46.0` → `v0.47.0` (direct), and
+  `x/crypto`, `x/net`, `x/sync`, `x/sys`, `x/telemetry`, `x/text`, `x/tools` to current releases. None of these
+  upgrades clears an advisory: govulncheck reports the same findings for v0.7.0 and v0.8.0.
 
 ### Bug Fixes
 
@@ -1134,7 +1159,8 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/unidoc/unisupply/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/unidoc/unisupply/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/unidoc/unisupply/compare/v0.4.0...v0.5.0
