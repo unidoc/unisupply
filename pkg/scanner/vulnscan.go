@@ -185,7 +185,7 @@ type govulncheckRun struct {
 }
 
 // pass runs govulncheck once at the given scan level, then enriches the findings. warnings are those so far.
-func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []string) (map[string][]Vulnerability, []string, bool, error) {
+func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []string) (vulns map[string][]Vulnerability, outWarnings []string, scanned bool, err error) {
 	var stdout, stderrBuf bytes.Buffer
 
 	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that

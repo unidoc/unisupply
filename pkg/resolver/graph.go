@@ -116,12 +116,14 @@ type Edge struct {
 }
 
 // Edges returns the requirement edges of the graph, one per (module, requirement) pair of module paths, sorted by From and
-// then To. The main module is a From like any other. They come from each dependency's UsedBy list.
+// then To. The main module is a From like any other. They come from each dependency's UsedBy list, and only from the main module or a module of the graph: the go.sum
+// fallback's placeholder requirer is not an edge (the module is still in Dependencies).
 func (g *Graph) Edges() []Edge {
 	var edges []Edge
 	for _, to := range g.SortedPaths() {
 		for _, from := range g.Dependencies[to].UsedBy {
-			if from != to {
+			// only module paths: the go.sum fallback marks its modules with a "(from go.sum)" placeholder, not a requirer
+			if _, known := g.Dependencies[from]; from != to && (from == g.Root || known) {
 				edges = append(edges, Edge{From: from, To: to})
 			}
 		}

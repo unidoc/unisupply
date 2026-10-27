@@ -149,10 +149,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Exit code 4**: the scan failed or was interrupted (`scan_status.status` is `failed` or `interrupted`) and the report was still
   written. Before, such a scan exited 0 with a Pending grade. A policy violation (2) takes precedence; Pending (a check the letter
   needs did not run) and offline mode are `pending`, not failures, and still exit 0. A zero-dependency module with no
-  `--module-version` writes no report and does not use this code.
+  `--module-version` has no report; when its vulnerability scan failed, `--format json` writes the `scan_status` alone, as for
+  a scan that could not start, and the exit code is 4. The error line says the reason code once
+  (`scan failed: needs_newer_go: go.mod requires go >= 1.99`).
 - **A scan that could not start writes JSON too**, with `--format json`: the whole document is `{"tool", "version",
   "generated_at", "scan_status": {"status": "failed", "reason": "no_go_mod", "kind": "permanent", ...}, "error": ...}`, next to
-  the unchanged error line and exit code 1. Other formats write nothing, as before.
+  the unchanged error line and exit code 1. Other formats write nothing, as before. The JSON is published, so the path of the project
+  on the scanning machine is cut out of `scan_status.detail` and `error` (`no go.mod found in .`); the error line keeps the path given.
 - **`scan.go_version`** (the Go release the standard library was matched against) is always present once a scan started: when
   govulncheck's output does not say, the release unisupply gave it as `GOVERSION` is used.
 
@@ -162,7 +165,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   (`GET {base}/api/v1/facts/modules?path=&version=`, `/advisories/<id>`, `/fixes?module=&version=`), so a scan outside gorisk reads
   what gorisk knows instead of looking it up. The key goes only in `Authorization: Bearer`, never in a URL, an error or a log.
   A 404 is a miss; any other failure (401/403, 5xx, network, bad JSON) is a miss with the error returned, which unisupply ignores,
-  so the service being down never fails a scan; after a 401/403 no further request is made. `Retry-After` is honoured once
+  so the service being down never fails a scan; after a 401/403, or two requests in a row that get no answer (a network error,
+  a timeout, a 5xx), no further request is made in that run, so a service that hangs costs the timeout twice, not once per
+  lookup. The requests and answers are in `docs/facts-api.md`. `Retry-After` is honoured once
   (up to 5 s, otherwise a miss). Requests time out after 10 s, send `User-Agent: unisupply/<version>`, never follow redirects,
   and are cached in memory so a scan asks for a fact once. HTTPS is required unless the host is loopback. `Put*` do nothing:
   a scan never writes to the shared facts, which keeps private module names out of them.
@@ -179,8 +184,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **Private modules are not graded on upkeep**: their row is `not_assessed` with `private: true` (also `dependencies[].private` in
   the JSON), they never make the grade Pending for "upkeep unread", and a note says they were not looked up. See "Private modules"
   in `docs/grading.md`.
+- **`--private-modules` also reaches the go command.** The CLI adds the list to `GOPRIVATE` (and to `GONOPROXY` and `GONOSUMDB` when the
+  environment sets them) before the scan, so `go mod graph`, `go list`, `go mod verify` and govulncheck's loader do not send a
+  private path to the module proxy either. A library caller puts the same list in `GOPRIVATE`.
 
 ### Improvements
+
+#### A stored analysis is graded again with today's facts, and says when it needs a new scan
+
+- **`runner.Grade` is `Pending` on `called_pass` when the analysis skipped the called pass (`--called-pass auto`) and the facts of the
+  day (a known-exploited entry, a higher severity) mean the called pass could now change the letter.** Before, an imported finding
+  kept a letter that a called one would not get, with `scan_status: complete`. The advisory fingerprint does not see such a change,
+  so the grade asks again. See "A later grade" in `docs/grading.md`.
+- **A grade made from `--called-pass never` has a note** that says its letter is a floor.
+- **`dependency_graph.edges` holds only module paths**: the go.sum fallback's `(from go.sum)` placeholder is not an edge.
+- **`--analysis-out`, `--sbom-out` and `-o` are compared as paths**, so `./r.json` and `r.json`, or a symbolic link, are the same file.
 
 #### The published reason for a failed scan names the cause
 

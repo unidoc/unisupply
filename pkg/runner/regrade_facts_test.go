@@ -149,3 +149,31 @@ func TestSplitModules_UsesFreshStatusOnly(t *testing.T) {
 		t.Error("empty store: the graph must be scanned as it is")
 	}
 }
+
+// TestStaleCalledPass: an analysis made in auto mode that skipped the called pass cannot be graded as it stands once the
+// facts of the day (a known-exploited entry, a higher severity) mean the called pass could change the letter.
+func TestStaleCalledPass(t *testing.T) {
+	skippedAuto := &Analysis{Scan: &scanner.ScanInfo{CalledPass: scanner.CalledPassSkipped, CalledPassMode: string(scanner.CalledPassAuto)}}
+	imported := func(sev string, kev bool) map[string][]scanner.Vulnerability {
+		return map[string][]scanner.Vulnerability{"github.com/example/dep": {{ID: "GO-1", Severity: sev, Reachability: "imported", InKEV: kev}}}
+	}
+	cases := []struct {
+		name  string
+		an    *Analysis
+		vulns map[string][]scanner.Vulnerability
+		stale bool
+	}{
+		{"still medium", skippedAuto, imported("MEDIUM", false), false},
+		{"now known exploited", skippedAuto, imported("MEDIUM", true), true},
+		{"now critical", skippedAuto, imported("CRITICAL", false), true},
+		{"the called pass ran", &Analysis{Scan: &scanner.ScanInfo{CalledPass: scanner.CalledPassRan, CalledPassMode: string(scanner.CalledPassAuto)}}, imported("CRITICAL", true), false},
+		{"always mode", &Analysis{Scan: &scanner.ScanInfo{CalledPass: scanner.CalledPassSkipped, CalledPassMode: string(scanner.CalledPassAlways)}}, imported("CRITICAL", true), false},
+		{"no scan info", &Analysis{}, imported("CRITICAL", true), false},
+	}
+	for _, c := range cases {
+		got := staleCalledPass(c.an, c.vulns, false)
+		if (got != "") != c.stale || (c.stale && !strings.Contains(got, "analyse again")) {
+			t.Errorf("%s: staleCalledPass = %q, want stale %v", c.name, got, c.stale)
+		}
+	}
+}

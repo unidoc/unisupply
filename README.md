@@ -259,7 +259,8 @@ exit code ignores the grade: a grade of F still exits `0`.
 
 Exit codes: `0` success; `1` runtime error, no report (with `--format json` the JSON is still written, holding only
 `scan_status` with the typed reason, for example `no_go_mod`); `2` policy violation; `3` token precondition
-(`--require-github-token`); `4` the scan failed or was interrupted and the report was still written, with `scan_status.status`
+(`--require-github-token`); `4` the scan failed or was interrupted and the report was still written (for a module with no
+dependencies and no `--module-version`, which has no report, with `--format json` the `scan_status` alone), with `scan_status.status`
 `failed` or `interrupted` and the typed reason in `scan_status.reason` (a policy violation, `2`, takes precedence). A scan that
 only lacks a check the letter needs (Pending, offline mode) exits `0`: its `scan_status.status` is `pending`.
 
@@ -452,7 +453,7 @@ The most frequently used flags:
 | `-o, --output`          | Output file (default: stdout for text/json/sbom)                                                                     |
 | `--sbom-out`            | Also write the CycloneDX SBOM of the same scan to this file, whatever `--format` is (one scan, two outputs)          |
 | `--facts-url`           | Read module and advisory facts from a gorisk facts API (env `UNISUPPLY_FACTS_URL`). The key: env `UNISUPPLY_FACTS_KEY` or `--facts-key-file` (never a flag value) |
-| `--private-modules`     | Comma list of private module path patterns (GOPRIVATE syntax; replaces `GOPRIVATE`/`GONOPROXY`): never looked up, not graded on upkeep |
+| `--private-modules`     | Comma list of private module path patterns (GOPRIVATE syntax; replaces `GOPRIVATE`/`GONOPROXY`): never looked up, not graded on upkeep; also added to `GOPRIVATE` for the go command |
 | `--analysis-out`        | Also write the stored Analysis (JSON) of the same scan, for `runner.Grade` to re-grade later                         |
 | `--called-pass`         | When govulncheck's called pass runs: `auto` (default: only when it can change the letter), `always`, `never`         |
 | `--github-token`        | GitHub API token (or `GITHUB_TOKEN` env)                                                                             |

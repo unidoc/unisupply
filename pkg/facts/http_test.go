@@ -203,3 +203,83 @@ func TestHTTPStore_DoesNotFollowRedirects(t *testing.T) {
 		t.Errorf("ok=%v err=%v, %d requests to the other host", ok, err, other)
 	}
 }
+
+// A service that accepts connections and never answers costs the timeout once or twice, not once per lookup: after
+// unavailableAfter requests in a row without an answer the store stops asking.
+func TestHTTPStore_StopsAskingWhenTheServiceDoesNotAnswer(t *testing.T) {
+	var n int
+	var mu sync.Mutex
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	s, _ := NewHTTPStore(srv.URL, testKey)
+	s.client.Timeout = 100 * time.Millisecond
+
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		if _, ok, err := s.GetModule(context.Background(), "m"+string(rune('a'+i)), "v1"); ok || err == nil {
+			t.Fatalf("lookup %d: ok=%v err=%v, want a miss with an error", i, ok, err)
+		}
+	}
+	mu.Lock()
+	got := n
+	mu.Unlock()
+	if got != unavailableAfter {
+		t.Errorf("%d requests reached the service, want %d", got, unavailableAfter)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("10 lookups took %v: the store kept waiting", took)
+	}
+	_, _, err := s.GetAdvisory(context.Background(), "GO-1")
+	if err == nil || !strings.Contains(err.Error(), "no further facts are requested") {
+		t.Errorf("error = %v, want it to say that no more facts are requested", err)
+	}
+}
+
+// One blip does not cost the rest of the run: an answer in between starts the count again, and a cancelled context is not
+// the service's fault.
+func TestHTTPStore_ABlipDoesNotStopTheStore(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		c := calls
+		mu.Unlock()
+		if c%2 == 1 { // every other request fails
+			http.Error(w, "boom", http.StatusBadGateway)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	s, _ := NewHTTPStore(srv.URL, testKey)
+	for i := 0; i < 6; i++ {
+		_, _, _ = s.GetModule(context.Background(), "m"+string(rune('a'+i)), "v1")
+	}
+	mu.Lock()
+	got := calls
+	mu.Unlock()
+	if got != 6 {
+		t.Errorf("%d requests, want 6: failures with an answer between them must not stop the store", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s2, _ := NewHTTPStore(srv.URL, testKey)
+	for i := 0; i < 5; i++ {
+		_, _, _ = s2.GetModule(ctx, "x"+string(rune('a'+i)), "v1")
+	}
+	if s2.disabled != nil {
+		t.Errorf("a cancelled context disabled the store: %v", s2.disabled)
+	}
+}

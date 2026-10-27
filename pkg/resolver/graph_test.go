@@ -937,3 +937,17 @@ func TestGraphEdges(t *testing.T) {
 		t.Errorf("empty graph: %v", got)
 	}
 }
+
+// The go.sum fallback marks the modules it adds with a placeholder requirer. That is not a module, so it is not an edge.
+func TestGraphEdges_PlaceholderRequirerIsNotAnEdge(t *testing.T) {
+	g := &Graph{Root: "r", Dependencies: map[string]*Dependency{
+		"a": {UsedBy: []string{"r"}},
+		"t": {UsedBy: []string{"(from go.sum)"}},
+		"u": {UsedBy: []string{"(from go.sum)", "a"}},
+		"v": {UsedBy: []string{"not-in-the-graph"}},
+	}}
+	want := []Edge{{"a", "u"}, {"r", "a"}}
+	if got := g.Edges(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Edges() = %v, want %v", got, want)
+	}
+}

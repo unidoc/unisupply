@@ -22,7 +22,9 @@ import (
 //
 // A miss (404) is (nil, false, nil). Any other failure (a bad key, a rate limit that outlasts the wait, a network error, an
 // answer that is not the JSON of the fact) is a miss with the error returned: unisupply treats that as a miss and goes on, so
-// the facts service can be down without failing a scan. Put* do nothing: a customer's scan never writes to the shared
+// the facts service can be down without failing a scan. After a 401 or 403, or unavailableAfter requests in a row that
+// get no answer, the store makes no further request in this run: a service that hangs costs the timeout twice, not once per
+// lookup. The requests and answers are in docs/facts-api.md. Put* do nothing: a customer's scan never writes to the shared
 // facts, which also keeps private module names out of them.
 type HTTPStore struct {
 	base   string
@@ -33,8 +35,14 @@ type HTTPStore struct {
 
 	mu       sync.Mutex
 	cache    map[string]cached
-	disabled error // set by a 401 or 403: the key is no good, so no further request is made
+	disabled error // set by a 401 or 403 (the key is no good) or by unavailableAfter failures in a row: no further request is made
+	failures int   // consecutive requests that got no answer (a network error, a timeout or a 5xx)
 }
+
+// unavailableAfter is how many requests in a row may get no answer before the store stops asking for the rest of the run: a
+// service that hangs would otherwise cost the full timeout on every lookup (one per dependency, per finding, per fix), and a
+// scan under a deadline would run out of time. One failure alone is not enough, so a single blip does not cost every fact.
+const unavailableAfter = 2
 
 type cached struct {
 	body []byte // nil: a miss
@@ -115,7 +123,11 @@ func (s *HTTPStore) fetch(ctx context.Context, target string, mayRetry bool) ([]
 	resp, err := s.client.Do(req)
 	if err != nil {
 		// the error text of net/http carries the URL, never the header; the URL has no key
-		return nil, fmt.Errorf("facts API: %w", err)
+		err = fmt.Errorf("facts API: %w", err)
+		if ctx.Err() == nil { // a cancelled scan says nothing about the service
+			s.noAnswer(err)
+		}
+		return nil, err
 	}
 	defer resp.Body.Close()
 	switch {
@@ -124,8 +136,10 @@ func (s *HTTPStore) fetch(ctx context.Context, target string, mayRetry bool) ([]
 		if err != nil {
 			return nil, fmt.Errorf("facts API: %w", err)
 		}
+		s.answered()
 		return b, nil
 	case resp.StatusCode == http.StatusNotFound:
+		s.answered()
 		return nil, nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		err := fmt.Errorf("facts API: HTTP %d (the API key was refused or lacks the scope); no further facts are requested", resp.StatusCode)
@@ -145,7 +159,28 @@ func (s *HTTPStore) fetch(ctx context.Context, target string, mayRetry bool) ([]
 		}
 		return s.fetch(ctx, target, false)
 	}
-	return nil, fmt.Errorf("facts API: HTTP %d", resp.StatusCode)
+	err = fmt.Errorf("facts API: HTTP %d", resp.StatusCode)
+	if resp.StatusCode >= 500 {
+		s.noAnswer(err)
+	}
+	return nil, err
+}
+
+// noAnswer counts a request that got no answer, and stops the store when unavailableAfter of them came in a row.
+func (s *HTTPStore) noAnswer(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures++
+	if s.failures >= unavailableAfter && s.disabled == nil {
+		s.disabled = fmt.Errorf("%w; the service is not answering, so no further facts are requested", err)
+	}
+}
+
+// answered ends a run of failures: the service is there.
+func (s *HTTPStore) answered() {
+	s.mu.Lock()
+	s.failures = 0
+	s.mu.Unlock()
 }
 
 // retryAfter reads the delay-seconds form of Retry-After.
@@ -157,7 +192,7 @@ func retryAfter(h string) (time.Duration, bool) {
 	return time.Duration(n) * time.Second, true
 }
 
-func decode[T any](body []byte, what string) (*T, bool, error) {
+func decode[T any](body []byte, what string) (out *T, found bool, err error) {
 	if body == nil {
 		return nil, false, nil
 	}

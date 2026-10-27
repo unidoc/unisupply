@@ -35,6 +35,8 @@ import (
 //
 // It fails (nil Result) only for an analysis it cannot read (nil, or of another schema), the token precondition and a
 // panic. A grade that cannot be completed is a Result whose Grade is Pending, and whose ScanStatus says why.
+//
+//nolint:gocritic // public API: Options is passed by value, as Run takes it
 func Grade(ctx context.Context, an *Analysis, f facts.Store, date time.Time, opts Options) (res *Result, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -63,11 +65,11 @@ func Grade(ctx context.Context, an *Analysis, f facts.Store, date time.Time, opt
 			return nil, err
 		}
 	}
-	return gradeAnalysis(ctx, an, st, f, date, opts)
+	return gradeAnalysis(ctx, an, st, f, date, &opts)
 }
 
 // gradeAnalysis is Grade for an analysis whose token has been checked.
-func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts.Store, date time.Time, opts Options) (*Result, error) {
+func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts.Store, date time.Time, opts *Options) (*Result, error) {
 	timeout := opts.Timeout
 	scanStart := date
 	rep := progress.From(ctx)
@@ -96,6 +98,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 		fr.applyAdvisories(ctx, publicVulns(vulns, private))
 		resolveFixes(ctx, fr, fixOpts, publicVulns(vulns, private))
 		fr.storeAdvisories(ctx, publicVulns(vulns, private))
+		calledPassStale := staleCalledPass(an, vulns, opts.GradeStdlib)
 		stdlibVulns := takeStdlibVulns(vulns)
 
 		// scorer.ScoreAll (not a hand-built zero value) still computes ProjectScore, so its shape matches exactly what a
@@ -116,11 +119,11 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 		}
 		missingCode, missingKind := scanFailureCode(scanMissing)
 		g := gradeAll(ctx, &gradeRun{
-			Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
+			Opts: *opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 			Timeout: timeout, ScanStart: scanStart, Toolchain: an.ToolchainVersion, Facts: fr, Private: private,
-			Stdlib:      gradedStdlib(&opts, stdlibVulns),
+			Stdlib:      gradedStdlib(opts, stdlibVulns),
 			VulnScanned: scanMissing == nil, VulnScanReason: errString(scanMissing), StdlibScanned: emptyVulnErr == nil,
-			VulnScanCode: missingCode, VulnScanKind: missingKind,
+			VulnScanCode: missingCode, VulnScanKind: missingKind, CalledPassStale: calledPassStale, CalledPassNever: calledPassNever(&scanInfo),
 			KEVStaleSince: kevStaleSince(&scanInfo),
 		})
 		return &Result{GoMod: gomod, Graph: graph, ProjectScore: projectScore, Grade: g, IntegrityReport: integrityReport,
@@ -137,6 +140,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	fr.applyAdvisories(ctx, publicVulns(vulns, private))
 	resolveFixes(ctx, fr, fixOpts, publicVulns(vulns, private))
 	fr.storeAdvisories(ctx, publicVulns(vulns, private))
+	calledPassStale := staleCalledPass(an, vulns, opts.GradeStdlib)
 
 	rep.Stage("Checking maintenance health")
 	// With a facts store, only the modules without a fresh status are looked up
@@ -265,12 +269,12 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 
 	vulnCode, vulnKind := scanFailureCode(vulnScanErr)
 	gradeResult := gradeAll(ctx, &gradeRun{
-		Opts: opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
+		Opts: *opts, GoMod: gomod, Graph: graph, Integrity: integrityReport, Token: githubToken,
 		Timeout: timeout, ScanStart: scanStart,
 		Toolchain: an.ToolchainVersion, Facts: fr, Private: private,
-		Vulns: vulns, Stdlib: gradedStdlib(&opts, stdlibVulns), Maintenance: maintenance,
+		Vulns: vulns, Stdlib: gradedStdlib(opts, stdlibVulns), Maintenance: maintenance,
 		VulnScanned: vulnScanErr == nil, VulnScanReason: errString(vulnScanErr), Interrupted: interrupted,
-		VulnScanCode: vulnCode, VulnScanKind: vulnKind,
+		VulnScanCode: vulnCode, VulnScanKind: vulnKind, CalledPassStale: calledPassStale, CalledPassNever: calledPassNever(&scanInfo),
 		StdlibScanned: vulnScanErr == nil, TokenMissing: githubToken == "", KEVStaleSince: kevStaleSince(&scanInfo),
 	})
 
@@ -292,6 +296,24 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 		Maintainers:         maintainers,
 		Typosquats:          typosquats,
 	}, nil
+}
+
+// calledPassNever says the analysis ran with --called-pass never.
+func calledPassNever(info *scanner.ScanInfo) bool {
+	return info.CalledPassMode == string(scanner.CalledPassNever)
+}
+
+// staleCalledPass is the Pending reason when the analysis skipped the called pass (auto) and, with the severities and
+// known-exploited status of the day, the called pass could now change the letter: only analysing again can say. The
+// advisory fingerprint in the analysis's identity does not see a re-rated advisory, so the grade has to.
+func staleCalledPass(an *Analysis, vulns map[string][]scanner.Vulnerability, gradeStdlib bool) string {
+	if an.Scan == nil || an.Scan.CalledPass != scanner.CalledPassSkipped || an.Scan.CalledPassMode != string(scanner.CalledPassAuto) {
+		return ""
+	}
+	if needed, reason := calledPassTest(gradeStdlib)(vulns); needed {
+		return "the analysis skipped govulncheck's called pass, and with today's facts it could change the letter (" + reason + "): analyse again"
+	}
+	return ""
 }
 
 // cloneVulns copies the findings so that grading does not change the analysis. The structs are copied; the slices and

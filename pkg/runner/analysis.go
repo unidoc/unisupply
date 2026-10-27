@@ -184,10 +184,9 @@ func (a *Analysis) Status() scanner.ScanStatus {
 // analysisState is what Run carries from the analysis to the grade in the same process, so it does not look up again what
 // it just learned: the outcome of the GitHub token probe, the scan's real error, and the scan date.
 type analysisState struct {
-	token      tokenCheck
-	vulnErr    error
-	scanStart  time.Time
-	projectDir string
+	token     tokenCheck
+	vulnErr   error
+	scanStart time.Time
 }
 
 // fetchVulnIndex reads the vulnerability database's module index; tests replace it.
@@ -202,18 +201,20 @@ var fetchVulnIndex = func(ctx context.Context, timeout time.Duration) (*vulndb.I
 // Like Run, it fails (nil Analysis) only when nothing can be said: no go.mod, the dependency graph cannot be resolved, a
 // panic. A vulnerability scan that fails is recorded in Analysis.VulnScan, and the error is a *scanner.ScanError when the
 // cause is known. Progress events go through progress.From(ctx).
+//
+//nolint:gocritic // public API: Options is passed by value, as Run takes it
 func Analyse(ctx context.Context, opts Options) (an *Analysis, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			an, err = nil, panicScanError(r)
 		}
 	}()
-	an, _, err = analyse(ctx, opts, true)
+	an, _, err = analyse(ctx, &opts, true)
 	return an, err
 }
 
 // analyse is Analyse and the state Run reuses. withIndex asks for the advisory fingerprint (one request to vuln.go.dev).
-func analyse(ctx context.Context, opts Options, withIndex bool) (*Analysis, *analysisState, error) {
+func analyse(ctx context.Context, opts *Options, withIndex bool) (*Analysis, *analysisState, error) {
 	// Timeout is passed through unchanged: the scanner clients map 0 to their
 	// own default, exactly as the CLI's --timeout 0 always has.
 	timeout := opts.Timeout
@@ -299,7 +300,7 @@ func analyse(ctx context.Context, opts Options, withIndex bool) (*Analysis, *ana
 		// (Options.GradeStdlib). A scan that failed is Pending only then; otherwise it is a warning and the letter is the
 		// module's own row.
 		rep.Stage("Scanning vulnerabilities (govulncheck)")
-		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
+		vulns, vulnWarnings, vulnScanned, verr := scanVulns(ctx, projectDir, vulnScanOptions(opts, githubToken, &scanInfo))
 		if verr != nil && !saidByWarnings(vulnWarnings, verr) {
 			rep.Warn("Vulnerability scan failed: %s", errString(verr))
 		}
@@ -323,7 +324,7 @@ func analyse(ctx context.Context, opts Options, withIndex bool) (*Analysis, *ana
 		rep.Done("go.sum verify: %s", integrityReport.GoSumVerified)
 
 		rep.Stage("Scanning vulnerabilities (govulncheck)")
-		vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, vulnScanOptions(&opts, githubToken, &scanInfo))
+		vulns, vulnWarnings, vulnScanned, err := scanVulns(ctx, projectDir, vulnScanOptions(opts, githubToken, &scanInfo))
 		if err != nil && !saidByWarnings(vulnWarnings, err) {
 			rep.Warn("Vulnerability scan failed: %s", errString(err))
 		}
@@ -370,7 +371,7 @@ func analyse(ctx context.Context, opts Options, withIndex bool) (*Analysis, *ana
 		// when its output (a scan that failed early, or an old govulncheck) does not say so
 		an.Scan.GoVersion = an.ToolchainVersion
 	}
-	an.Identity = identityOf(ctx, &opts, an, gomodPath, projectDir, withIndex)
+	an.Identity = identityOf(ctx, opts, an, gomodPath, projectDir, withIndex)
 	return an, st, nil
 }
 

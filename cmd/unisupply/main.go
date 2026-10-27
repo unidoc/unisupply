@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +31,8 @@ import (
 var errPolicyViolation = errors.New("policy violation")
 
 // errScanFailed is returned when the scan failed or was interrupted but a report could still be written (scan_status.status
-// is "failed" or "interrupted" in the JSON). The report is written first; the exit code is 4.
+// is "failed" or "interrupted" in the JSON). The report is written first (for a module with nothing to report, with
+// --format json, the scan_status alone); the exit code is 4.
 var errScanFailed = errors.New("scan failed")
 
 // errTokenPrecondition is returned when --require-github-token is set but the
@@ -80,7 +82,7 @@ func main() {
 	flag.StringVarP(&output, "output", "o", "", "Output file path (default: stdout for text/json/sbom, \"unisupply-report.pdf\" for pdf)")
 	flag.StringVar(&sbomOut, "sbom-out", "", "Also write the CycloneDX SBOM of the same scan to this file, whatever --format is (one scan, two outputs)")
 	flag.StringVar(&analysisOut, "analysis-out", "", "Also write the stored Analysis (JSON) of the same scan to this file; runner.Grade grades it again later without the module's files")
-	flag.StringVar(&privateModules, "private-modules", "", "Comma-separated module path patterns (GOPRIVATE syntax) of private modules: never looked up (no proxy, GitHub or facts request carries their path) and not graded on upkeep. Replaces GOPRIVATE/GONOPROXY from the environment when set")
+	flag.StringVar(&privateModules, "private-modules", "", "Comma-separated module path patterns (GOPRIVATE syntax) of private modules: never looked up (no proxy, GitHub or facts request carries their path, and the go command gets them in GOPRIVATE too) and not graded on upkeep. Replaces GOPRIVATE/GONOPROXY as unisupply reads them; the go command keeps what the environment has and adds these")
 	flag.StringVar(&factsURL, "facts-url", "", "Read module and advisory facts from a gorisk facts API (e.g. https://gorisk.dev) instead of looking them up (env UNISUPPLY_FACTS_URL); the key comes from UNISUPPLY_FACTS_KEY or --facts-key-file")
 	flag.StringVar(&factsKeyFile, "facts-key-file", "", "File holding the facts API key (gk_...); the env var UNISUPPLY_FACTS_KEY works too")
 	flag.StringVar(&factsKeyFlag, "facts-key", "", "Refused: a flag value shows in the process list. Use UNISUPPLY_FACTS_KEY or --facts-key-file")
@@ -107,7 +109,7 @@ func main() {
 	flag.StringVar(&moduleVersion, "module-version", "", "Published version of the scanned module (e.g. v1.4.0): grades the module itself too, from its own OSV advisories and archived/deprecated status")
 	flag.BoolVar(&gradeStdlib, "grade-stdlib", false, "Let the Go standard library decide the letter (it is always listed, with the Go release it was matched against, but not graded by default: its findings follow the Go toolchain that runs the scan)")
 	flag.BoolVar(&strictArchived, "strict-archived", false, "Make an archived flag that could not be read (GitHub rate limit without a token) make the grade Pending, instead of grading on what is known with a note")
-	flag.StringVar(&calledPass, "called-pass", "auto", "When govulncheck's called pass runs: auto (only when it can change the letter; the imported pass always runs first), always (as before), never (imported pass only)")
+	flag.StringVar(&calledPass, "called-pass", "auto", "When govulncheck's called pass runs: auto (only when it can change the letter; the imported pass always runs first), always (as before), never (imported pass only: every finding is imported, so the letter is a floor, not a result to publish)")
 	flag.BoolVar(&responseHistory, "response-history", false, "Look up how fast the project adopted its dependencies' fixes in the past (extra module proxy and OSV requests; needs --module-version)")
 
 	flag.Parse()
@@ -278,10 +280,10 @@ func run(cfg *runConfig) error {
 	if err != nil {
 		return err
 	}
-	if cfg.analysisOut != "" && (cfg.analysisOut == cfg.output || cfg.analysisOut == cfg.sbomOut) {
+	if sameOutputFile(cfg.analysisOut, cfg.output) || sameOutputFile(cfg.analysisOut, cfg.sbomOut) {
 		return fmt.Errorf("--analysis-out names the same file as --output or --sbom-out (%s): it would overwrite it", cfg.analysisOut)
 	}
-	if cfg.sbomOut != "" && cfg.sbomOut == cfg.output {
+	if sameOutputFile(cfg.sbomOut, cfg.output) {
 		return fmt.Errorf("--sbom-out and --output name the same file (%s): the SBOM would overwrite the report", cfg.output)
 	}
 
@@ -367,6 +369,9 @@ func run(cfg *runConfig) error {
 		Facts:                  factsStore,
 		PrivatePatterns:        privatePatterns(cfg.privateModules),
 	}
+	// the go command that unisupply starts reads GOPRIVATE itself; without the same list it would ask the module proxy
+	// and the checksum database for these paths
+	exportPrivateToGoEnv(runOpts.PrivatePatterns)
 	var scanResult *runner.Result
 	var analysis *runner.Analysis
 	if cfg.analysisOut != "" {
@@ -393,6 +398,11 @@ func run(cfg *runConfig) error {
 	noReport := len(scanResult.Graph.Dependencies) == 0 && cfg.moduleVersion == ""
 	if noReport {
 		fmt.Fprintln(os.Stderr, "No dependencies found. Pass --module-version to grade the module itself.")
+		// There is no report, but a failed vulnerability scan is still said, as for a scan that could not start: the typed
+		// reason in scan_status, so a caller that reads JSON is not left with nothing and an exit code of 0.
+		if cfg.format == "json" && (scanResult.ScanStatus.Status == scanner.StatusFailed || scanResult.ScanStatus.Status == scanner.StatusInterrupted) {
+			writeFailureJSON(cfg, scanResult.VulnScanErr)
+		}
 	}
 
 	if !noReport {
@@ -411,11 +421,21 @@ func run(cfg *runConfig) error {
 			return err
 		}
 	}
-	// The report is written either way; a failed or interrupted scan is said in its scan_status and by the exit code.
-	if st := scanResult.ScanStatus; !noReport && (st.Status == scanner.StatusFailed || st.Status == scanner.StatusInterrupted) {
-		return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
+	// The report is written either way (for a module with nothing to report, with --format json, only its scan_status); a
+	// failed or interrupted scan is said in its scan_status and by the exit code.
+	if st := scanResult.ScanStatus; st.Status == scanner.StatusFailed || st.Status == scanner.StatusInterrupted {
+		return scanFailedError(st)
 	}
 	return nil
+}
+
+// scanFailedError is the error line of a scan that failed or was interrupted. The detail of a typed failure already starts
+// with its reason code ("needs_newer_go: go.mod requires ..."), so the code is not said twice.
+func scanFailedError(st scanner.ScanStatus) error {
+	if strings.HasPrefix(st.Detail, st.Reason+": ") {
+		return fmt.Errorf("%w: %s", errScanFailed, st.Detail)
+	}
+	return fmt.Errorf("%w: %s (%s)", errScanFailed, st.Reason, st.Detail)
 }
 
 // privatePatterns splits --private-modules; nil (the environment's GOPRIVATE and GONOPROXY apply) when it is empty.
@@ -424,6 +444,44 @@ func privatePatterns(flagValue string) []string {
 		return nil
 	}
 	return strings.Split(flagValue, ",")
+}
+
+// sameOutputFile says two output paths name the same file: the same path once cleaned ("r.json" and "./r.json"), or a file
+// that exists under both names (a symbolic link). An empty path names nothing.
+func sameOutputFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if absA, err := filepath.Abs(a); err == nil {
+		if absB, err := filepath.Abs(b); err == nil && absA == absB {
+			return true
+		}
+	}
+	fa, errA := os.Stat(a)
+	fb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(fa, fb)
+}
+
+// exportPrivateToGoEnv gives the go command the private patterns of --private-modules, next to what GOPRIVATE already holds.
+// It starts go mod graph, go list, go mod verify and govulncheck's package loader, and reads GOPRIVATE for them: a cold module
+// cache would otherwise send a private path to GOPROXY. GONOPROXY and GONOSUMDB, when set, take precedence over GOPRIVATE
+// for their own purpose, so they get the list too. Nothing to do for no patterns.
+func exportPrivateToGoEnv(patterns []string) {
+	list := strings.Join(patterns, ",")
+	if strings.TrimSpace(list) == "" {
+		return
+	}
+	for _, name := range []string{"GOPRIVATE", "GONOPROXY", "GONOSUMDB"} {
+		have := strings.TrimSpace(os.Getenv(name))
+		// GOPRIVATE is always set; the other two only when the caller already narrowed them, since an unset one follows GOPRIVATE
+		if have == "" && name != "GOPRIVATE" {
+			continue
+		}
+		if have != "" {
+			have += ","
+		}
+		_ = os.Setenv(name, have+list)
+	}
 }
 
 // factsStoreFor is the facts store the flags and environment ask for: nil without a facts URL. The key is never a flag value
@@ -507,7 +565,21 @@ func writeFailureJSON(cfg *runConfig, cause error) {
 		defer f.Close()
 		w = f
 	}
-	_ = report.WriteJSONFailure(cause, w)
+	_ = report.WriteJSONFailure(publishedFailure(se, cfg.path), w)
+}
+
+// publishedFailure is the failure with the path of the project on this machine cut out of its text, as in every published
+// reason (the error line on stderr keeps it: it is the path the user gave). The kind and the reason are kept.
+func publishedFailure(se *scanner.ScanError, path string) *scanner.ScanError {
+	if se.Err == nil {
+		return se
+	}
+	if filepath.Base(path) == "go.mod" {
+		path = filepath.Dir(path)
+	}
+	trimmed := scanner.WrapScanFailure(se.Err, nil, path)
+	trimmed.Kind, trimmed.Reason = se.Kind, se.Reason
+	return trimmed
 }
 
 // writeReport renders the scan result in the format asked for.
@@ -687,7 +759,8 @@ func printUsage() {
 	fmt.Println("  1  Runtime error (I/O failure, parse error, etc.)")
 	fmt.Println("  2  Policy violation — one or more policy rules failed (max_grade: a grade worse than the limit, or Pending unless allow_pending)")
 	fmt.Println("  3  Token precondition failure — --require-github-token set but token missing, rejected, or could not be validated")
-	fmt.Println("  4  The scan failed or was interrupted, and the report was still written: scan_status.status is \"failed\" or \"interrupted\" with the typed")
+	fmt.Println("  4  The scan failed or was interrupted, and the report was still written (for a module with no dependencies and no --module-version,")
+	fmt.Println("     with --format json, the scan_status alone): scan_status.status is \"failed\" or \"interrupted\" with the typed")
 	fmt.Println("     reason in scan_status.reason. A policy violation (2) takes precedence. A scan that could not start (1) writes the same scan_status")
 	fmt.Println("     as the whole JSON when --format json is used")
 	fmt.Println()

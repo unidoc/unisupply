@@ -61,11 +61,11 @@ func (fr *factReader) putModule(ctx context.Context, path, version string, info 
 
 // splitModules separates the graph into the modules that need a lookup and the fresh statuses of the others. Without a store
 // it returns the graph itself and nothing cached.
-func (fr *factReader) splitModules(ctx context.Context, g *resolver.Graph) (*resolver.Graph, map[string]*scanner.MaintenanceInfo) {
+func (fr *factReader) splitModules(ctx context.Context, g *resolver.Graph) (toScan *resolver.Graph, cached map[string]*scanner.MaintenanceInfo) {
 	if !fr.active() {
 		return g, nil
 	}
-	cached := map[string]*scanner.MaintenanceInfo{}
+	cached = map[string]*scanner.MaintenanceInfo{}
 	need := map[string]bool{}
 	for path, d := range g.Dependencies {
 		if info, ok := fr.module(ctx, path, d.Module.Version); ok {

@@ -20,6 +20,7 @@ import (
 
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/runner"
+	"github.com/unidoc/unisupply/pkg/scanner"
 )
 
 // buildBinary compiles the unisupply binary into a temporary directory and
@@ -189,7 +190,7 @@ func TestRequireGithubToken_RejectedToken(t *testing.T) {
 
 // TestRequireGithubToken_AcceptedToken verifies that run() gets past the
 // precondition when GitHub accepts the token. The fixture module has no
-// dependencies, so the run ends at "No dependencies found." with no error,
+// dependencies, so the run ends at "No dependencies found." with no precondition error,
 // after exactly one request: the probe.
 func TestRequireGithubToken_AcceptedToken(t *testing.T) {
 	requests := stubGitHub(t, http.StatusOK, nil)
@@ -208,8 +209,10 @@ func TestRequireGithubToken_AcceptedToken(t *testing.T) {
 		progressMode:       "none",
 	})
 
-	if err != nil {
-		t.Fatalf("err = %v, want nil (errors.Is(err, errTokenPrecondition) = %v)", err, errors.Is(err, errTokenPrecondition))
+	// The module has no Go files and the test has no network, so its vulnerability scan fails: that is a failed scan (exit 4),
+	// which is past the precondition. Only a precondition failure is wrong here.
+	if err != nil && !errors.Is(err, errScanFailed) {
+		t.Fatalf("err = %v, want nil or a failed scan (errors.Is(err, errTokenPrecondition) = %v)", err, errors.Is(err, errTokenPrecondition))
 	}
 	if n := requests.Load(); n != 1 {
 		t.Errorf("requests = %d, want exactly 1 (the probe)", n)
@@ -595,6 +598,10 @@ func TestNoGoMod_JSONCarriesTheTypedReason(t *testing.T) {
 	if got.Tool != "unisupply" || got.ScanStatus.Status != "failed" || got.ScanStatus.Reason != "no_go_mod" || got.ScanStatus.Kind != "permanent" || !strings.Contains(got.Error, "no go.mod found") {
 		t.Errorf("%s", raw)
 	}
+	// the JSON is published: the path of the project on this machine is not in it (the error line keeps the path given)
+	if strings.Contains(string(raw), dir) {
+		t.Errorf("the JSON carries the path of the project on this machine: %s", raw)
+	}
 
 	// text: nothing is written
 	out2 := filepath.Join(dir, "out.txt")
@@ -805,5 +812,119 @@ func TestFactsKeyFlagIsRefusedByTheBinary(t *testing.T) {
 	b, err := exec.Command(bin, "--progress", "none", "--facts-url", "https://gorisk.dev", "--facts-key", "gk_topsecret", dir).CombinedOutput()
 	if exitCodeOf(err) != 1 || !strings.Contains(string(b), "refused") || strings.Contains(string(b), "gk_topsecret") {
 		t.Errorf("exit %d: %s", exitCodeOf(err), b)
+	}
+}
+
+// --private-modules also reaches the go command, which reads GOPRIVATE: otherwise it asks the module proxy for the path.
+func TestExportPrivateToGoEnv(t *testing.T) {
+	t.Setenv("GOPRIVATE", "")
+	t.Setenv("GONOPROXY", "")
+	t.Setenv("GONOSUMDB", "")
+	exportPrivateToGoEnv(nil)
+	if got := os.Getenv("GOPRIVATE"); got != "" {
+		t.Errorf("no patterns changed GOPRIVATE to %q", got)
+	}
+	exportPrivateToGoEnv([]string{"acme.example", "*.corp.example"})
+	if got := os.Getenv("GOPRIVATE"); got != "acme.example,*.corp.example" {
+		t.Errorf("GOPRIVATE = %q", got)
+	}
+	if os.Getenv("GONOPROXY") != "" || os.Getenv("GONOSUMDB") != "" {
+		t.Error("an unset GONOPROXY or GONOSUMDB follows GOPRIVATE and must stay unset")
+	}
+
+	// what the environment already holds is kept, and a narrowed GONOPROXY gets the list as well
+	t.Setenv("GOPRIVATE", "git.example")
+	t.Setenv("GONOPROXY", "git.example")
+	exportPrivateToGoEnv([]string{"acme.example"})
+	if got := os.Getenv("GOPRIVATE"); got != "git.example,acme.example" {
+		t.Errorf("GOPRIVATE = %q", got)
+	}
+	if got := os.Getenv("GONOPROXY"); got != "git.example,acme.example" {
+		t.Errorf("GONOPROXY = %q", got)
+	}
+}
+
+func TestSameOutputFile(t *testing.T) {
+	dir := t.TempDir()
+	r := filepath.Join(dir, "r.json")
+	if err := os.WriteFile(r, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(r, link); err != nil {
+		t.Skip("no symbolic links here")
+	}
+	t.Chdir(dir)
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"r.json", "r.json", true},
+		{"r.json", "./r.json", true},
+		{"./r.json", filepath.Join(dir, "r.json"), true},
+		{"r.json", "sub/../r.json", true},
+		{"r.json", "link.json", true},
+		{"r.json", "other.json", false},
+		{"", "", false},
+		{"r.json", "", false},
+	} {
+		if got := sameOutputFile(c.a, c.b); got != c.want {
+			t.Errorf("sameOutputFile(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestScanFailedError_SaysTheCodeOnce(t *testing.T) {
+	typed := scanner.ScanStatus{Status: scanner.StatusFailed, Reason: "needs_newer_go", Detail: "needs_newer_go: go.mod requires go >= 1.99"}
+	if got, want := scanFailedError(typed).Error(), "scan failed: needs_newer_go: go.mod requires go >= 1.99"; got != want {
+		t.Errorf("typed: %q, want %q", got, want)
+	}
+	interrupted := scanner.ScanStatus{Status: scanner.StatusInterrupted, Reason: "interrupted", Detail: "the scan did not finish"}
+	if got, want := scanFailedError(interrupted).Error(), "scan failed: interrupted (the scan did not finish)"; got != want {
+		t.Errorf("interrupted: %q, want %q", got, want)
+	}
+	if !errors.Is(scanFailedError(typed), errScanFailed) {
+		t.Error("the error must still wrap errScanFailed, which gives exit code 4")
+	}
+}
+
+// A module with no dependencies and no --module-version has no report. A failed vulnerability scan is still said: with JSON,
+// the scan_status alone, and exit code 4, so a caller is not left with nothing and a 0.
+func TestExitCode4_NoDependenciesStillSaysAFailedScan(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/app\n\ngo 1.99\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "r.json")
+	cmd := exec.Command(bin, "--progress", "none", "-f", "json", "-o", out, dir)
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=readonly", "GOTOOLCHAIN=local", "GOWORK=off", "GOMODCACHE="+t.TempDir())
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if code := exitCodeOf(cmd.Run()); code != 4 {
+		t.Fatalf("exit code = %d, want 4\n%s", code, stderr.String())
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("the scan_status JSON was not written: %v", err)
+	}
+	var got struct {
+		ScanStatus struct{ Status, Reason, Kind string } `json:"scan_status"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ScanStatus.Status != "failed" || got.ScanStatus.Reason != "needs_newer_go" || got.ScanStatus.Kind != "permanent" {
+		t.Errorf("scan_status = %+v\n%s", got.ScanStatus, raw)
+	}
+	if strings.Contains(string(raw), dir) {
+		t.Errorf("the JSON carries the path of the project on this machine: %s", raw)
+	}
+	// the code is said once in the error line
+	if strings.Count(stderr.String(), "needs_newer_go") != 1 {
+		t.Errorf("stderr = %q: the reason code must be said once", stderr.String())
 	}
 }

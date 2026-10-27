@@ -142,6 +142,12 @@ type Checks struct {
 	VulnScanKind string
 	// ScanTimedOut is true when the scan as a whole did not finish (timeout or interruption).
 	ScanTimedOut bool
+	// CalledPassStale is set, with the reason, when the analysis skipped govulncheck's called pass and the facts of the
+	// day (a newer severity or a known-exploited entry) mean it could now change the letter: only analysing again can say.
+	CalledPassStale string
+	// CalledPassNever is true when the scan ran with --called-pass never: every finding is "imported", so the letter is a
+	// floor. The grade says so in a note, for a gate that reads only the letter.
+	CalledPassNever bool
 	// SelfStatusFailed: the module's own archived/deprecated status could not be read. SelfAdvisoriesFailed: the lookup of
 	// its own advisories (OSV) failed. SelfAdvisoriesSkipped: no module version was given, so they were not looked up (not
 	// a failure: the result says so, and the module's own advisories are not part of the letter).
@@ -290,7 +296,7 @@ type TreeRow struct {
 
 // Pending is the answer when a check the letter depends on did not run: no letter, the reason, and what is known.
 type Pending struct {
-	Check string `json:"check"` // vulnerability_scan | scan_incomplete | checksum | known_exploited | module_status | module_advisories | dependency_maintenance
+	Check string `json:"check"` // vulnerability_scan | scan_incomplete | called_pass | checksum | known_exploited | module_status | module_advisories | dependency_maintenance
 	// Code and Kind are set only for vulnerability_scan, and only when the failure is a typed scan failure: its reason
 	// code ("multiple_mains") and kind ("transient", "permanent" or "too_large"). They are a contract for a caller that
 	// decides on a retry; Reason is for people and may change its wording.

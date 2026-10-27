@@ -498,6 +498,9 @@ func gradeOnce(input *Input) Result {
 			res.Notes = append(res.Notes, "The standard library was scanned at "+v+", the Go toolchain this scan ran with; its findings are listed, not graded.")
 		}
 	}
+	if in.Checks.CalledPassNever {
+		res.Notes = append(res.Notes, "The called pass was switched off (--called-pass never): every finding is shown as imported, so this letter is a floor. A vulnerable function that the code reaches would make it worse.")
+	}
 	if in.Checks.SelfPrivate {
 		res.Notes = append(res.Notes, "The module itself is private: its status and advisories were not looked up.")
 	}

@@ -118,7 +118,8 @@ type Options struct {
 	// with module.MatchPrefixPatterns): modules the customer owns. When it has any entry it replaces the environment (GOPRIVATE
 	// and GONOPROXY, which are read when it is empty). A private module's path appears in no request to any host (module
 	// proxy, GitHub, Trust Index, OSV) and no facts store call; its upkeep is not assessed, and it is marked private in the
-	// grade. The go command's own downloads follow GOPRIVATE by themselves. The CLI flag is --private-modules.
+	// grade. The go command's own downloads follow GOPRIVATE, not this field: a library caller puts the same list in GOPRIVATE
+	// (the CLI does it for --private-modules). The CLI flag is --private-modules.
 	PrivatePatterns []string
 
 	// Facts is the store Run and RunAnalysed read facts through when they grade (see Grade). Nil looks everything up. Analyse
@@ -221,33 +222,37 @@ var scanVulns = scanner.ScanVulnsWithOptions
 // is the panic value and the stack of the goroutine it happened in. It does not catch panics inside govulncheck's own
 // goroutines, fatal runtime errors such as "concurrent map writes", or the process being killed (out of memory): a
 // caller that must survive those has to do so itself.
+//
+//nolint:gocritic // public API: Options is passed by value, and gorisk calls it so
 func Run(ctx context.Context, opts Options) (res *Result, runErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res, runErr = nil, panicScanError(r)
 		}
 	}()
-	an, st, err := analyse(ctx, opts, false)
+	an, st, err := analyse(ctx, &opts, false)
 	if err != nil {
 		return nil, err
 	}
-	return gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, opts)
+	return gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, &opts)
 }
 
 // RunAnalysed is Run that also returns the Analysis it graded, made as Analyse makes it (the advisory fingerprint in its
 // Identity included, which costs one request to vuln.go.dev). The Result is the one Run would give. The Analysis is returned
 // whenever one was made, so it is non-nil next to a Result whose scan failed; on an error before an analysis exists both are nil.
+//
+//nolint:gocritic // public API: Options is passed by value, as Run takes it
 func RunAnalysed(ctx context.Context, opts Options) (res *Result, an *Analysis, runErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res, an, runErr = nil, nil, panicScanError(r)
 		}
 	}()
-	an, st, err := analyse(ctx, opts, true)
+	an, st, err := analyse(ctx, &opts, true)
 	if err != nil {
 		return nil, nil, err
 	}
-	res, err = gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, opts)
+	res, err = gradeAnalysis(ctx, an, st, opts.Facts, st.scanStart, &opts)
 	if err != nil {
 		return nil, an, err
 	}

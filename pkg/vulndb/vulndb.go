@@ -269,5 +269,6 @@ func (c *Client) ChangedModules(ctx context.Context, since time.Time) (changes [
 	if err != nil {
 		return nil, dbModified, nil, err
 	}
-	return idx.ChangesSince(since), dbModified, idx, nil
+	changed := idx.ChangesSince(since)
+	return changed, dbModified, idx, nil
 }

@@ -251,6 +251,10 @@ type gradeRun struct {
 	// VulnScanCode and VulnScanKind are the scan failure's reason code and kind (see scanFailureCode).
 	VulnScanCode, VulnScanKind string
 	Interrupted                bool
+	// CalledPassStale is the Pending reason from staleCalledPass, empty when the called pass decision still holds.
+	CalledPassStale string
+	// CalledPassNever is true when the analysis ran with --called-pass never, so the letter is only a floor.
+	CalledPassNever bool
 
 	// StdlibScanned is true when govulncheck ran (the standard library was matched against the scan's Go release).
 	StdlibScanned bool
@@ -305,6 +309,9 @@ func gradeAll(ctx context.Context, r *gradeRun) *grade.Result {
 			VulnScanCode:   r.VulnScanCode,
 			VulnScanKind:   r.VulnScanKind,
 			ScanTimedOut:   r.Interrupted,
+
+			CalledPassStale: r.CalledPassStale,
+			CalledPassNever: r.CalledPassNever,
 
 			ArchiveUnchecked: archiveUnchecked(r.Maintenance, local),
 			PrivateModules:   privList,
@@ -543,12 +550,11 @@ func goDirective(gm *parser.GoMod) string {
 }
 
 // privateModules is the set and the sorted list of the graph's modules the private patterns match.
-func privateModules(g *resolver.Graph, private *scanner.PrivateModules) (map[string]bool, []string) {
+func privateModules(g *resolver.Graph, private *scanner.PrivateModules) (set map[string]bool, list []string) {
 	if g == nil || !private.Any() {
 		return nil, nil
 	}
-	set := map[string]bool{}
-	var list []string
+	set = map[string]bool{}
 	for path := range g.Dependencies {
 		if private.Match(path) {
 			set[path] = true
