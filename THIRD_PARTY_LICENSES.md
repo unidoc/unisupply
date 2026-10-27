@@ -38,5 +38,7 @@ go-licenses report github.com/unidoc/unisupply/cmd/unisupply
 
 <!-- Apache NOTICE audit (2026-06-13): binary import set (go list -deps ./cmd/unisupply/) checked;
      only yaml.v3 v3.0.1 ships a NOTICE file — preserved in repo-root NOTICE.
+     Update (2026-10-28): go.yaml.in/yaml/v3 v3.0.5 also ships one (pulled in by testify v1.12,
+     which github.com/unidoc/unipdf/v5 imports from non-test code) — preserved in repo-root NOTICE.
      Non-shipped deps in go.mod (test-only, graph-only) are not in scope.
      CI now enforces this automatically via check-licenses.sh (issue #50). -->
