@@ -102,8 +102,11 @@ func TestScanErr_Fixtures(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
+			// The called pass is what type-checks the packages (see TestScanErr_AutoGradesWhatTheImportedPassCanVouchFor), and
+			// the failures here are its: this test is about how they are typed, so it asks for it on every scan.
 			res, err := runner.Run(context.Background(), runner.Options{
 				Path: testdataPath("scanerr", tc.name), DirectOnly: directOnly, Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				CalledPass: scanner.CalledPassAlways,
 			})
 			failure := err
 			if !tc.viaErr {
@@ -126,6 +129,12 @@ func TestScanErr_Fixtures(t *testing.T) {
 			if abs, err := filepath.Abs(testdataPath("scanerr", tc.name)); err != nil || strings.Contains(se.Err.Error(), abs) {
 				t.Errorf("Err = %q, want it without the project's absolute path %q", se.Err, abs)
 			}
+			if !tc.viaErr && res.ScanStatus.Status != scanner.StatusFailed && res.ScanStatus.Status != scanner.StatusInterrupted {
+				t.Errorf("ScanStatus = %+v, want a failed scan", res.ScanStatus)
+			}
+			if !tc.viaErr && res.ScanStatus.Status == scanner.StatusFailed && res.ScanStatus.Reason != tc.reason {
+				t.Errorf("ScanStatus.Reason = %q, want %q", res.ScanStatus.Reason, tc.reason)
+			}
 			t.Logf("%s", se.Summary())
 		})
 	}
@@ -141,7 +150,7 @@ func TestScanErr_PendingReasonNamesTheCause(t *testing.T) {
 
 	// The standard library is graded here, so a scan that did not run leaves the grade Pending.
 	res, err := runner.Run(context.Background(), runner.Options{
-		Path: testdataPath("scanerr", "multiple_mains"), DirectOnly: directOnly, GradeStdlib: true,
+		Path: testdataPath("scanerr", "multiple_mains"), DirectOnly: directOnly, GradeStdlib: true, CalledPass: scanner.CalledPassAlways,
 		Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
@@ -160,5 +169,34 @@ func TestScanErr_PendingReasonNamesTheCause(t *testing.T) {
 	}
 	if out, err := json.Marshal(res.Grade); err != nil || !strings.Contains(string(out), `"code":"multiple_mains","kind":"permanent"`) {
 		t.Errorf("grade JSON = %s (%v), want the pending code and kind", out, err)
+	}
+}
+
+// TestScanErr_AutoGradesWhatTheImportedPassCanVouchFor records a consequence of running the imported pass first: govulncheck's
+// package level does not type-check, so a module whose packages do not compile (here two main functions in one package) is
+// not a failed scan when the called pass is skipped. Nothing it imports has an advisory, so the called pass could not change
+// the letter, and the grade is given from the imports, with the skipped pass said in the scan block. With --called-pass
+// always the same module is a typed failure and a Pending grade (TestScanErr_Fixtures).
+func TestScanErr_AutoGradesWhatTheImportedPassCanVouchFor(t *testing.T) {
+	t.Setenv("CGO_ENABLED", "0")
+	t.Setenv("GOFLAGS", "-mod=readonly")
+	t.Setenv("GOTOOLCHAIN", "local")
+	t.Setenv("GOWORK", "off")
+
+	res, err := runner.Run(context.Background(), runner.Options{
+		Path: testdataPath("scanerr", "multiple_mains"), DirectOnly: directOnly,
+		Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.VulnScanErr != nil || res.Grade == nil || res.Grade.Pending != nil {
+		t.Fatalf("VulnScanErr = %v, Grade = %+v: want a graded scan", res.VulnScanErr, res.Grade)
+	}
+	if res.ScanInfo == nil || res.ScanInfo.CalledPass != scanner.CalledPassSkipped || res.ScanInfo.CalledPassReason == "" {
+		t.Errorf("ScanInfo = %+v, want the called pass skipped with a reason", res.ScanInfo)
+	}
+	if res.ScanStatus.Status != scanner.StatusComplete {
+		t.Errorf("ScanStatus = %+v", res.ScanStatus)
 	}
 }

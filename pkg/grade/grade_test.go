@@ -427,6 +427,26 @@ func TestPending_ScanFailureCodeAndKind(t *testing.T) {
 	}
 }
 
+// A grade whose analysis skipped the called pass, and for which today's facts mean it could change the letter, has no
+// letter: the imported finding would otherwise keep the letter a called one would not get.
+func TestPending_CalledPassStale(t *testing.T) {
+	in := Input{Self: self(), Deps: []Row{dep("example.com/x", Finding{ID: "M", Module: "example.com/x", Severity: "MEDIUM", Reachability: "imported", FixedVersion: "v9.9.9"})},
+		Checks: Checks{CalledPassStale: "the analysis skipped govulncheck's called pass: analyse again"}}
+	g := run(in)
+	if g.Pending == nil || g.Pending.Check != "called_pass" || g.Letter != "" || !strings.Contains(g.Pending.Reason, "analyse again") {
+		t.Fatalf("grade = %+v, pending = %+v, want Pending on called_pass and no letter", g, g.Pending)
+	}
+	in.Checks.CalledPassStale = ""
+	if g := run(in); g.Pending != nil || g.Letter == "" {
+		t.Errorf("without the stale mark the grade has a letter: %+v", g)
+	}
+	// a scan that failed or did not finish is named first
+	in.Checks.CalledPassStale, in.Checks.ScanTimedOut = "stale", true
+	if g := run(in); g.Pending == nil || g.Pending.Check != "scan_incomplete" {
+		t.Errorf("pending = %+v, want scan_incomplete first", g.Pending)
+	}
+}
+
 func TestPending(t *testing.T) {
 	selfArchived := self()
 	selfArchived.Upkeep = Upkeep{Archived: true}
@@ -646,5 +666,19 @@ func TestResponseContext_FixAgeAtRelease(t *testing.T) {
 	b, _ = json.Marshal(resp)
 	if !strings.Contains(string(b), `"fix_age_at_release_days":87`) {
 		t.Errorf("%s", b)
+	}
+}
+
+// With --called-pass never every finding is imported, so the letter is a floor: the grade says so, for a gate that reads
+// only the letter.
+func TestNote_CalledPassNeverIsAFloor(t *testing.T) {
+	in := Input{Self: self(), Deps: []Row{dep("example.com/x")}}
+	if g := run(in); strings.Contains(strings.Join(g.Notes, "\n"), "called pass") {
+		t.Errorf("notes without the mode: %v", g.Notes)
+	}
+	in.Checks.CalledPassNever = true
+	g := run(in)
+	if !strings.Contains(strings.Join(g.Notes, "\n"), "this letter is a floor") {
+		t.Errorf("notes = %v, want one that says the letter is a floor", g.Notes)
 	}
 }

@@ -13,26 +13,26 @@ import (
 
 // Module represents a Go module dependency.
 type Module struct {
-	Path     string
-	Version  string
-	Indirect bool
+	Path     string `json:"path"`
+	Version  string `json:"version,omitempty"`
+	Indirect bool   `json:"indirect,omitempty"`
 }
 
 // Replace represents one replace directive. OldVersion is empty for a
 // path-only replace (applies to all versions of the original module); when
 // set, the replace applies only when that exact version is selected.
 type Replace struct {
-	OldVersion string
-	New        Module
+	OldVersion string `json:"old_version,omitempty"`
+	New        Module `json:"new"`
 }
 
 // GoMod represents parsed go.mod content.
 type GoMod struct {
-	ModulePath   string
-	GoVersion    string
-	Requirements []Module
-	Replaces     map[string]Replace // original path -> replacement (one entry per path; a later directive for the same path wins)
-	Excludes     []Module           // modules excluded via the exclude directive
+	ModulePath   string             `json:"module_path"`
+	GoVersion    string             `json:"go_version,omitempty"`
+	Requirements []Module           `json:"requirements,omitempty"`
+	Replaces     map[string]Replace `json:"replaces,omitempty"` // original path -> replacement (one entry per path; a later directive for the same path wins)
+	Excludes     []Module           `json:"excludes,omitempty"` // modules excluded via the exclude directive
 }
 
 // ReplacementFor returns the replace directive that applies to the module at
