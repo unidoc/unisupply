@@ -16,7 +16,8 @@ are those of v0.7.0, with two additions: private modules are not graded on
 upkeep, and a later grade of a stored analysis is Pending when the call-graph
 pass could now change the letter. Four behaviours change for existing callers
 (see "Behaviour changes for existing callers" under Improvements). Building from
-source now needs Go 1.26.10 or newer (see Security Patches).
+source, or a module that requires unisupply v0.9.0, now needs Go 1.26.10 or newer
+(see Security Patches).
 
 ### New Features
 
@@ -199,7 +200,9 @@ source now needs Go 1.26.10 or newer (see Security Patches).
 
 - **Built with Go 1.26.10 instead of 1.26.9**, clearing GO-2026-6809 (`crypto/x509` does not distrust compromised
   intermediate certificates), the known issue of the v0.8.0 binaries. govulncheck reported it as reachable from unisupply.
-  Building from source now needs Go 1.26.10 or newer, and CI tests against Go 1.26.10 and 1.27.1.
+  Building from source now needs Go 1.26.10 or newer, and so does a module that requires unisupply v0.9.0 (`go get`, or a
+  library caller of `pkg/runner`), since `go.mod` says `go 1.26.10`. CI tests against Go 1.26.10 and 1.27.3 (1.27.3 is
+  the first 1.27 release with the fix).
 - Upgraded `golang.org/x/net` `v0.61.0` → `v0.62.0` (GO-2026-6860, GO-2026-6866: quadratic text-node coalescing and
   raw-text namespace checks in `x/net/html`). unisupply imports the package but govulncheck finds no call to the affected
   code; it is pulled in through UniPDF. No other module moves.
@@ -1356,7 +1359,8 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/unidoc/unisupply/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/unidoc/unisupply/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/unidoc/unisupply/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0
