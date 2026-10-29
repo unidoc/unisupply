@@ -3,66 +3,22 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-10-29
 
-<!-- Add new entries here as they land on `development`. -->
-
-## [0.8.0] - 2026-10-23
-
-Library-caller release. A failed scan now comes back as a typed
-`*scanner.ScanError` with a `Kind` (transient, permanent, too large) and a
-stable reason code, so a service that embeds `runner.Run` can decide whether to
-retry; the JSON carries the same `code` and `kind` under `grade.pending`. A
-panic in a scanner worker is returned as an error instead of ending the
-process, and `Options.Timeout` is documented and tested as a per-request limit.
-`scanner.ScanVulns` now returns an error when govulncheck fails (see
-Improvements). The grading rules are unchanged from v0.7.0.
-
-Known issue: the v0.8.0 release binaries are built with Go 1.26.9, which has
-GO-2026-6809 (`crypto/x509` does not distrust compromised intermediate
-certificates; fixed in Go 1.26.10). govulncheck reports it as reachable from
-unisupply. To get the fix, install with Go 1.26.10 or newer
-(`go install github.com/unidoc/unisupply/cmd/unisupply@v0.8.0`).
+Service release. One run now gives everything a service needs: the dependency
+graph and a machine-readable scan status in the JSON, the SBOM and a storable
+analysis next to the report (`--sbom-out`, `--analysis-out`), and a grade that
+can be made again on a later day from the stored analysis with that day's facts
+(`runner.Analyse` / `runner.Grade`). Facts can be read from gorisk's facts API,
+and private modules are never sent to any outside service. govulncheck runs the
+expensive call-graph pass only when it can change the letter. The letter rules
+are those of v0.7.0, with two additions: private modules are not graded on
+upkeep, and a later grade of a stored analysis is Pending when the call-graph
+pass could now change the letter. Four behaviours change for existing callers
+(see "Behaviour changes for existing callers" under Improvements). Building from
+source now needs Go 1.26.10 or newer (see Security Patches).
 
 ### New Features
-
-#### Typed scan failures with stable reason codes
-
-- **A failed scan now comes back as a `*scanner.ScanError`** (use `errors.As`) with a `Kind` that says whether a retry
-  can help (`FailTransient`: network, timeout, rate limit; `FailPermanent`: the project cannot be scanned as it is;
-  `FailTooLarge`: a limit was exceeded), a stable `Reason` code, and `Err`, the tail of govulncheck's or the go
-  command's own output (the last 40 lines or 4 KiB). `Error()` is `reason: cause`, `Summary()` is the same on one line,
-  and `Kind.String()` gives `transient`, `permanent` or `too_large`. The zero `Kind` is `FailPermanent`, so a
-  `ScanError` built without one is never retried.
-- **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`
-  (`func main` declared twice), `mixed_packages` (two package names in one directory), `no_packages`, `cgo_only`,
-  `build_constraints` (an imported package, a dependency or one of the project's own, has no Go file for this build: cgo
-  off, another GOOS, a build tag), `cgo_dependency`, `missing_gosum`, `module_fetch`, `rate_limited`,
-  `vulndb_unreachable`, `scan_deadline`, `internal_panic` and `unknown`.
-  An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module
-  imports `"C"`; without that, "no packages matched" is `no_packages`. `cgo_dependency` is reported when cgo is off for
-  the scan and the excluded package's own files import `"C"`; without that, the failure is `build_constraints`.
-- **A scan stopped by its context's deadline is `scan_deadline`** (`FailTooLarge`), and `errors.Is(err,
-  context.DeadlineExceeded)` holds for it. A permanent cause in the output still wins over the deadline, and a scan whose
-  context was canceled is `unknown`. Once the context has ended, network text in the output is not read as
-  `module_fetch` or `rate_limited`: the timeout is the scan's own.
-- **`module_fetch` covers the network faults of a download**: a refused or timed-out connection (`dial tcp`, `i/o
-  timeout`, `connection timed out`), a cut download (`unexpected EOF`), an HTTP/2 stream reset (`stream error: stream
-  ID 3; INTERNAL_ERROR`) and a 5xx from the proxy. Network wording that no rule knows is `unknown`, which is
-  `FailPermanent`: a caller that retries should give `unknown` a small, bounded number of retries rather than none.
-- **`rate_limited` matches the wording of a refused request** (`rate limit exceeded`, `secondary rate limit`, `429 Too
-  Many Requests`), not a package path such as `go.uber.org/ratelimit` in a build error.
-- **Where it appears:** `Result.VulnScanErr` (still typed `error`) when the vulnerability scan fails, the error of
-  `scanner.ScanVulnsWithOptions`, and the early failures of `runner.Run` (no go.mod, an unreadable go.mod, dependency
-  resolution). `scanner.CheckToolchain` is unchanged, and the CLI's error line prints only the cause, as before. Report
-  warnings change in two ways: a refused toolchain's line now carries the code
-  (`Vulnerability scan failed: needs_newer_go: this unisupply was built with ...`), and a package-loading failure names
-  the project's files relative to the project (`b.go:3:6: ...`), not by their path on the scanning machine.
-- **`grade.pending` in the JSON has `code` and `kind`** when the vulnerability scan failed with a typed scan failure:
-  the reason code (`"code": "multiple_mains"`) and the kind (`"kind": "permanent"`, or `transient`, `too_large`). They are
-  set only for the `vulnerability_scan` check and are absent for any other, and for a scan that failed with an error that
-  is not a `ScanError`. A caller that decides on a retry reads `kind`; `reason` keeps its text, with the code in front, and
-  is for people.
 
 #### Imported pass first, called pass only when it can change the letter
 
@@ -207,6 +163,22 @@ unisupply. To get the fix, install with Go 1.26.10 or newer
 
 ### Improvements
 
+#### Behaviour changes for existing callers
+
+- **`--called-pass auto` is the default.** govulncheck's call-graph pass runs only when it can change the letter; findings
+  that skip it are reported as imported, with no call path, and a module whose packages do not compile can be graded from
+  its imports. `--called-pass always` (`scanner.CalledPassAlways`) keeps the previous behaviour. See "Imported pass first,
+  called pass only when it can change the letter".
+- **Exit code 4** when the scan failed or was interrupted and the report was still written. Before, such a scan exited 0
+  with a Pending grade. A policy violation (2) takes precedence; Pending and `--offline` still exit 0. With
+  `--format json`, a scan that could not start now writes a JSON document with `scan_status`, next to the unchanged error
+  line and exit code 1.
+- **`scan.go_version` is always present** once a scan started: when govulncheck's output does not say, the Go release
+  unisupply gave it is used.
+- **Private modules (`GOPRIVATE` / `GONOPROXY`, or `--private-modules`) are not looked up**: no proxy, GitHub, Trust Index
+  or facts-store request names them, and their rows are `not_assessed` with `private: true` instead of making the grade
+  Pending for unread upkeep.
+
 #### A stored analysis is graded again with today's facts, and says when it needs a new scan
 
 - **`runner.Grade` is `Pending` on `called_pass` when the analysis skipped the called pass (`--called-pass auto`) and the facts of the
@@ -216,6 +188,80 @@ unisupply. To get the fix, install with Go 1.26.10 or newer
 - **A grade made from `--called-pass never` has a note** that says its letter is a floor.
 - **`dependency_graph.edges` holds only module paths**: the go.sum fallback's `(from go.sum)` placeholder is not an edge.
 - **`--analysis-out`, `--sbom-out` and `-o` are compared as paths**, so `./r.json` and `r.json`, or a symbolic link, are the same file.
+
+#### Dependencies
+
+- Upgraded `github.com/unidoc/unipdf/v5` `v5.1.0` → `v5.2.0` (direct). It raises `github.com/stretchr/testify` to
+  `v1.12.1` and `github.com/unidoc/pkcs7` to `v0.4.1`, and adds `go.yaml.in/yaml/v3` `v3.0.5`. unipdf imports testify
+  from non-test code, so `go.yaml.in/yaml/v3` ships in the binary; its NOTICE text is now in `NOTICE`.
+
+### Security Patches
+
+- **Built with Go 1.26.10 instead of 1.26.9**, clearing GO-2026-6809 (`crypto/x509` does not distrust compromised
+  intermediate certificates), the known issue of the v0.8.0 binaries. govulncheck reported it as reachable from unisupply.
+  Building from source now needs Go 1.26.10 or newer, and CI tests against Go 1.26.10 and 1.27.1.
+- Upgraded `golang.org/x/net` `v0.61.0` → `v0.62.0` (GO-2026-6860, GO-2026-6866: quadratic text-node coalescing and
+  raw-text namespace checks in `x/net/html`). unisupply imports the package but govulncheck finds no call to the affected
+  code; it is pulled in through UniPDF. No other module moves.
+
+## [0.8.0] - 2026-10-23
+
+Library-caller release. A failed scan now comes back as a typed
+`*scanner.ScanError` with a `Kind` (transient, permanent, too large) and a
+stable reason code, so a service that embeds `runner.Run` can decide whether to
+retry; the JSON carries the same `code` and `kind` under `grade.pending`. A
+panic in a scanner worker is returned as an error instead of ending the
+process, and `Options.Timeout` is documented and tested as a per-request limit.
+`scanner.ScanVulns` now returns an error when govulncheck fails (see
+Improvements). The grading rules are unchanged from v0.7.0.
+
+Known issue: the v0.8.0 release binaries are built with Go 1.26.9, which has
+GO-2026-6809 (`crypto/x509` does not distrust compromised intermediate
+certificates; fixed in Go 1.26.10). govulncheck reports it as reachable from
+unisupply. To get the fix, install with Go 1.26.10 or newer
+(`go install github.com/unidoc/unisupply/cmd/unisupply@v0.8.0`).
+
+### New Features
+
+#### Typed scan failures with stable reason codes
+
+- **A failed scan now comes back as a `*scanner.ScanError`** (use `errors.As`) with a `Kind` that says whether a retry
+  can help (`FailTransient`: network, timeout, rate limit; `FailPermanent`: the project cannot be scanned as it is;
+  `FailTooLarge`: a limit was exceeded), a stable `Reason` code, and `Err`, the tail of govulncheck's or the go
+  command's own output (the last 40 lines or 4 KiB). `Error()` is `reason: cause`, `Summary()` is the same on one line,
+  and `Kind.String()` gives `transient`, `permanent` or `too_large`. The zero `Kind` is `FailPermanent`, so a
+  `ScanError` built without one is never retried.
+- **The reason codes are exported constants** and are a contract: `needs_newer_go`, `no_go_mod`, `multiple_mains`
+  (`func main` declared twice), `mixed_packages` (two package names in one directory), `no_packages`, `cgo_only`,
+  `build_constraints` (an imported package, a dependency or one of the project's own, has no Go file for this build: cgo
+  off, another GOOS, a build tag), `cgo_dependency`, `missing_gosum`, `module_fetch`, `rate_limited`,
+  `vulndb_unreachable`, `scan_deadline`, `internal_panic` and `unknown`.
+  An unknown failure is `FailPermanent`. `cgo_only` is reported when cgo is off for the scan and a file of the module
+  imports `"C"`; without that, "no packages matched" is `no_packages`. `cgo_dependency` is reported when cgo is off for
+  the scan and the excluded package's own files import `"C"`; without that, the failure is `build_constraints`.
+- **A scan stopped by its context's deadline is `scan_deadline`** (`FailTooLarge`), and `errors.Is(err,
+  context.DeadlineExceeded)` holds for it. A permanent cause in the output still wins over the deadline, and a scan whose
+  context was canceled is `unknown`. Once the context has ended, network text in the output is not read as
+  `module_fetch` or `rate_limited`: the timeout is the scan's own.
+- **`module_fetch` covers the network faults of a download**: a refused or timed-out connection (`dial tcp`, `i/o
+  timeout`, `connection timed out`), a cut download (`unexpected EOF`), an HTTP/2 stream reset (`stream error: stream
+  ID 3; INTERNAL_ERROR`) and a 5xx from the proxy. Network wording that no rule knows is `unknown`, which is
+  `FailPermanent`: a caller that retries should give `unknown` a small, bounded number of retries rather than none.
+- **`rate_limited` matches the wording of a refused request** (`rate limit exceeded`, `secondary rate limit`, `429 Too
+  Many Requests`), not a package path such as `go.uber.org/ratelimit` in a build error.
+- **Where it appears:** `Result.VulnScanErr` (still typed `error`) when the vulnerability scan fails, the error of
+  `scanner.ScanVulnsWithOptions`, and the early failures of `runner.Run` (no go.mod, an unreadable go.mod, dependency
+  resolution). `scanner.CheckToolchain` is unchanged, and the CLI's error line prints only the cause, as before. Report
+  warnings change in two ways: a refused toolchain's line now carries the code
+  (`Vulnerability scan failed: needs_newer_go: this unisupply was built with ...`), and a package-loading failure names
+  the project's files relative to the project (`b.go:3:6: ...`), not by their path on the scanning machine.
+- **`grade.pending` in the JSON has `code` and `kind`** when the vulnerability scan failed with a typed scan failure:
+  the reason code (`"code": "multiple_mains"`) and the kind (`"kind": "permanent"`, or `transient`, `too_large`). They are
+  set only for the `vulnerability_scan` check and are absent for any other, and for a scan that failed with an error that
+  is not a `ScanError`. A caller that decides on a retry reads `kind`; `reason` keeps its text, with the code in front, and
+  is for people.
+
+### Improvements
 
 #### The published reason for a failed scan names the cause
 
