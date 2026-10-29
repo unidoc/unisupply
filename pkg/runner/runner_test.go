@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/offline"
 	"github.com/unidoc/unisupply/pkg/progress"
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -587,5 +588,67 @@ func TestRun_PanicInAWorkerGoroutineIsAScanError(t *testing.T) {
 	}
 	if text := se.Err.Error(); !strings.Contains(text, "MaintenanceScanner") {
 		t.Errorf("Err = %q, want the stack of the worker goroutine", text)
+	}
+}
+
+// The runner hands the scan the called-pass setting and the grading code's test for when that pass can matter.
+func TestRun_PassesCalledPassSettingAndGradePredicate(t *testing.T) {
+	dir := writeEmptyModule(t)
+	stubGitHub(t, http.StatusOK)
+	var got scanner.VulnScanOptions
+	prev := scanVulns
+	t.Cleanup(func() { scanVulns = prev })
+	scanVulns = func(_ context.Context, _ string, opts scanner.VulnScanOptions) (map[string][]scanner.Vulnerability, []string, bool, error) {
+		got = opts
+		return nil, nil, true, nil
+	}
+	if _, err := Run(context.Background(), Options{Path: dir, CalledPass: scanner.CalledPassNever}); err != nil {
+		t.Fatal(err)
+	}
+	if got.CalledPass != scanner.CalledPassNever || got.NeedsCalledPass == nil {
+		t.Fatalf("options = %+v", got)
+	}
+	// it is the grade's test: a high imported advisory needs the called pass, a low one does not
+	high := map[string][]scanner.Vulnerability{"m": {{ID: "GO-1", Severity: "HIGH", Reachability: "imported"}}}
+	low := map[string][]scanner.Vulnerability{"m": {{ID: "GO-1", Severity: "LOW", Reachability: "imported"}}}
+	if need, _ := got.NeedsCalledPass(high); !need {
+		t.Error("high imported: want the called pass")
+	}
+	if need, _ := got.NeedsCalledPass(low); need {
+		t.Error("low imported: want no called pass")
+	}
+}
+
+// The standard library's findings are not graded by default, so they must not make the called pass run; with GradeStdlib
+// they are part of the letter and do.
+func TestCalledPassTest_Stdlib(t *testing.T) {
+	found := map[string][]scanner.Vulnerability{stdlibModule: {{ID: "GO-1", Severity: "UNKNOWN", Reachability: "imported"}}}
+	need, reason := calledPassTest(false)(found)
+	if need || !strings.Contains(reason, "listed, not graded") {
+		t.Errorf("not graded: %v %q", need, reason)
+	}
+	if len(found[stdlibModule]) != 1 {
+		t.Error("the caller's map must not be changed")
+	}
+	if need, _ := calledPassTest(true)(found); !need {
+		t.Error("graded stdlib with no severity: want the called pass")
+	}
+	found["example.com/m"] = []scanner.Vulnerability{{ID: "GO-2", Severity: "HIGH", Reachability: "imported"}}
+	if need, _ := calledPassTest(false)(found); !need {
+		t.Error("a high advisory in a dependency still needs it")
+	}
+}
+
+func TestScanStatusOf_Runner(t *testing.T) {
+	failed := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonMissingGoSum, Err: errors.New("missing go.sum entry")}
+	pending := &grade.Result{Pending: &grade.Pending{Check: "vulnerability_scan", Reason: "x"}}
+	if st := scanStatusOf(pending, failed, false); st.Status != scanner.StatusFailed || st.Reason != scanner.ReasonMissingGoSum || st.Kind != "permanent" {
+		t.Errorf("failed: %+v", st)
+	}
+	if st := scanStatusOf(&grade.Result{Letter: grade.LetterA}, failed, false); st.Status != scanner.StatusFailed || st.Reason != scanner.ReasonMissingGoSum {
+		t.Errorf("a failure the letter does not rest on is still a failed scan: %+v", st)
+	}
+	if st := scanStatusOf(&grade.Result{Pending: &grade.Pending{Check: "scan_incomplete"}}, nil, true); st.Status != scanner.StatusInterrupted {
+		t.Errorf("interrupted: %+v", st)
 	}
 }
