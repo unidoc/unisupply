@@ -11,11 +11,12 @@ import (
 //
 //  1. vulnerability_scan: the vulnerability scan;
 //  2. scan_incomplete: the scan as a whole (a timeout or interruption);
-//  3. checksum: `go mod verify`, when a mismatch (F) could still raise the letter;
-//  4. known_exploited: the CISA catalog, for a reached finding with a CVE, when an F could still raise the letter;
-//  5. module_advisories / module_status: the module's own advisories (the OSV lookup), or its own status (archived,
+//  3. called_pass: the analysis skipped the called pass and today's facts mean it could change the letter;
+//  4. checksum: `go mod verify`, when a mismatch (F) could still raise the letter;
+//  5. known_exploited: the CISA catalog, for a reached finding with a CVE, when an F could still raise the letter;
+//  6. module_advisories / module_status: the module's own advisories (the OSV lookup), or its own status (archived,
 //     deprecated) when the worst upkeep score it could still get (35) would beat the worst row known so far;
-//  6. dependency_maintenance: the maintenance data of a dependency, when the worst upkeep score it could still get (20, or
+//  7. dependency_maintenance: the maintenance data of a dependency, when the worst upkeep score it could still get (20, or
 //     10 if it is test-only or not compiled in) would beat the worst row known so far.
 //
 // A module with no dependencies has no dependency check to fail; its own row still needs 5, and the vulnerability scan
@@ -32,6 +33,8 @@ func pendingFor(in *Input, rows []RowResult, score int) *Pending {
 		return &Pending{Check: "vulnerability_scan", Code: c.VulnScanCode, Kind: c.VulnScanKind, Reason: reason, Known: known}
 	case c.ScanTimedOut:
 		return &Pending{Check: "scan_incomplete", Reason: "the scan did not finish (it timed out or was interrupted), so some checks never ran", Known: known}
+	case c.CalledPassStale != "":
+		return &Pending{Check: "called_pass", Reason: c.CalledPassStale, Known: known}
 	case c.ChecksumUnverified && bandOf(treeFScore) > bandOf(score):
 		return &Pending{Check: "checksum", Reason: "go mod verify could not complete, so a checksum mismatch cannot be ruled out", Known: known}
 	case c.KEVUnchecked > 0 && bandOf(treeFScore) > bandOf(score):

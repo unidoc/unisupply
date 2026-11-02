@@ -154,6 +154,18 @@ func (m *MaintenanceInfo) MonthsInactive() int {
 	return min(m.MonthsSinceRelease, m.MonthsSinceActivity)
 }
 
+// AgeAt recomputes the month counts against now. A record read from a store was made on another day, and its counts are
+// those of that day; LastRelease and LastActivity are the facts, the counts only a view of them.
+func (m *MaintenanceInfo) AgeAt(now time.Time) {
+	if m == nil {
+		return
+	}
+	m.MonthsSinceRelease = monthsSince(now, m.LastRelease)
+	if !m.LastActivity.IsZero() {
+		m.MonthsSinceActivity = monthsSince(now, m.LastActivity)
+	}
+}
+
 // MaintenanceScanner checks module maintenance health via the Go module proxy.
 type MaintenanceScanner struct {
 	client   *Client

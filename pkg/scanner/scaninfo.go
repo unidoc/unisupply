@@ -16,7 +16,9 @@ type ScanInfo struct {
 	// Platform is "goos/goarch" of the scan: GOOS and GOARCH from the
 	// environment when set, else those of the running binary.
 	Platform string `json:"platform,omitempty"`
-	// GoVersion is the Go release govulncheck analysed with ("go1.26.9").
+	// GoVersion is the Go release govulncheck analysed with ("go1.26.9"), the one the standard library's advisories were matched
+	// against. When govulncheck's output does not say (it failed before reporting, or an old version) the runner fills in the
+	// release it gave govulncheck as GOVERSION.
 	GoVersion string `json:"go_version,omitempty"`
 	// GovulncheckVersion is the version of golang.org/x/vuln linked into this binary (govulncheck runs in-process), read
 	// from the build info. Empty when the build info does not list it. It is NOT govulncheck's own scanner_version: that
@@ -30,6 +32,15 @@ type ScanInfo struct {
 	// KEVStaleSince is set when the CISA KEV catalog could not be refreshed
 	// and the copy from this date was used.
 	KEVStaleSince *time.Time `json:"kev_stale_since,omitempty"`
+
+	// CalledPassMode is the setting the scan ran with: "auto", "always" or "never".
+	CalledPassMode string `json:"called_pass_mode,omitempty"`
+	// CalledPass says whether govulncheck's called (symbol) pass ran: "ran", or "skipped" when only the imported (package)
+	// pass ran. A skipped called pass means every reached finding is reported as imported, with no call path; in auto
+	// mode that happens only when the called pass could not have changed the letter.
+	CalledPass string `json:"called_pass,omitempty"`
+	// CalledPassReason says in one sentence why the called pass ran or was skipped.
+	CalledPassReason string `json:"called_pass_reason,omitempty"`
 }
 
 // gvcConfig is govulncheck's leading {"config": {...}} message.

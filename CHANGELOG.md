@@ -3,6 +3,210 @@
 All notable changes to `unisupply` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-29
+
+Service release. One run now gives everything a service needs: the dependency
+graph and a machine-readable scan status in the JSON, the SBOM and a storable
+analysis next to the report (`--sbom-out`, `--analysis-out`), and a grade that
+can be made again on a later day from the stored analysis with that day's facts
+(`runner.Analyse` / `runner.Grade`). Facts can be read from gorisk's facts API,
+and private modules are never sent to any outside service. govulncheck runs the
+expensive call-graph pass only when it can change the letter. The letter rules
+are those of v0.7.0, with two additions: private modules are not graded on
+upkeep, and a later grade of a stored analysis is Pending when the call-graph
+pass could now change the letter. Four behaviours change for existing callers
+(see "Behaviour changes for existing callers" under Improvements). Building from
+source, or a module that requires unisupply v0.9.0, now needs Go 1.26.10 or newer
+(see Security Patches).
+
+### New Features
+
+#### Imported pass first, called pass only when it can change the letter
+
+- **govulncheck now runs at package level first** (which vulnerable packages the code imports) and at symbol level (which
+  vulnerable functions it reaches, the called pass, the expensive one) only when `grade.CalledPassCanChangeLetter` says it
+  can change the letter: an imported advisory that is high or critical, known to be exploited (KEV), or has no severity yet.
+  The test asks the grading rules themselves (it scores each imported finding as imported and as called, alone and under
+  the whole-tree rules, and compares the bands), so it follows them if they change. The standard library's advisories do not
+  count unless `Options.GradeStdlib` grades them.
+- **Findings that skip the called pass are reported as imported**, with no call path. `scan.called_pass` (`ran` or
+  `skipped`), `scan.called_pass_reason` (one sentence) and `scan.called_pass_mode` say so in the JSON, and the text report
+  adds a line to its scan details.
+- **`runner.Options.CalledPass`** (`scanner.CalledPassAuto`, the default; `CalledPassAlways`, the previous behaviour;
+  `CalledPassNever`, the imported pass only) and the CLI flag **`--called-pass auto|always|never`**.
+  `scanner.VulnScanOptions` has `CalledPass` and `NeedsCalledPass`; without a predicate the scanner runs the called pass on
+  every scan, as before.
+- **A module whose packages do not compile is no longer a failed scan when the called pass is skipped.** govulncheck's
+  package level does not type-check, so a type error (two `main` functions in one package, say) shows only in the called pass.
+  When nothing the code imports could change the letter, the grade is given from the imports; when the called pass is needed
+  and fails, the scan fails as before. `--called-pass always` keeps the old behaviour for every module.
+- **A called pass that fails after the imported pass succeeded is a failed scan** (typed error, `Pending`), never an imported
+  listing that stands in for it.
+- **The heap govulncheck loaded is returned to the operating system as soon as it finishes** (`debug.FreeOSMemory` after
+  each pass), before the severity and threat-intel lookups that wait on the network. Nothing keeps the loaded packages or the
+  call graph alive after the pass.
+
+#### Machine-readable scan status and the dependency graph in the JSON
+
+- **`scan_status`** (always present) says whether the result is final: `status` is `complete`, `pending` (the scan ran but a
+  check the letter needs did not, so there is no letter), `interrupted` (the scan's deadline passed or it was cancelled) or
+  `failed` (the vulnerability scan failed, even when the letter does not rest on it). `reason` is a stable code: the typed failure's reason (`missing_gosum`,
+  `scan_deadline`, ...) for `failed` and `interrupted`, the pending check (`dependency_maintenance`, ...) for `pending`;
+  `kind` says whether a retry can help (`transient`, `permanent`, `too_large`); `detail` is one sentence. Only `complete`
+  is a whole result. In Go: `runner.Result.ScanStatus`, `scanner.ScanStatusOf`, `report.JSONOptions.ScanStatus` (when it is
+  nil the writer works the status out from the grade alone).
+- **`dependency_graph`** (always present): `root`, `source` and `edges`, `[{"from": "a", "to": "b"}, ...]`, which module
+  requires which, by module path, sorted and without duplicates (`edges` is `[]`, never null). The selected version of
+  each module is in `dependencies[]`. `source` is `go_mod_graph` for the full graph; for `go_mod_requires` (the go command
+  could not run) and `direct_only` the edges are the main module's requirements only. In Go: `resolver.Graph.Edges()` and
+  `resolver.Graph.Source`.
+
+#### Analysis and grading are separate: `runner.Analyse` and `runner.Grade`
+
+- **`runner.Analyse(ctx, opts) (*runner.Analysis, error)`** does what depends on the module's code and not on the day: the
+  go.mod, the build list and requirement graph with the test-only / in-build / platform classification, the go.mod and
+  go.sum audit (`go mod verify` included), the CI/CD audit, and govulncheck's findings with their tiers, call paths, and the
+  severity and known-exploited status they had when it ran. It is JSON-serialisable (`schema_version`, `identity`,
+  `analysed_at`, `go_mod`, `graph`, `vulnerabilities`, `vulnerability_scan`, ...) and meant to be stored.
+  `Analysis.Complete()` says whether it can be kept as final (the scan ran and was not cut short) and `Analysis.Status()`
+  gives its machine-readable state.
+- **`Analysis.Identity`** is everything it depends on: module version or commit (`Options.SelfVersion`, the new
+  `Options.Commit`), the SHA-256 of go.mod and go.sum, the Go release, the govulncheck and unisupply versions, the called-pass
+  setting, and an **advisory fingerprint** of the build list (and the standard library) from the vulnerability database's
+  module index. `Identity.Key()` is one hex string for all of it; an analysis whose key has not changed is still valid.
+  If the index cannot be read the fingerprint is empty and the analysis is still made.
+- **`runner.Grade(ctx, analysis, facts, date, opts) (*runner.Result, error)`** applies Grading v2 to an analysis with the facts
+  and the date of the day: maintenance status (archived, deprecated, last release and activity), fix dates, severity and
+  known-exploited status, the module's own advisories, and the grade. It never changes the analysis, so one stored analysis
+  is graded every day, and it does not read the module's files. The result is the same `Result` that `Run` returns.
+- **The CLI and `runner.Run` are `Analyse` followed by `Grade`**, and give the same output as before (checked on real
+  modules, JSON and text, against the previous build). One difference in the progress output on stderr: the CI/CD audit
+  stage now runs before the maintenance stages, not after them. `Run` does not ask for the advisory fingerprint, so the CLI
+  makes no extra request.
+- **`resolver.Graph`, `resolver.Dependency` and `parser.GoMod` have JSON tags** (snake_case) so an analysis can be stored.
+
+#### A facts store behind an interface
+
+- **`facts.Store`** (new package `pkg/facts`) is where unisupply reads what is known about a module or an advisory outside
+  its code: module status (`facts.Module`: the maintenance record), advisories (`facts.Advisory`: severity, known-exploited
+  status) and fix releases (`facts.Fix`: release date, the Go the fix needs), each with a `FetchedAt`. `facts.Memory` is the
+  in-process implementation, `facts.None` the empty one; gorisk will plug in a Postgres-backed one. `facts.Policy` says how old
+  a fact may be (`DefaultPolicy`: status and advisories a day, fix dates thirty days), measured to the grade's date.
+- **`Grade` reads through it**: a fresh module status is used instead of a lookup (and the maintainer analysis, which the
+  grade does not use, is made only for modules that were not in the store), a fix release in the store saves the proxy
+  requests, and a severity or known-exploited status in the store that is newer than the analysis replaces the analysis's.
+  What a lookup finds is written back (only whole answers: a status whose archived flag could not be read is not stored).
+  With a nil store `Grade` and `Run` look everything up as before; the CLI passes none, and keeps the per-request disk caches the
+  scanners already have.
+- **Not done:** reading the archived flag from deps.dev / OpenSSF Scorecard before GitHub. deps.dev has no archived flag, and
+  Scorecard's snapshot (two months old when checked) can only say "archived" in free text; the reasons are written as a TODO
+  in `pkg/facts`. Severities already come from OSV first, and activity from the module proxy first.
+
+#### Which modules' advisories changed: `pkg/vulndb`
+
+- **`vulndb.Client.ChangedModules(ctx, since)`** reads the Go vulnerability database's index
+  (`https://vuln.go.dev/index/modules.json.gz`, a gzip JSON array of `{"path", "vulns": [{"id", "modified", "fixed"}]}`, and
+  `index/db.json`, `{"modified"}`) and returns the modules that have an advisory modified after `since`, with the advisory IDs.
+  It reads `db.json` first and stops there when the database has not changed since. `Index.ChangedSince`,
+  `Index.ChangesSince` and `Index.Fingerprint(modules)` work on a fetched index; a fingerprint also sees an advisory that was
+  removed, which no timestamp can.
+
+#### One scan, two outputs, and an exit code for a failed scan
+
+- **`--sbom-out <file>`** writes the CycloneDX SBOM of the same scan next to whatever `--format` wrote, so one run gives the JSON
+  report and the SBOM (`unisupply -f json -o report.json --sbom-out sbom.json`). It is refused before the scan when it names the
+  same file as `--output`.
+- **`--analysis-out <file>`** also writes the stored `runner.Analysis` (JSON, with the advisory fingerprint in `identity`) of the same
+  scan, for `runner.Grade` to grade again later without the module's files. It is refused before the scan when it names the
+  same file as `-o` or `--sbom-out`; nothing is written when the scan failed before an analysis existed. The other outputs
+  and exit codes are unchanged. In Go: `runner.RunAnalysed`.
+- **Exit code 4**: the scan failed or was interrupted (`scan_status.status` is `failed` or `interrupted`) and the report was still
+  written. Before, such a scan exited 0 with a Pending grade. A policy violation (2) takes precedence; Pending (a check the letter
+  needs did not run) and offline mode are `pending`, not failures, and still exit 0. A zero-dependency module with no
+  `--module-version` has no report; when its vulnerability scan failed, `--format json` writes the `scan_status` alone, as for
+  a scan that could not start, and the exit code is 4. The error line says the reason code once
+  (`scan failed: needs_newer_go: go.mod requires go >= 1.99`).
+- **A scan that could not start writes JSON too**, with `--format json`: the whole document is `{"tool", "version",
+  "generated_at", "scan_status": {"status": "failed", "reason": "no_go_mod", "kind": "permanent", ...}, "error": ...}`, next to
+  the unchanged error line and exit code 1. Other formats write nothing, as before. The JSON is published, so the path of the project
+  on the scanning machine is cut out of `scan_status.detail` and `error` (`no go.mod found in .`); the error line keeps the path given.
+- **`scan.go_version`** (the Go release the standard library was matched against) is always present once a scan started: when
+  govulncheck's output does not say, the release unisupply gave it as `GOVERSION` is used.
+
+#### Read shared facts from gorisk's facts API
+
+- **`facts.HTTPStore`** (`facts.NewHTTPStore(base, key)`) is a read-only `facts.Store` over gorisk's shared-facts API
+  (`GET {base}/api/v1/facts/modules?path=&version=`, `/advisories/<id>`, `/fixes?module=&version=`), so a scan outside gorisk reads
+  what gorisk knows instead of looking it up. The key goes only in `Authorization: Bearer`, never in a URL, an error or a log.
+  A 404 is a miss; any other failure (401/403, 5xx, network, bad JSON) is a miss with the error returned, which unisupply ignores,
+  so the service being down never fails a scan; after a 401/403, or two requests in a row that get no answer (a network error,
+  a timeout, a 5xx), no further request is made in that run, so a service that hangs costs the timeout twice, not once per
+  lookup. The requests and answers are in `docs/facts-api.md`. `Retry-After` is honoured once
+  (up to 5 s, otherwise a miss). Requests time out after 10 s, send `User-Agent: unisupply/<version>`, never follow redirects,
+  and are cached in memory so a scan asks for a fact once. HTTPS is required unless the host is loopback. `Put*` do nothing:
+  a scan never writes to the shared facts, which keeps private module names out of them.
+- **CLI:** `--facts-url` (env `UNISUPPLY_FACTS_URL`) and the key from `UNISUPPLY_FACTS_KEY` or `--facts-key-file`. `--facts-key`
+  is refused (a flag value shows in the process list). Not combinable with `--offline`. `runner.Options.Facts` is the store
+  `Run`/`RunAnalysed` grade with; the scanners' disk caches stay underneath.
+
+#### Private modules are never looked up
+
+- **A module matched by `GOPRIVATE` / `GONOPROXY` (or by `runner.Options.PrivatePatterns` / `--private-modules`, a comma list that
+  replaces them) is in no outbound request and no facts-store call.** Before, the maintenance, maintainer, activity, resilience,
+  fix-date, response-history and Trust Index lookups sent private import paths to proxy.golang.org, GitHub and the Trust Index. The
+  matching is Go's (`module.MatchPrefixPatterns`; `scanner.NewPrivateModules`). The module itself, when private, is skipped too.
+- **Private modules are not graded on upkeep**: their row is `not_assessed` with `private: true` (also `dependencies[].private` in
+  the JSON), they never make the grade Pending for "upkeep unread", and a note says they were not looked up. See "Private modules"
+  in `docs/grading.md`.
+- **`--private-modules` also reaches the go command.** The CLI adds the list to `GOPRIVATE` (and to `GONOPROXY` and `GONOSUMDB` when the
+  environment sets them) before the scan, so `go mod graph`, `go list`, `go mod verify` and govulncheck's loader do not send a
+  private path to the module proxy either. A library caller puts the same list in `GOPRIVATE`.
+
+### Improvements
+
+#### Behaviour changes for existing callers
+
+- **`--called-pass auto` is the default.** govulncheck's call-graph pass runs only when it can change the letter; findings
+  that skip it are reported as imported, with no call path, and a module whose packages do not compile can be graded from
+  its imports. `--called-pass always` (`scanner.CalledPassAlways`) keeps the previous behaviour. See "Imported pass first,
+  called pass only when it can change the letter".
+- **Exit code 4** when the scan failed or was interrupted and the report was still written. Before, such a scan exited 0
+  with a Pending grade. A policy violation (2) takes precedence; Pending and `--offline` still exit 0. With
+  `--format json`, a scan that could not start now writes a JSON document with `scan_status`, next to the unchanged error
+  line and exit code 1.
+- **`scan.go_version` is always present** once a scan started: when govulncheck's output does not say, the Go release
+  unisupply gave it is used.
+- **Private modules (`GOPRIVATE` / `GONOPROXY`, or `--private-modules`) are not looked up**: no proxy, GitHub, Trust Index
+  or facts-store request names them, and their rows are `not_assessed` with `private: true` instead of making the grade
+  Pending for unread upkeep.
+
+#### A stored analysis is graded again with today's facts, and says when it needs a new scan
+
+- **`runner.Grade` is `Pending` on `called_pass` when the analysis skipped the called pass (`--called-pass auto`) and the facts of the
+  day (a known-exploited entry, a higher severity) mean the called pass could now change the letter.** Before, an imported finding
+  kept a letter that a called one would not get, with `scan_status: complete`. The advisory fingerprint does not see such a change,
+  so the grade asks again. See "A later grade" in `docs/grading.md`.
+- **A grade made from `--called-pass never` has a note** that says its letter is a floor.
+- **`dependency_graph.edges` holds only module paths**: the go.sum fallback's `(from go.sum)` placeholder is not an edge.
+- **`--analysis-out`, `--sbom-out` and `-o` are compared as paths**, so `./r.json` and `r.json`, or a symbolic link, are the same file.
+
+#### Dependencies
+
+- Upgraded `github.com/unidoc/unipdf/v5` `v5.1.0` → `v5.2.0` (direct). It raises `github.com/stretchr/testify` to
+  `v1.12.1` and `github.com/unidoc/pkcs7` to `v0.4.1`, and adds `go.yaml.in/yaml/v3` `v3.0.5`. unipdf imports testify
+  from non-test code, so `go.yaml.in/yaml/v3` ships in the binary; its NOTICE text is now in `NOTICE`.
+
+### Security Patches
+
+- **Built with Go 1.26.10 instead of 1.26.9**, clearing GO-2026-6809 (`crypto/x509` does not distrust compromised
+  intermediate certificates), the known issue of the v0.8.0 binaries. govulncheck reported it as reachable from unisupply.
+  Building from source now needs Go 1.26.10 or newer, and so does a module that requires unisupply v0.9.0 (`go get`, or a
+  library caller of `pkg/runner`), since `go.mod` says `go 1.26.10`. CI tests against Go 1.26.10 and 1.27.3 (1.27.3 is
+  the first 1.27 release with the fix).
+- Upgraded `golang.org/x/net` `v0.61.0` → `v0.62.0` (GO-2026-6860, GO-2026-6866: quadratic text-node coalescing and
+  raw-text namespace checks in `x/net/html`). unisupply imports the package but govulncheck finds no call to the affected
+  code; it is pulled in through UniPDF. No other module moves.
+
 ## [0.8.0] - 2026-10-23
 
 Library-caller release. A failed scan now comes back as a typed
@@ -1155,7 +1359,8 @@ First public release, production-ready for supply chain enforcement in CI/CD pip
 - All GitHub API calls use `GITHUB_TOKEN` when present to prevent
   unauthenticated rate-limit abuse.
 
-[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/unidoc/unisupply/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/unidoc/unisupply/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/unidoc/unisupply/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/unidoc/unisupply/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/unidoc/unisupply/compare/v0.5.0...v0.6.0

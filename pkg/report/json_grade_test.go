@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/unidoc/unisupply/internal/testutil"
 	"github.com/unidoc/unisupply/pkg/grade"
+	"github.com/unidoc/unisupply/pkg/resolver"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -566,5 +568,93 @@ func TestWriteJSON_DeprecatedFieldsAreDerivedFromTheGrade(t *testing.T) {
 	_ = json.Unmarshal(top["overall_risk_level"], &level)
 	if level != "UNKNOWN" {
 		t.Errorf("no grade reads UNKNOWN, got %q", level)
+	}
+}
+
+func TestWriteJSON_DependencyGraphAndScanStatus(t *testing.T) {
+	graph := testutil.MakeGraph(
+		testutil.DepSpec{Path: "example.com/a", Version: "v1.0.0", Direct: true, UsedBy: []string{"test/module"}},
+		testutil.DepSpec{Path: "example.com/b", Version: "v2.0.0", UsedBy: []string{"example.com/a", "test/module", "example.com/a"}},
+		testutil.DepSpec{Path: "example.com/c", Version: "v0.1.0", UsedBy: []string{"example.com/b"}},
+	)
+	graph.Source = resolver.SourceGoModGraph
+	var buf bytes.Buffer
+	status := &scanner.ScanStatus{Status: scanner.StatusFailed, Reason: scanner.ReasonMissingGoSum, Kind: "permanent", Detail: "missing go.sum entry"}
+	if err := WriteJSON(graph, &scorer.ProjectScore{}, JSONOptions{ScanStatus: status}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ScanStatus      scanner.ScanStatus `json:"scan_status"`
+		DependencyGraph struct {
+			Root   string          `json:"root"`
+			Source string          `json:"source"`
+			Edges  []resolver.Edge `json:"edges"`
+		} `json:"dependency_graph"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ScanStatus != *status {
+		t.Errorf("scan_status = %+v", got.ScanStatus)
+	}
+	want := []resolver.Edge{{From: "example.com/a", To: "example.com/b"}, {From: "example.com/b", To: "example.com/c"}, {From: "test/module", To: "example.com/a"}, {From: "test/module", To: "example.com/b"}}
+	if got.DependencyGraph.Root != "test/module" || got.DependencyGraph.Source != "go_mod_graph" || !reflect.DeepEqual(got.DependencyGraph.Edges, want) {
+		t.Errorf("dependency_graph = %+v, want edges %v", got.DependencyGraph, want)
+	}
+}
+
+// Without a status from the caller the writer derives one from the grade, and a graph without edges has "edges": [], not null.
+func TestWriteJSON_ScanStatusFromGradeAndEmptyEdges(t *testing.T) {
+	pending := &grade.Result{RuleVersion: grade.RuleVersion, Pending: &grade.Pending{Check: "dependency_maintenance", Reason: "no data"}}
+	body, top := renderJSON(t, gradeTestScore(plainDep()), JSONOptions{Grade: pending})
+	var st scanner.ScanStatus
+	if err := json.Unmarshal(top["scan_status"], &st); err != nil || st.Status != scanner.StatusPending || st.Reason != "dependency_maintenance" {
+		t.Errorf("scan_status = %s (%v)", top["scan_status"], err)
+	}
+	var dg map[string]json.RawMessage
+	if err := json.Unmarshal(top["dependency_graph"], &dg); err != nil || string(dg["edges"]) != "[]" {
+		t.Errorf("dependency_graph = %s\n%s", top["dependency_graph"], body)
+	}
+	_, top = renderJSON(t, gradeTestScore(plainDep()), JSONOptions{Grade: &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA}})
+	if !strings.Contains(string(top["scan_status"]), `"complete"`) {
+		t.Errorf("scan_status = %s", top["scan_status"])
+	}
+}
+
+func TestWriteJSONFailure(t *testing.T) {
+	var buf bytes.Buffer
+	cause := &scanner.ScanError{Kind: scanner.FailPermanent, Reason: scanner.ReasonNoGoMod, Err: errors.New("no go.mod found in /x")}
+	if err := WriteJSONFailure(cause, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var got JSONFailure
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Tool != "unisupply" || got.Version == "" || got.ScanStatus.Status != scanner.StatusFailed || got.ScanStatus.Reason != "no_go_mod" || got.ScanStatus.Kind != "permanent" || got.Error != "no go.mod found in /x" {
+		t.Errorf("%+v", got)
+	}
+	// a deadline is an interrupted scan, not a failed one
+	buf.Reset()
+	_ = WriteJSONFailure(&scanner.ScanError{Kind: scanner.FailTooLarge, Reason: scanner.ReasonScanDeadline, Err: errors.New("x")}, &buf)
+	_ = json.Unmarshal(buf.Bytes(), &got)
+	if got.ScanStatus.Status != scanner.StatusInterrupted || got.ScanStatus.Reason != scanner.ReasonScanDeadline {
+		t.Errorf("%+v", got.ScanStatus)
+	}
+}
+
+func TestWriteJSON_PrivateDependencyIsMarked(t *testing.T) {
+	res := &grade.Result{RuleVersion: grade.RuleVersion, Letter: grade.LetterA, Rows: []grade.RowResult{
+		{Module: "github.com/x/y", Private: true, Letter: grade.LetterA, Reason: "private module: not looked up, not graded on upkeep", UpkeepState: grade.StateNotAssessed},
+	}, Notes: []string{"1 private module was not looked up and is not graded on upkeep: github.com/x/y."}}
+	_, top := renderJSON(t, gradeTestScore(plainDep()), JSONOptions{Grade: res})
+	var deps []struct {
+		Private bool `json:"private"`
+	}
+	if err := json.Unmarshal(top["dependencies"], &deps); err != nil || len(deps) != 1 || !deps[0].Private {
+		t.Errorf("dependencies = %s (%v)", top["dependencies"], err)
+	}
+	if !strings.Contains(string(top["grade"]), `"private": true`) {
+		t.Errorf("the grade row is not marked: %s", top["grade"])
 	}
 }

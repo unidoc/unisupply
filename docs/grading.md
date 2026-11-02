@@ -82,6 +82,24 @@ is listed in `grade.tree_rows` and named in `grade.deciding`.
 When rows score the same, a vulnerability beats upkeep, then the module itself, then a direct dependency, then the module
 path alphabetically. The result does not depend on input order.
 
+## Private modules
+
+A module matched by the private patterns is the customer's own code, and its name must not leave their boundary. The patterns are
+Go's `GOPRIVATE` syntax (comma-separated globs, matched with `module.MatchPrefixPatterns`: `acme.example` matches
+`acme.example/x` but not `acme.example.evil.com/x`). unisupply reads `GOPRIVATE` and `GONOPROXY` from the environment; the
+option `runner.Options.PrivatePatterns` and the flag `--private-modules` (a comma list) replace them when set. The CLI also adds the `--private-modules` list to `GOPRIVATE` (and to
+`GONOPROXY`/`GONOSUMDB` when the environment sets them) for the go command it starts, so it does not ask the module proxy or the
+checksum database for those paths either. A library caller puts the same list in `GOPRIVATE` itself.
+
+- **A private module path is in no request to any host and no facts-store call**: not the module proxy, not GitHub, not the Trust
+  Index, not OSV by module, not the maintainer, activity, fix-date or response-history lookups, not `facts.Store` (neither `Get`
+  nor `Put`). That includes the module itself when it is private. (The go command's own downloads follow `GOPRIVATE`; see above.)
+- **Private modules are not graded on upkeep.** Their row is `not_assessed` and marked `private` (`grade.rows[].private`, and
+  `dependencies[].private` in the JSON), never missing: a private module does not make the grade Pending for "upkeep unread", and it is
+  never counted as "not archived". A note says how many were not looked up.
+- **Vulnerabilities for a private module are only what govulncheck finds from the public database**, which has none for a private
+  path. A private module is therefore never graded as "checked and clean": the result says it was not looked up.
+
 ## Pending
 
 A letter needs its checks. When a check that could change the letter did not run, the grade is **Pending**: there is no
@@ -89,15 +107,17 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 
 1. the vulnerability scan failed or did not run;
 2. the scan did not finish (timeout or interruption);
-3. the module's own advisories could not be fetched, or its own status (archived, deprecated) could not be read and the
+3. `called_pass`: the analysis skipped govulncheck's called pass, and with the facts of the day (a known-exploited entry, a higher
+   severity) it could now change the letter, so only a new analysis can say (see [A later grade](#a-later-grade));
+4. the module's own advisories could not be fetched, or its own status (archived, deprecated) could not be read and the
    worst it could be (35) would beat the worst row known;
-4. a dependency's maintenance data is missing and could still beat the worst row;
-5. `go mod verify` could not complete, so a checksum mismatch (F) cannot be ruled out;
-6. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
+5. a dependency's maintenance data is missing and could still beat the worst row;
+6. `go mod verify` could not complete, so a checksum mismatch (F) cannot be ruled out;
+7. the known-exploited status (CISA's catalog) could not be read for a reached finding with a CVE, and the letter is not
    already F: one on that list would grade F. When the catalog cannot be refreshed, a cached copy up to 30 days old is used and
    `grade.notes` states its date and age ("the copy from 2026-09-26 (14 days old)"); a copy older than 30 days is not a usable
    catalog, so the check counts as not run, as when there is no catalog at all;
-7. `severity_lookup`: the severity of a reached finding could not be looked up (OSV, NVD and GitHub did not answer, usually
+8. `severity_lookup`: the severity of a reached finding could not be looked up (OSV, NVD and GitHub did not answer, usually
    NVD's rate limit without an API key) and a different severity would change the letter. A lookup that failed is a check that
    did not run, not an unpublished severity: it is retried (paced, with backoff) and, if it still fails, the grade is Pending.
    A severity nobody has published (the lookup answered) stays an estimate and marks the letter with `*`.
@@ -217,6 +237,36 @@ left out, never 0: a v1 gate such as "overall_risk_score <= 60" must not pass a 
 The CI/CD audit (`--scan-ci`, `--scan-workflows`) is not part of the grade. It keeps its own 0 to 100 score, which is
 reported in the CI/CD section of the output and is what the policy field `max_ci_score` gates on.
 
+## When the called pass runs
+
+govulncheck gives each finding a tier, and the tier is what the table above scores. It finds the tiers in two passes: the
+imported pass (package level: is a package with an advisory imported?) is cheap, and the called pass (symbol level: does a
+path reach the vulnerable function?) loads and analyses the whole call graph, which takes most of the time and gigabytes of
+memory of a scan. unisupply runs the imported pass first and the called pass only when it can change the letter:
+`grade.CalledPassCanChangeLetter` answers by scoring every imported finding as imported and as called, alone and under the
+whole-tree rules, and asking whether the band differs. With the rules above that is true for any high or critical advisory, any
+known-exploited one (called is at least F), and any with no severity yet; medium and low advisories land in the same band
+either way. The standard library's advisories do not count unless `--grade-stdlib` grades them.
+
+When the called pass is skipped, the findings are reported as imported, with no call path, and `scan.called_pass` is `skipped`
+with `scan.called_pass_reason`. The imported pass does not type-check the packages (the called pass does), so a module whose packages do not compile is not a
+failed scan when the called pass is skipped: nothing it imports could change the letter, and the grade is given from the imports. If
+the called pass is needed and fails, the scan fails as before (`Pending`, with the typed reason). `--called-pass always` runs it on
+every scan (the previous behaviour); `never` runs the imported
+pass only, which can understate a letter and is for a quick listing, not for publishing one. A grade made from a `never` scan
+has a note that says its letter is a floor.
+
+### A later grade
+
+The decision to skip the called pass is made from the severities and known-exploited status of the day of the analysis.
+`runner.Grade` grades a stored analysis again with the facts of a later day, and a fact can change since: an advisory is added to
+CISA's catalog, or NVD re-rates it. The advisory fingerprint in the analysis's identity hashes the vulnerability database's index
+(ID, modified, fixed) and does not see either. So `Grade` asks the same question again with the facts of the day: when the
+analysis skipped the called pass in `auto` mode and the answer is now yes, the grade is **Pending** on `called_pass`, with no letter,
+and the reason says to analyse again. The imported finding would otherwise keep a letter that a called one would not get (the
+known-exploited F floor and the called critical score apply to called findings only). The same holds for an analysis made without
+`--grade-stdlib` and graded with it.
+
 ## JSON
 
 The `grade` object of `--format json`:
@@ -233,6 +283,8 @@ The `grade` object of `--format json`:
 }
 ```
 
+Next to `grade`, the JSON has `scan_status` (`{"status": "complete" | "pending" | "interrupted" | "failed", "reason": ..., "kind": ..., "detail": ...}`: whether the result is final, and why not) and `dependency_graph` (`{"root": ..., "source": ..., "edges": [{"from": ..., "to": ...}]}`: which module requires which). A gate should read `scan_status.status` and treat everything but `complete` as no result.
+
 `letter` is absent and `pending` present when the grade is Pending: `pending.check` names the check that did not run, and
 for a failed `vulnerability_scan` `pending.code` and `pending.kind` carry the scan failure's reason code and kind (see
 [Pending](#pending)). `estimated: true` marks a letter that an unpublished severity could change (`C*`).
@@ -248,4 +300,5 @@ worse), and with a looser maximum it passes with a warning naming the number of 
 still contains them is rejected. See [examples/policy-custom.md](../examples/policy-custom.md) for every policy field.
 
 The exit code reflects the grade only when a policy is given (`--policy` or `--policy-preset`): without one, a grade of
-F still exits 0.
+F still exits 0. A scan that failed or was interrupted exits 4 after writing its report (`scan_status.status` `failed` or
+`interrupted`, the typed reason in `scan_status.reason`); a policy violation (2) takes precedence.

@@ -715,6 +715,9 @@ func writeScanInfoText(w io.Writer, info *scanner.ScanInfo) {
 	add("govulncheck", info.GovulncheckVersion)
 	add("database", info.VulnDB)
 	add("database modified", info.VulnDBLastModified)
+	if info.CalledPass == scanner.CalledPassSkipped {
+		add("called pass", "skipped: "+info.CalledPassReason+"; findings are reported as imported")
+	}
 	if len(parts) == 0 {
 		return
 	}
