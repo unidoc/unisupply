@@ -7,6 +7,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### New Features
+
+#### Each finding says whether its call path was checked
+
+- **`call_path_checked`** (bool, on every finding) says whether govulncheck's called pass covered it: `true` means the tier
+  is govulncheck's verdict on the call path (an `imported` finding was checked and is not called), `false` means the called
+  pass was skipped (`--called-pass auto` or `never`; an `imported` finding may be called) or the finding did not come from
+  govulncheck. It is in `dependencies[].vulnerabilities[]`, `stdlib_vulnerabilities[]`, `grade.rows[].findings[]` and the
+  stored analysis (`--analysis-out`), so a reader that stores findings without the scan header does not have to carry
+  `scan.called_pass` beside each one. It is context only and does not change the grade. In Go:
+  `scanner.Vulnerability.CallPathChecked`, `grade.Finding.CallPathChecked` and `grade.FindingResult.CallPathChecked`.
+- **A stored analysis made by v0.9.0** has no `call_path_checked` on its findings; `runner.Grade` marks every finding checked
+  when its `scan.called_pass` is `ran` (#169).
+
 ### Bug Fixes
 
 - **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none` (or

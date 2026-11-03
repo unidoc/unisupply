@@ -161,6 +161,62 @@ func TestGrade_DoesNotChangeTheAnalysisAndFollowsTheDate(t *testing.T) {
 	}
 }
 
+// call_path_checked follows the stored analysis's called pass: an analysis stored before findings carried the field (all
+// false) whose called pass ran is graded with every finding checked, in the grade and in the dependency and stdlib lists,
+// and the analysis itself is not changed.
+func TestGrade_CallPathCheckedFollowsTheCalledPass(t *testing.T) {
+	dir := depModule(t)
+	stubGitHub(t, http.StatusOK)
+	stubScan(t, someFindings(), nil, true, nil)
+	an, err := Analyse(context.Background(), Options{Path: dir, DirectOnly: true, Now: gradeDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := func(r *Result) (yes, total int) {
+		count := func(c bool) {
+			total++
+			if c {
+				yes++
+			}
+		}
+		for _, d := range r.ProjectScore.Dependencies {
+			for _, v := range d.Vulns {
+				count(v.CallPathChecked)
+			}
+		}
+		for _, v := range r.StdlibVulns {
+			count(v.CallPathChecked)
+		}
+		for _, row := range r.Grade.Rows {
+			for _, f := range row.Findings {
+				count(f.CallPathChecked)
+			}
+		}
+		return yes, total
+	}
+	for _, c := range []struct {
+		calledPass, mode string
+		want             bool
+	}{
+		{scanner.CalledPassRan, string(scanner.CalledPassAlways), true},
+		{scanner.CalledPassSkipped, string(scanner.CalledPassNever), false},
+	} {
+		an.Scan.CalledPass, an.Scan.CalledPassMode = c.calledPass, c.mode
+		before, _ := json.Marshal(an)
+		res, err := Grade(context.Background(), an, nil, gradeDate, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		yes, total := checked(res)
+		if total < 5 || (yes == total) != c.want || (yes == 0) == c.want {
+			t.Errorf("called pass %s: %d of %d findings checked, want all %v", c.calledPass, yes, total, c.want)
+		}
+		if after, _ := json.Marshal(an); string(after) != string(before) {
+			t.Errorf("called pass %s: grading changed the analysis", c.calledPass)
+		}
+	}
+}
+
 func TestGrade_RefusesWhatItCannotRead(t *testing.T) {
 	if _, err := Grade(context.Background(), nil, nil, gradeDate, Options{}); err == nil {
 		t.Error("nil analysis")

@@ -249,7 +249,12 @@ known-exploited one (called is at least F), and any with no severity yet; medium
 either way. The standard library's advisories do not count unless `--grade-stdlib` grades them.
 
 When the called pass is skipped, the findings are reported as imported, with no call path, and `scan.called_pass` is `skipped`
-with `scan.called_pass_reason`. The imported pass does not type-check the packages (the called pass does), so a module whose packages do not compile is not a
+with `scan.called_pass_reason`. Each finding says the same on its own in `call_path_checked` (in `dependencies[].vulnerabilities[]`,
+`stdlib_vulnerabilities[]`, `grade.rows[].findings[]` and the stored analysis), for a reader that keeps findings without the scan
+header: `true` when the called pass covered it, so its tier is govulncheck's verdict on the call path (an `imported` finding was
+checked and is not called), `false` when the called pass was skipped (an `imported` finding may be called) or the finding did
+not come from govulncheck (the module's own advisories). It is context only: the score does not read it. An analysis stored by
+v0.9.0, before findings carried it, is graded with every finding checked when its `scan.called_pass` is `ran`. The imported pass does not type-check the packages (the called pass does), so a module whose packages do not compile is not a
 failed scan when the called pass is skipped: nothing it imports could change the letter, and the grade is given from the imports. If
 the called pass is needed and fails, the scan fails as before (`Pending`, with the typed reason). `--called-pass always` runs it on
 every scan (the previous behaviour); `never` runs the imported

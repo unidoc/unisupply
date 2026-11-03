@@ -155,6 +155,27 @@ func TestImportedCodeAloneCannotReachD(t *testing.T) {
 	}
 }
 
+// call_path_checked is carried to the graded finding, is in the JSON on every finding (false included), and is context
+// only: the same findings score the same with and without it.
+func TestFindingResult_CallPathChecked(t *testing.T) {
+	imported := Finding{ID: "I", Module: "example.com/x", Severity: "MEDIUM", Reachability: "imported", FixedVersion: "v9.9.9"}
+	checked := imported
+	checked.CallPathChecked = true
+	a := run(Input{Self: self(), Deps: []Row{dep("example.com/x", imported)}})
+	b := run(Input{Self: self(), Deps: []Row{dep("example.com/x", checked)}})
+	fa, fb := row(t, a, "example.com/x").Findings, row(t, b, "example.com/x").Findings
+	if len(fa) != 1 || len(fb) != 1 || fa[0].CallPathChecked || !fb[0].CallPathChecked {
+		t.Fatalf("findings %+v and %+v", fa, fb)
+	}
+	if a.Letter != b.Letter || a.Score != b.Score || fa[0].Score != fb[0].Score {
+		t.Errorf("call_path_checked changed the grade: %s %d and %s %d", a.Letter, a.Score, b.Letter, b.Score)
+	}
+	raw, err := json.Marshal(fa[0])
+	if err != nil || !strings.Contains(string(raw), `"call_path_checked":false`) {
+		t.Errorf("JSON %s (%v), want call_path_checked present when false", raw, err)
+	}
+}
+
 func TestCalledFindingsScore(t *testing.T) {
 	for _, c := range []struct {
 		sev   string

@@ -284,7 +284,20 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 	if scanErr != nil {
 		return results, warnings, false, scanErr
 	}
+	if level == scanLevelSymbol {
+		MarkCallPathChecked(results)
+	}
 	return results, warnings, true, nil
+}
+
+// MarkCallPathChecked sets CallPathChecked on every finding: they come from a finished called pass, so each one's tier is
+// govulncheck's verdict on its call path.
+func MarkCallPathChecked(vulns map[string][]Vulnerability) {
+	for _, vs := range vulns {
+		for i := range vs {
+			vs[i].CallPathChecked = true
+		}
+	}
 }
 
 // releaseMemory hands the heap govulncheck used back to the operating system now. It is a variable so tests can count calls.

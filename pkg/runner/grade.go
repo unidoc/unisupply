@@ -133,13 +133,14 @@ func findingsOf(module string, vulns []scanner.Vulnerability) []grade.Finding {
 // adjustments (EPSS, tier promotion) are not part of the v2 grade.
 func FindingFromVuln(module string, v *scanner.Vulnerability) grade.Finding {
 	return grade.Finding{
-		ID:           v.ID,
-		Aliases:      v.Aliases,
-		Module:       module,
-		Summary:      v.Summary,
-		Severity:     strings.ToUpper(v.Severity),
-		Reachability: v.Reachability,
-		Exploited:    v.InKEV,
+		ID:              v.ID,
+		Aliases:         v.Aliases,
+		Module:          module,
+		Summary:         v.Summary,
+		Severity:        strings.ToUpper(v.Severity),
+		Reachability:    v.Reachability,
+		CallPathChecked: v.CallPathChecked,
+		Exploited:       v.InKEV,
 		// a lookup that failed is a check that did not run (Pending), not an unpublished severity (an estimate)
 		SeverityLookupFailed: v.EnrichmentFailed && (strings.TrimSpace(v.Severity) == "" || strings.EqualFold(v.Severity, "UNKNOWN")),
 		FixedVersion:         v.FixedVersion,

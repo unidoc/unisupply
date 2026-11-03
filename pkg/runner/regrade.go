@@ -85,6 +85,10 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	}
 	// the analysis is read-only: grading changes fix dates and, from the facts, severities
 	vulns := cloneVulns(an.Vulns)
+	if scanInfo.CalledPass == scanner.CalledPassRan {
+		// an analysis stored before findings carried call_path_checked: every finding of a called pass was checked
+		scanner.MarkCallPathChecked(vulns)
+	}
 	fixOpts := scanner.FixDateOptions{Timeout: timeout, Now: func() time.Time { return scanStart }}
 	fr := &factReader{store: f, date: date, analysed: an.AnalysedAt}
 	// Private modules are the customer's own code: their paths are in no request and no facts store call.

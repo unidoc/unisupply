@@ -13,7 +13,7 @@ import (
 func findingResult(f *scored, r Row, in *Input) FindingResult {
 	fr := FindingResult{
 		ID: f.ID, Aliases: f.Aliases, Module: f.Module, Severity: f.sev, Estimated: f.estimated, Tier: f.tier, TierAssumed: f.assumed,
-		Score: f.score, Counted: f.tier != TierGraphOnly, Exploited: f.Exploited, FixedVersion: f.FixedVersion,
+		CallPathChecked: f.CallPathChecked, Score: f.score, Counted: f.tier != TierGraphOnly, Exploited: f.Exploited, FixedVersion: f.FixedVersion,
 		AffectedPackages: f.AffectedPackages, Condition: f.Condition, VEX: vexFor(f.tier),
 	}
 	if fr.Module == "" {
