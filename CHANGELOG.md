@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### Bug Fixes
+
+- **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none` (or
+  `GONOSUMDB=none`), the setup `go help private` documents for a proxy that also serves the private modules, the CLI
+  appended the list and made it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a
+  runner that reaches private code only through the proxy the download failed and the scan exited 4. `none` is now left as
+  it is; a `GONOPROXY` or `GONOSUMDB` that holds a list still gets the patterns added (#169).
+
 ## [0.9.0] - 2026-10-29
 
 Service release. One run now gives everything a service needs: the dependency

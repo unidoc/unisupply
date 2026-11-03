@@ -88,7 +88,7 @@ A module matched by the private patterns is the customer's own code, and its nam
 Go's `GOPRIVATE` syntax (comma-separated globs, matched with `module.MatchPrefixPatterns`: `acme.example` matches
 `acme.example/x` but not `acme.example.evil.com/x`). unisupply reads `GOPRIVATE` and `GONOPROXY` from the environment; the
 option `runner.Options.PrivatePatterns` and the flag `--private-modules` (a comma list) replace them when set. The CLI also adds the `--private-modules` list to `GOPRIVATE` (and to
-`GONOPROXY`/`GONOSUMDB` when the environment sets them) for the go command it starts, so it does not ask the module proxy or the
+`GONOPROXY`/`GONOSUMDB` when the environment sets them to a list; `none` is left as it is) for the go command it starts, so it does not ask the module proxy or the
 checksum database for those paths either. A library caller puts the same list in `GOPRIVATE` itself.
 
 - **A private module path is in no request to any host and no facts-store call**: not the module proxy, not GitHub, not the Trust

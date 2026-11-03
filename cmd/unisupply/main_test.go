@@ -842,6 +842,19 @@ func TestExportPrivateToGoEnv(t *testing.T) {
 	if got := os.Getenv("GONOPROXY"); got != "git.example,acme.example" {
 		t.Errorf("GONOPROXY = %q", got)
 	}
+
+	// "none" routes every module through the user's own proxy and checksum database (go help private), private ones
+	// included: appending the list would send those modules around them
+	t.Setenv("GOPRIVATE", "acme.example")
+	t.Setenv("GONOPROXY", "none")
+	t.Setenv("GONOSUMDB", " none ")
+	exportPrivateToGoEnv([]string{"acme.example"})
+	if got := os.Getenv("GONOPROXY"); got != "none" {
+		t.Errorf("GONOPROXY = %q, want none", got)
+	}
+	if got := os.Getenv("GONOSUMDB"); got != " none " {
+		t.Errorf("GONOSUMDB = %q, want it left as set", got)
+	}
 }
 
 func TestSameOutputFile(t *testing.T) {
