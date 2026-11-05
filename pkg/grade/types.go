@@ -66,6 +66,10 @@ type Finding struct {
 	// Reachability is govulncheck's verdict: "called", "imported", "required" (graph-only) or "" (not determined, which
 	// is scored as called: the worst case, never a free pass).
 	Reachability string
+	// CallPathChecked is true when govulncheck's called pass covered the finding, so Reachability is its verdict on the
+	// call path; false when the called pass was skipped (an "imported" finding may then be called) or the finding did not
+	// come from govulncheck. Context only: the score does not read it.
+	CallPathChecked bool
 
 	// SeverityLookupFailed is true when the severity is unknown because the lookup FAILED (OSV, NVD and GitHub could not be
 	// reached or rate-limited), not because nobody has published one. A failed lookup is a check that did not run: when the
@@ -250,6 +254,7 @@ type FindingResult struct {
 	Estimated        bool      `json:"estimated,omitempty"`
 	Tier             string    `json:"tier"`
 	TierAssumed      bool      `json:"tier_assumed,omitempty"` // reachability was not determined and is scored as called
+	CallPathChecked  bool      `json:"call_path_checked"`      // govulncheck's called pass covered it (Finding.CallPathChecked)
 	Score            int       `json:"score"`                  // the table value; 0 for a graph-only finding
 	Counted          bool      `json:"counted"`                // false = shown, not graded
 	Exploited        bool      `json:"exploited,omitempty"`

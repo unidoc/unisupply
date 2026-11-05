@@ -246,7 +246,7 @@ func TestWriteJSON_NewVulnFields(t *testing.T) {
 	released := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	full := plainDep()
 	full.Vulns = []scanner.Vulnerability{{
-		ID: "GO-2024-1", Severity: "HIGH", Reachability: "called",
+		ID: "GO-2024-1", Severity: "HIGH", Reachability: "called", CallPathChecked: true,
 		FixReleasedAt:    &released,
 		FixDateSource:    "module_proxy",
 		AffectedPackages: []string{"github.com/x/y/parse", "github.com/x/y/render"},
@@ -281,8 +281,15 @@ func TestWriteJSON_NewVulnFields(t *testing.T) {
 	if string(k["condition"]) != `"reached through yaml.Unmarshal"` {
 		t.Errorf("condition = %s", k["condition"])
 	}
+	if string(k["call_path_checked"]) != `true` {
+		t.Errorf("call_path_checked = %s", k["call_path_checked"])
+	}
 
 	k = vulnKeys(gradeTestScore(empty))
+	// on every finding, so a reader that stores findings without the scan header still sees an unchecked one
+	if string(k["call_path_checked"]) != `false` {
+		t.Errorf("call_path_checked = %s, want false present", k["call_path_checked"])
+	}
 	for _, key := range []string{"fix_released_at", "fix_date_source", "affected_packages", "condition"} {
 		if _, ok := k[key]; ok {
 			t.Errorf("%q emitted although empty", key)

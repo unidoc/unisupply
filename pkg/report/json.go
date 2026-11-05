@@ -183,6 +183,10 @@ type JSONVuln struct {
 	FixPublishedAt      *time.Time `json:"fix_published_at,omitempty"`
 	DaysUnpatched       int        `json:"days_unpatched,omitempty"`
 	Reachability        string     `json:"reachability,omitempty"`
+	// CallPathChecked is true when govulncheck's called pass covered the finding, so Reachability is its verdict on the
+	// call path; false when only the imported pass ran (scan.called_pass "skipped": an "imported" finding may then be
+	// called) or the finding did not come from govulncheck.
+	CallPathChecked bool `json:"call_path_checked"`
 	// CallPath is one example of how the project reaches the vulnerable
 	// function (outermost frame first). Set only when Reachability is "called".
 	// Static-analysis evidence of reachability, not proof of exploitability.
@@ -412,6 +416,7 @@ func toJSONVuln(v *scanner.Vulnerability) JSONVuln {
 		FixPublishedAt:      v.FixPublishedAt,
 		DaysUnpatched:       v.DaysUnpatched,
 		Reachability:        v.Reachability,
+		CallPathChecked:     v.CallPathChecked,
 		CallPath:            v.CallPath,
 		CallTrace:           v.CallTrace,
 		CalledSymbols:       v.CalledSymbols,

@@ -7,6 +7,29 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- Add new entries here as they land on `development`. -->
 
+### New Features
+
+#### Each finding says whether its call path was checked
+
+- **`call_path_checked`** (bool, on every finding) says whether govulncheck's called pass covered it: `true` means the tier
+  is govulncheck's verdict on the call path (an `imported` finding was checked and is not called), `false` means the called
+  pass was skipped (`--called-pass auto` or `never`; an `imported` finding may be called) or the finding did not come from
+  govulncheck. It is in `dependencies[].vulnerabilities[]`, `stdlib_vulnerabilities[]`, `grade.rows[].findings[]` and the
+  stored analysis (`--analysis-out`), so a reader that stores findings without the scan header does not have to carry
+  `scan.called_pass` beside each one. It is context only and does not change the grade. In Go:
+  `scanner.Vulnerability.CallPathChecked`, `grade.Finding.CallPathChecked` and `grade.FindingResult.CallPathChecked`.
+- **A stored analysis made by v0.9.0** has no `call_path_checked` on its findings; `runner.Grade` marks every finding checked
+  when its `scan.called_pass` is `ran` (#169).
+
+### Bug Fixes
+
+- **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none`, the
+  setup `go help private` documents for a proxy that also serves the private modules, the CLI appended the list and made
+  it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a runner that reaches
+  private code only through the proxy the download failed and the scan exited 4. `GONOPROXY=none` is now left as it is; a
+  `GONOPROXY` that holds a list still gets the patterns added. `GONOSUMDB` is unchanged: when set, `none` included, it
+  gets the patterns, so the checksum database is not asked about the private paths (#169).
+
 ## [0.9.0] - 2026-10-29
 
 Service release. One run now gives everything a service needs: the dependency

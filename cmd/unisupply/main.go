@@ -465,7 +465,7 @@ func sameOutputFile(a, b string) bool {
 // exportPrivateToGoEnv gives the go command the private patterns of --private-modules, next to what GOPRIVATE already holds.
 // It starts go mod graph, go list, go mod verify and govulncheck's package loader, and reads GOPRIVATE for them: a cold module
 // cache would otherwise send a private path to GOPROXY. GONOPROXY and GONOSUMDB, when set, take precedence over GOPRIVATE
-// for their own purpose, so they get the list too. Nothing to do for no patterns.
+// for their own purpose, so they get the list too, except GONOPROXY set to "none". Nothing to do for no patterns.
 func exportPrivateToGoEnv(patterns []string) {
 	list := strings.Join(patterns, ",")
 	if strings.TrimSpace(list) == "" {
@@ -473,8 +473,17 @@ func exportPrivateToGoEnv(patterns []string) {
 	}
 	for _, name := range []string{"GOPRIVATE", "GONOPROXY", "GONOSUMDB"} {
 		have := strings.TrimSpace(os.Getenv(name))
-		// GOPRIVATE is always set; the other two only when the caller already narrowed them, since an unset one follows GOPRIVATE
-		if have == "" && name != "GOPRIVATE" {
+		// GOPRIVATE is always set; the other two only when the caller already narrowed them, since an unset one follows
+		// GOPRIVATE.
+		if name != "GOPRIVATE" && have == "" {
+			continue
+		}
+		// GONOPROXY=none is go help private's setup for a company proxy that also serves the private modules; appending
+		// the list would fetch them from their VCS around that proxy, and fail where only the proxy reaches them. The go
+		// command has no special case for "none" (it is a pattern that matches no module), so GONOSUMDB=none still gets the
+		// list: appending only skips the checksum database for those paths, while leaving it would send them to GOSUMDB,
+		// the public sum.golang.org unless the user set their own.
+		if name == "GONOPROXY" && have == "none" {
 			continue
 		}
 		if have != "" {

@@ -17,6 +17,8 @@ type fakeGovulncheck struct {
 	severity string
 	levels   []string
 	failAt   string // a level that fails
+	// notCalled makes the symbol-level pass report the package as imported but its vulnerable function as not called
+	notCalled bool
 }
 
 func (f *fakeGovulncheck) run(_ context.Context, _ []string, _, level string, stdout, _ io.Writer) error {
@@ -26,7 +28,7 @@ func (f *fakeGovulncheck) run(_ context.Context, _ []string, _, level string, st
 	}
 	fmt.Fprintf(stdout, `{"osv":{"id":"GO-2026-0001","summary":"s","affected":[{"package":{"name":"example.com/dep","ecosystem":"Go"},"database_specific":{"severity":%q},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"v1.2.0"}]}]}]}}`+"\n", f.severity)
 	trace := `{"module":"example.com/dep","version":"v1.1.0","package":"example.com/dep/p"}`
-	if level == scanLevelSymbol {
+	if level == scanLevelSymbol && !f.notCalled {
 		trace = `{"module":"example.com/dep","version":"v1.1.0","package":"example.com/dep/p","function":"Do","position":{"filename":"p.go","line":3,"column":1}},{"module":"example.com/app","package":"example.com/app","function":"main","position":{"filename":"main.go","line":5,"column":2}}`
 	}
 	fmt.Fprintf(stdout, `{"finding":{"osv":"GO-2026-0001","trace":[%s]}}`+"\n", trace)
@@ -124,6 +126,56 @@ func TestCalledPass_AlwaysAndNever(t *testing.T) {
 	vulns, _, _, _, info, _ = scanWithFake(t, f, VulnScanOptions{CalledPass: CalledPassNever})
 	if strings.Join(f.levels, ",") != "package" || reachOf(vulns) != "imported" || info.CalledPass != CalledPassSkipped || !strings.Contains(info.CalledPassReason, "turned off") {
 		t.Errorf("never: levels %v, %q, %+v", f.levels, reachOf(vulns), info)
+	}
+}
+
+func checkedOf(vulns map[string][]Vulnerability) (checked, total int) {
+	for _, vs := range vulns {
+		for _, v := range vs {
+			total++
+			if v.CallPathChecked {
+				checked++
+			}
+		}
+	}
+	return checked, total
+}
+
+// call_path_checked is true exactly when the findings come from a finished called pass: an imported finding of a skipped
+// called pass may still be called, while one the called pass left at imported is govulncheck's verdict.
+func TestCalledPass_CallPathChecked(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fake fakeGovulncheck
+		opts VulnScanOptions
+		want bool
+	}{
+		{"auto, skipped", fakeGovulncheck{severity: "LOW"}, VulnScanOptions{NeedsCalledPass: func(map[string][]Vulnerability) (bool, string) { return false, "low" }}, false},
+		{"auto, ran", fakeGovulncheck{severity: "HIGH"}, VulnScanOptions{NeedsCalledPass: func(map[string][]Vulnerability) (bool, string) { return true, "high" }}, true},
+		{"auto, ran, not called", fakeGovulncheck{severity: "HIGH", notCalled: true}, VulnScanOptions{NeedsCalledPass: func(map[string][]Vulnerability) (bool, string) { return true, "high" }}, true},
+		{"always", fakeGovulncheck{severity: "LOW"}, VulnScanOptions{CalledPass: CalledPassAlways}, true},
+		{"never", fakeGovulncheck{severity: "CRITICAL"}, VulnScanOptions{CalledPass: CalledPassNever}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := c.fake
+			if c.opts.NeedsCalledPass != nil {
+				needs := c.opts.NeedsCalledPass
+				c.opts.NeedsCalledPass = func(m map[string][]Vulnerability) (bool, string) {
+					if n, _ := checkedOf(m); n != 0 {
+						t.Error("the imported pass's findings must not read as checked")
+					}
+					return needs(m)
+				}
+			}
+			vulns, _, scanned, err, _, _ := scanWithFake(t, &f, c.opts)
+			if err != nil || !scanned {
+				t.Fatalf("scanned=%v err=%v", scanned, err)
+			}
+			checked, total := checkedOf(vulns)
+			if total == 0 || (checked == total) != c.want || (checked == 0) == c.want {
+				t.Errorf("%d of %d findings checked (reachability %q), want all %v", checked, total, reachOf(vulns), c.want)
+			}
+		})
 	}
 }
 

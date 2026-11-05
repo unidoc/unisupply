@@ -57,6 +57,11 @@ type Vulnerability struct {
 	// See the type-level doc comment for full semantics and caveats.
 	Reachability string `json:"reachability,omitempty"`
 
+	// CallPathChecked is true when the finding comes from govulncheck's called pass (symbol level), so Reachability is
+	// its verdict on the call path. It is false when only the imported pass ran (ScanInfo.CalledPass "skipped"): an
+	// "imported" finding may then be called, unchecked. Also false for a finding that govulncheck did not produce.
+	CallPathChecked bool `json:"call_path_checked"`
+
 	// CallPath is one example of how the project reaches the vulnerable
 	// function, outermost frame first, e.g. "example.com/app/cmd/app.main",
 	// "github.com/go-git/go-git/v5.Repository.Push", "golang.org/x/crypto/ssh.NewClientConn".
