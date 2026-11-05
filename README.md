@@ -186,6 +186,7 @@ are shown as data, and a called finding on the KEV list grades F — see
       "severity": "HIGH",
       "fixed_version": "v0.36.0",
       "reachability": "called",
+      "call_path_checked": true,
       "call_path": [
         "example.com/app/cmd/app.main",
         "golang.org/x/net/http2.Server.ServeConn"
@@ -223,6 +224,7 @@ are shown as data, and a called finding on the KEV list grades F — see
       "severity": "MEDIUM",
       "fixed_version": "v0.36.0",
       "reachability": "imported",
+      "call_path_checked": true,
       "epss_score": 0.004,
       "epss_percentile": 0.31,
       "epss_date": "2026-07-10",
@@ -233,12 +235,16 @@ are shown as data, and a called finding on the KEV list grades F — see
 ```
 
 Absent `reachability` on a non-govulncheck finding is treated as `"called"`.
+`call_path_checked` is on every finding: `true` when govulncheck's called pass covered it, so an `"imported"` finding was
+checked and is not called; `false` when that pass was skipped (`scan.called_pass` is `"skipped"`, with `--called-pass
+never` or when `auto` finds it cannot change the letter; an `"imported"` finding may then be called) or the finding did
+not come from govulncheck. It does not change the grade.
 
 Vulnerabilities in the Go standard library of the project's toolchain are not
 attached to a dependency. They appear in a top-level `stdlib_vulnerabilities`
 array after `dependencies`, sorted by advisory ID and omitted when there are
 none. Each entry has the same fields as a dependency vulnerability above
-(including `reachability`, `call_path`, `call_trace` and `called_symbols`)
+(including `reachability`, `call_path_checked`, `call_path`, `call_trace` and `called_symbols`).
 They are graded as a row named `stdlib` and are not counted in `summary`.
 
 `call_path` is present only when `reachability` is `"called"`: one example of how the project reaches the vulnerable function, outermost frame first, condensed to the entry frame, the frame where each package hands over to the next, and the vulnerable function (at most 8 entries; `"..."` marks a cut). Consecutive entries are not necessarily direct callers. It is evidence that the code is on an execution path, not proof that the vulnerability is exploitable.

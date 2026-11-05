@@ -23,11 +23,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
-- **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none` (or
-  `GONOSUMDB=none`), the setup `go help private` documents for a proxy that also serves the private modules, the CLI
-  appended the list and made it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a
-  runner that reaches private code only through the proxy the download failed and the scan exited 4. `none` is now left as
-  it is; a `GONOPROXY` or `GONOSUMDB` that holds a list still gets the patterns added (#169).
+- **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none`, the
+  setup `go help private` documents for a proxy that also serves the private modules, the CLI appended the list and made
+  it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a runner that reaches
+  private code only through the proxy the download failed and the scan exited 4. `GONOPROXY=none` is now left as it is; a
+  `GONOPROXY` that holds a list still gets the patterns added. `GONOSUMDB` is unchanged: when set, `none` included, it
+  gets the patterns, so the checksum database is not asked about the private paths (#169).
 
 ## [0.9.0] - 2026-10-29
 

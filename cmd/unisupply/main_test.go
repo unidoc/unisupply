@@ -843,17 +843,26 @@ func TestExportPrivateToGoEnv(t *testing.T) {
 		t.Errorf("GONOPROXY = %q", got)
 	}
 
-	// "none" routes every module through the user's own proxy and checksum database (go help private), private ones
-	// included: appending the list would send those modules around them
+	// a narrowed GONOSUMDB gets the list as well
+	t.Setenv("GONOPROXY", "")
+	t.Setenv("GONOSUMDB", "git.example")
+	exportPrivateToGoEnv([]string{"acme.example"})
+	if got := os.Getenv("GONOSUMDB"); got != "git.example,acme.example" {
+		t.Errorf("GONOSUMDB = %q", got)
+	}
+
+	// GONOPROXY=none sends every module through the company proxy (go help private), private ones included: appending
+	// the list would fetch those modules around it. GONOSUMDB=none has no such reading in the go command ("none" is a
+	// pattern that matches nothing), and leaving it would send the private paths to GOSUMDB, so it gets the list.
 	t.Setenv("GOPRIVATE", "acme.example")
-	t.Setenv("GONOPROXY", "none")
+	t.Setenv("GONOPROXY", " none ")
 	t.Setenv("GONOSUMDB", " none ")
 	exportPrivateToGoEnv([]string{"acme.example"})
-	if got := os.Getenv("GONOPROXY"); got != "none" {
-		t.Errorf("GONOPROXY = %q, want none", got)
+	if got := os.Getenv("GONOPROXY"); got != " none " {
+		t.Errorf("GONOPROXY = %q, want it left as set", got)
 	}
-	if got := os.Getenv("GONOSUMDB"); got != " none " {
-		t.Errorf("GONOSUMDB = %q, want it left as set", got)
+	if got := os.Getenv("GONOSUMDB"); got != "none,acme.example" {
+		t.Errorf("GONOSUMDB = %q, want none,acme.example", got)
 	}
 }
 
