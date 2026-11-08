@@ -20,9 +20,9 @@ type ScanInfo struct {
 	// against. When govulncheck's output does not say (it failed before reporting, or an old version) the runner fills in the
 	// release it gave govulncheck as GOVERSION.
 	GoVersion string `json:"go_version,omitempty"`
-	// GovulncheckVersion is the version of golang.org/x/vuln linked into this binary (govulncheck runs in-process), read
-	// from the build info. Empty when the build info does not list it. It is NOT govulncheck's own scanner_version: that
-	// is the version of the binary that embeds it, which is unisupply.
+	// GovulncheckVersion is the version of golang.org/x/vuln linked into this binary (the child process is the same
+	// binary, so it links the same version), read from the build info. Empty when the build info does not list it. It is
+	// NOT govulncheck's own scanner_version: that is the version of the binary that embeds it, which is unisupply.
 	GovulncheckVersion string `json:"govulncheck_version,omitempty"`
 	// VulnDB is the vulnerability database govulncheck read (its URL).
 	VulnDB string `json:"vuln_db,omitempty"`

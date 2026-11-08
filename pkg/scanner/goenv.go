@@ -51,7 +51,8 @@ func resolveGoEnv(ctx context.Context, dir string) (goEnv, error) {
 	return goEnv{version: env.GoVersion, root: env.GoRoot, cgo: env.CgoEnabled, modCache: env.ModCache}, nil
 }
 
-// govulncheckEnv returns the environment for the in-process govulncheck run:
+// govulncheckEnv returns the environment for the govulncheck run, in either mode
+// (in the child process it is the child's environment, plus the marker):
 // a copy of base with GOVERSION set to goVersion. govulncheck reads GOVERSION
 // from this environment before it would exec `go env` in the process working
 // directory, so setting it makes standard-library matching follow the project's

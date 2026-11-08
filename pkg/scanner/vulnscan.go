@@ -90,11 +90,14 @@ const (
 // result replaces the first. The loaded packages and call graph of each pass are released before the next network step.
 func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanOptions) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
-		// govulncheck runs in-process and reaches vuln.go.dev through
-		// http.DefaultClient, so offline mode would refuse its requests and
-		// leave a transport error dressed up as a scan failure. Skip it
-		// outright and say why: an empty vulnerability set with no explanation
-		// reads as "no vulnerabilities found", which is the one wrong answer.
+		// govulncheck reaches vuln.go.dev through http.DefaultClient. In-process,
+		// offline mode would refuse its requests and leave a transport error
+		// dressed up as a scan failure. In the child process nothing refuses
+		// them: the child never installs offline's transport, so this skip is
+		// the only thing that keeps --offline from reaching vuln.go.dev. Skip
+		// the scan outright and say why: an empty vulnerability set with no
+		// explanation reads as "no vulnerabilities found", which is the one
+		// wrong answer.
 		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, false, nil
 	}
 
