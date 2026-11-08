@@ -327,6 +327,11 @@ type DebugPerDepInput struct {
 
 // ScoreInput bundles all scan results for scoring.
 type ScoreInput struct {
+	// GitHubAuthenticated is true when the GitHub requests carried a token that
+	// GitHub accepted. It only picks the words of the maintainer-data warning;
+	// false, the zero value, keeps the unauthenticated wording.
+	GitHubAuthenticated bool
+
 	Graph       *resolver.Graph
 	Vulns       map[string][]scanner.Vulnerability
 	Maintenance map[string]*scanner.MaintenanceInfo
@@ -474,7 +479,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// Name the actual cause. Offline is not a rate-limit problem, and telling an
 	// air-gapped user their token is missing sends them after a fix that cannot
 	// work.
-	cause := maintainerUnavailableCause(maintainerUnavailable, maintainerErrored)
+	cause := maintainerUnavailableCause(maintainerUnavailable, maintainerErrored, input.GitHubAuthenticated)
 	// prefix applies to the proxy-sourced axes below. Only the maintainer axis
 	// reads the GitHub API, so `cause` must not be reused for the others —
 	// naming the wrong service sends the user after a fix that cannot work, the
@@ -2087,13 +2092,17 @@ func buildDebugScoring(ps *ProjectScore, sev *severityAdjustedResult) *DebugScor
 }
 
 // maintainerUnavailableCause names why maintainer data is missing, from the
-// per-module MaintainerInfo.UnavailableReason. errored of unavailable modules
-// failed with an API error (scanner.UnavailableAPIError); the rest were
-// rate-limited or carry no reason, which is the unauthenticated case this
-// warning has always described. Naming an API error as "unauthenticated" sends
-// a user who did set a token after a fix that cannot work.
-func maintainerUnavailableCause(unavailable, errored int) string {
+// per-module MaintainerInfo.UnavailableReason and from whether the scan used a
+// token. errored of unavailable modules failed with an API error
+// (scanner.UnavailableAPIError); the rest were rate-limited or carry no
+// reason. For those, a scan without a token is "unauthenticated", the case
+// this warning has always described, and a scan with one is "rate-limited":
+// telling a user who did set a token to set one sends them after a fix that
+// cannot work. The same goes for naming an API error as "unauthenticated".
+func maintainerUnavailableCause(unavailable, errored int, authenticated bool) string {
 	switch {
+	case errored == 0 && authenticated:
+		return "GitHub API rate-limited"
 	case errored == 0:
 		return "GitHub API unauthenticated"
 	case errored == unavailable:

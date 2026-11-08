@@ -33,6 +33,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that GitHub refused this way (a 403 with `Retry-After`, `X-RateLimit-Remaining` above 0) used to read as a plain API error;
   its `unavailable_reason` is now `rate_limited` where it was `github_api_error`. The rate-limit warning also gives the wait
   from `Retry-After` when `X-RateLimit-Reset` is missing (#145).
+- **A scan that used a GitHub token and was rate-limited no longer says it was unauthenticated.** The warning now reads
+  "GitHub API rate-limited — maintainer data unavailable for N module(s)" for such a scan, instead of telling a user who set
+  a token to set one. A scan without a token, or with one GitHub rejected (401), keeps the "GitHub API unauthenticated"
+  wording. `scorer.ScoreInput` gains `GitHubAuthenticated` (the zero value keeps the old wording) (#145).
 
 ## [0.9.0] - 2026-10-29
 

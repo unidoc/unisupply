@@ -234,7 +234,7 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 	}
 
 	rep.Stage("Computing risk scores")
-	projectScore := scorer.ScoreAll(scorer.ScoreInput{
+	projectScore := scoreAll(scorer.ScoreInput{
 		Graph:         graph,
 		Vulns:         vulns,
 		Maintenance:   maintenance,
@@ -247,6 +247,9 @@ func gradeAnalysis(ctx context.Context, an *Analysis, st *analysisState, f facts
 		GoSumMismatch: integrityReport.GoSumVerified == scanner.GoSumVerifiedFalse,
 
 		VulnScanUnavailable: vulnScanUnavailable,
+
+		// the token the scanners used: a rejected one was cleared above
+		GitHubAuthenticated: githubToken != "",
 
 		Now: scanStart,
 	})
