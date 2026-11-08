@@ -43,6 +43,9 @@ var errScanFailed = errors.New("scan failed")
 var errTokenPrecondition = runner.ErrGithubTokenPrecondition
 
 func main() {
+	// When started as the govulncheck child of a scan this runs govulncheck and exits; it must come before anything else.
+	scanner.RunVulnChildIfRequested()
+
 	var (
 		format                 string
 		output                 string
