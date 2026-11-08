@@ -18,12 +18,18 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/vuln/scan"
+
+	"github.com/unidoc/unisupply/pkg/netlog"
 )
 
 // vulnChildEnv is the environment variable that makes an executable run as the govulncheck child: it is set to "1" in
 // the environment of the child that runGovulncheckChild starts. The marker is an environment variable and not an
 // argument, so that the arguments of a host program are never read differently.
 const vulnChildEnv = "UNISUPPLY_GOVULNCHECK_CHILD"
+
+// vulnChildNetlogEnv is set to "1", next to vulnChildEnv, when the parent has --network-log on: the child then logs its
+// own requests (govulncheck's, to vuln.go.dev) to its stderr, and the parent forwards the lines to its own log.
+const vulnChildNetlogEnv = "UNISUPPLY_GOVULNCHECK_CHILD_NETLOG"
 
 const (
 	// childWaitDelay bounds how long Wait lingers on the child's output pipes after the child is gone or killed:
@@ -44,8 +50,11 @@ const (
 var vulnChildCapable atomic.Bool
 
 // vulnChildNetHook receives the network-log lines (those that start with "NET ") of the child's stderr. They never
-// reach the failure message.
-var vulnChildNetHook = func(line string) {}
+// reach the failure message. By default they join this process's network log.
+var vulnChildNetHook = netlog.Line
+
+// vulnChildExecutable is the program that serves as the child. It is a variable so tests can point it somewhere else.
+var vulnChildExecutable = os.Executable
 
 // vulnChildBody is what the child runs: govulncheck, in this process, with the given arguments. It is a variable so
 // that tests can swap it for a fake that blocks, panics or fails.
@@ -70,7 +79,11 @@ var vulnChildBody = func(args []string) error {
 // govulncheck then runs in a child process of the same executable. A scan that is cancelled while govulncheck builds
 // its call graph makes govulncheck panic in a goroutine of its own, which nothing in the scanning process can recover:
 // in a child process that panic ends the child, and the scan returns a typed *ScanError instead of the host dying.
-// An executable that does not call it runs govulncheck in its own process, as before.
+// A program that does not call it runs govulncheck in its own process, where a scan that is cancelled at the wrong
+// moment can still crash it.
+//
+// The child is the same executable started again, so the package init functions of the host run in the child too:
+// they must not start servers or open connections as a side effect.
 func RunVulnChildIfRequested() {
 	if os.Getenv(vulnChildEnv) != "1" {
 		vulnChildCapable.Store(true)
@@ -91,7 +104,12 @@ func runVulnChild() int {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		os.Exit(1)
 	}()
+	if os.Getenv(vulnChildNetlogEnv) == "1" {
+		// The parent logs the requests of its scan: log ours the same way, on stderr, where the parent reads them.
+		netlog.Enable(os.Stderr)
+	}
 	_ = os.Unsetenv(vulnChildEnv)
+	_ = os.Unsetenv(vulnChildNetlogEnv)
 	if err := vulnChildBody(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		return 1
@@ -127,7 +145,7 @@ func (e *childCrashError) Error() string {
 // error. A context that ends kills the child and gives back the context's error, like the in-process run does for a
 // context that has ended; a child that panicked or was killed gives a *childCrashError.
 func runGovulncheckChild(ctx context.Context, env []string, dir, level string, stdout, _ io.Writer) error {
-	exe, err := os.Executable()
+	exe, err := vulnChildExecutable()
 	if err != nil {
 		return fmt.Errorf("starting govulncheck: %w", err)
 	}
@@ -143,6 +161,9 @@ func runGovulncheckChild(ctx context.Context, env []string, dir, level string, s
 	stderr := &childStderr{net: vulnChildNetHook}
 	cmd := exec.CommandContext(ctx, exe, "-json", "-scan", level, "-C", dir, "./...")
 	cmd.Env = append(slices.Clone(env), vulnChildEnv+"=1")
+	if netlog.Enabled() {
+		cmd.Env = append(cmd.Env, vulnChildNetlogEnv+"=1")
+	}
 	cmd.Stdin = stdinR
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

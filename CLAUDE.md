@@ -59,7 +59,7 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   `--grade-stdlib`; a failed scan is Pending only with it). `StdlibScanned` follows the scan outcome. The scan runs through
   the `scanVulns` seam in `pkg/runner` (tests stub it). `scan.govulncheck_version` is `golang.org/x/vuln`'s version from the
   build info, never unisupply's own.
-- **Toolchain check**: govulncheck runs in-process with the Go unisupply was built with. `scanner.CheckToolchain(scanGo)`
+- **Toolchain check**: govulncheck runs in a child process of the unisupply binary (in-process for a library host that does not call `scanner.RunVulnChildIfRequested`), so with the Go unisupply was built with. `scanner.CheckToolchain(scanGo)`
   (exported; gorisk calls it at startup) returns "this unisupply was built with go1.26.9 and cannot scan code that needs
   go1.27; rebuild unisupply with go1.27 or newer" when `scanGo` is a newer Go minor (language) version (patch and rc releases of the same minor pass; compared with `go/version`, so rc and beta forms
   order correctly). `ScanVulnsWithOptions` runs it on the project's resolved Go before starting, and rewrites the loader's "file

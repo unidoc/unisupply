@@ -1,22 +1,31 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/unidoc/unisupply/pkg/netlog"
 )
 
 // fakeChildEnv names the fake that a test binary started as the govulncheck child runs in place of govulncheck (see
 // TestMain). The child is the real test binary started again, so every test here exercises a real process.
 const fakeChildEnv = "UNISUPPLY_TEST_FAKE_CHILD"
+
+// fakeChildURLEnv carries the URL that the "http" fake requests.
+const fakeChildURLEnv = "UNISUPPLY_TEST_FAKE_CHILD_URL"
 
 // A govulncheck error text that scanFailureRules classify: the same text must give the same result in a child and in
 // this process.
@@ -38,6 +47,15 @@ func fakeChildBody(mode string) func([]string) error {
 			time.Sleep(time.Hour)
 		case "error":
 			return errors.New(childMultipleMains)
+		case "http":
+			// a request to the URL the test serves: with the netlog marker it is logged to stderr as a NET line
+			resp, err := http.Get(os.Getenv(fakeChildURLEnv))
+			if err == nil {
+				resp.Body.Close()
+			}
+			return errors.New("govulncheck: no packages matched the provided patterns")
+		case "netlogstate":
+			return fmt.Errorf("govulncheck: no packages matched the provided patterns (netlog=%v marker=%q)", netlog.Enabled(), os.Getenv(vulnChildNetlogEnv))
 		case "net":
 			fmt.Fprintln(os.Stderr, "NET GET vuln.go.dev /index/db.json.gz 200 12ms")
 			return errors.New("govulncheck: no packages matched the provided patterns")
@@ -63,6 +81,14 @@ func passWithChild(t *testing.T, ctx context.Context, mode string) (warnings []s
 		t.Fatal("a failed child must not be a finished scan")
 	}
 	return warnings, err, freed
+}
+
+// passWithEnv is passWithChild with more environment for the child.
+func passWithEnv(t *testing.T, mode string, extra ...string) ([]string, error) {
+	t.Helper()
+	r := &govulncheckRun{projectDir: t.TempDir(), env: append(append(os.Environ(), fakeChildEnv+"="+mode), extra...)}
+	_, warnings, _, err := r.pass(context.Background(), scanLevelPackage, nil)
+	return warnings, err
 }
 
 func asScanError(t *testing.T, err error) *ScanError {
@@ -265,5 +291,74 @@ func TestChildStderr_SplitsAndBounds(t *testing.T) {
 	tail := s.tailText()
 	if len(tail) > childTailMax || !strings.HasSuffix(tail, "last without newline\n") || strings.Contains(tail, "NET ") || strings.HasPrefix(tail, "ine ") {
 		t.Errorf("tail len %d, starts %q, ends %q", len(tail), tail[:10], tail[len(tail)-30:])
+	}
+}
+
+func TestChild_NetworkLogRequestsReachTheParentsLog(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer srv.Close()
+	var buf bytes.Buffer
+	netlog.Enable(&buf)
+	t.Cleanup(netlog.Disable)
+
+	warnings, err := passWithEnv(t, "http", fakeChildURLEnv+"="+srv.URL)
+	se := asScanError(t, err)
+	if !strings.Contains(buf.String(), "NET GET 127.0.0.1:") {
+		t.Errorf("the child's request is missing from the parent's log: %q", buf.String())
+	}
+	if n := strings.Count(buf.String(), "\n"); n != 1 {
+		t.Errorf("want one NET line, got %d: %q", n, buf.String())
+	}
+	for _, text := range append(warnings, se.Error(), se.Summary()) {
+		if strings.Contains(text, "NET ") || strings.Contains(text, "127.0.0.1") {
+			t.Errorf("the NET line reached the failure: %q", text)
+		}
+	}
+	if se.Reason != ReasonNoPackages {
+		t.Errorf("Reason = %s, want no_packages", se.Reason)
+	}
+}
+
+func TestChild_NoNetworkLogMarkerWhenTheParentDoesNotLog(t *testing.T) {
+	if netlog.Enabled() {
+		t.Skip("a previous test enabled the global sink")
+	}
+	var buf bytes.Buffer
+	prev := vulnChildNetHook
+	vulnChildNetHook = func(line string) { buf.WriteString(line) } // would collect any NET line that came back
+	t.Cleanup(func() { vulnChildNetHook = prev })
+
+	warnings, _ := passWithEnv(t, "netlogstate")
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "netlog=false marker=\"\"") {
+		t.Errorf("the child must not log its network when the parent does not: %q", warnings)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a line reached the sink: %q", buf.String())
+	}
+
+	// and with the parent's log on, the child logs and the marker is gone for its own children
+	netlog.Enable(&bytes.Buffer{})
+	t.Cleanup(netlog.Disable)
+	warnings, _ = passWithEnv(t, "netlogstate")
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "netlog=true marker=\"\"") {
+		t.Errorf("the child must log its network when the parent does, and not pass the marker on: %q", warnings)
+	}
+}
+
+func TestChild_CannotStartIsATypedFailureNotAFallback(t *testing.T) {
+	prev := vulnChildExecutable
+	vulnChildExecutable = func() (string, error) { return filepath.Join(t.TempDir(), "no-such-unisupply"), nil }
+	t.Cleanup(func() { vulnChildExecutable = prev })
+
+	warnings, err, freed := passWithChild(t, context.Background(), "block")
+	se := asScanError(t, err)
+	if se.Reason != ReasonUnknown || se.Kind != FailPermanent {
+		t.Errorf("Kind/Reason = %v/%s, want permanent/unknown", se.Kind, se.Reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "starting govulncheck:") {
+		t.Errorf("warnings = %q, want one that says starting govulncheck", warnings)
+	}
+	if freed != 0 {
+		t.Errorf("releaseMemory ran %d times: the scan fell back to the in-process run", freed)
 	}
 }

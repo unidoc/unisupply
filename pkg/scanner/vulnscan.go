@@ -190,9 +190,8 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 
 	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that
 	// case via jsonHandler.Flush), so exitErr != nil only signals a real scan failure.
-	// scan.Command runs govulncheck in-process; errors come back through Wait() as Go
-	// error values, not written to stderr. Prefer stderrBuf when populated (future-proof),
-	// fall back to exitErr.Error() for the common in-process case.
+	// The error comes back as the returned error, in-process from Wait() and from a child as the text the child printed
+	// to stderr (which runGovulncheckChild keeps for itself): stderrBuf stays empty.
 	// A govulncheck that ran in this process hands its memory back before the stages that follow, which wait on the
 	// network (see runGovulncheckInProcess); one that ran in a child needs no such thing.
 	exitErr := runGovulncheck(ctx, r.env, r.projectDir, level, &stdout, &stderrBuf)
@@ -207,9 +206,8 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 		warning, scanErr = r.crashFailure(crash)
 		warnings = append(warnings, warning)
 	} else if exitErr != nil {
-		// scan.Command runs govulncheck in-process; errors surface via Wait(), not stderr.
-		// The library already prefixes errors with "govulncheck:" (derrors.Wrap).
-		// Prefer stderrBuf when populated (future subprocess mode), but don't double-prefix.
+		// The library prefixes its errors with "govulncheck:" (derrors.Wrap). stderrBuf is not written by either run
+		// mode; if one ever does, it is preferred, without a second prefix.
 		msg := strings.TrimSpace(stderrBuf.String())
 		if msg == "" {
 			msg = exitErr.Error()

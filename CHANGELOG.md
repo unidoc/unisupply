@@ -23,6 +23,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
+- **A cancelled vulnerability scan no longer takes the host process down.** When the context ended while govulncheck built
+  its call graph, golang.org/x/vuln dereferenced nil in a goroutine of its own, which nothing in the scanning process can
+  recover, and the process died. govulncheck now runs in a child process of the same executable, so the scan returns a
+  typed `*scanner.ScanError` (a crash of the child is `internal_panic`) and the host survives. The CLI does this by
+  itself; a program that scans through the library must call `scanner.RunVulnChildIfRequested()` first thing in `main`.
+  Without that call govulncheck stays in-process, crash included. `--network-log` still shows govulncheck's requests
+  (#174).
 - **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none`, the
   setup `go help private` documents for a proxy that also serves the private modules, the CLI appended the list and made
   it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a runner that reaches

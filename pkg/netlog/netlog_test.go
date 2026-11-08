@@ -224,6 +224,23 @@ func TestSubprocessIsNoOpWhenDisabled(t *testing.T) {
 	Subprocess("go mod graph", "note")
 }
 
+func TestLineIsVerbatimAndNoOpWhenDisabled(t *testing.T) {
+	if Enabled() {
+		t.Skip("a previous test enabled the global sink")
+	}
+	Line("NET GET vuln.go.dev vulndb → 200 (1 bytes, 1ms)") // disabled: must not panic and must not write anywhere
+
+	var buf bytes.Buffer
+	Enable(&buf)
+	t.Cleanup(Disable)
+	Line("NET GET vuln.go.dev vulndb → 200 (12 bytes, 3ms)")
+	Line("NET POST 100%s.example.com x") // not a format string
+	want := "NET GET vuln.go.dev vulndb → 200 (12 bytes, 3ms)\nNET POST 100%s.example.com x\n"
+	if buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
+	}
+}
+
 func TestSinkSerializesConcurrentWrites(t *testing.T) {
 	var buf bytes.Buffer
 	rt := NewTransport(&testTransport{resp: newResponse(200, "body")}, &buf)
