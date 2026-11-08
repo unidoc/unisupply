@@ -327,9 +327,10 @@ type DebugPerDepInput struct {
 
 // ScoreInput bundles all scan results for scoring.
 type ScoreInput struct {
-	// GitHubAuthenticated is true when the GitHub requests carried a token that
-	// GitHub accepted. It only picks the words of the maintainer-data warning;
-	// false, the zero value, keeps the unauthenticated wording.
+	// GitHubAuthenticated is true when the GitHub requests carried a token (one
+	// GitHub rejected with 401 is cleared before the scan and does not count).
+	// It only picks the words of the maintainer-data warning; false, the zero
+	// value, keeps the unauthenticated wording.
 	GitHubAuthenticated bool
 
 	Graph       *resolver.Graph
