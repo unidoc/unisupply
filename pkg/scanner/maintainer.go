@@ -21,8 +21,10 @@ import (
 	"github.com/unidoc/unisupply/pkg/resolver"
 )
 
-// errRateLimited is returned by githubGet when the GitHub API rate limit is
-// exhausted: any 429 response, or a 403 with X-RateLimit-Remaining: 0.
+// errRateLimited is returned by githubGet when GitHub reports a rate limit:
+// any 429 response, a 403 with X-RateLimit-Remaining: 0 (the primary limit),
+// or a 403 with a usable Retry-After header (a secondary limit, which can
+// arrive with requests still remaining).
 var errRateLimited = errors.New("github rate limit exceeded")
 
 // Values of MaintainerInfo.UnavailableReason.
@@ -709,13 +711,29 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 	}
 	if resp.StatusCode != http.StatusOK {
 		// A 429 is always a rate limit: GitHub also sends it without
-		// X-RateLimit-Remaining (a secondary limit). A 403 is one only
-		// when the remaining count says so; otherwise it is a permission error.
+		// X-RateLimit-Remaining (a secondary limit). A 403 is one when the
+		// remaining count is 0 (the primary limit) or when it carries a
+		// usable Retry-After (a secondary limit, possibly with requests
+		// still remaining); any other 403 is a permission error.
+		retryAfter, hasRetryAfter := parseRetryAfterUncapped(resp.Header.Get("Retry-After"), time.Now())
 		if resp.StatusCode == http.StatusTooManyRequests ||
-			(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0") {
+			(resp.StatusCode == http.StatusForbidden &&
+				(resp.Header.Get("X-RateLimit-Remaining") == "0" || hasRetryAfter)) {
+			// The wait comes from X-RateLimit-Reset when it parses, else from
+			// Retry-After, else it is not named.
+			var untilReset time.Duration
+			var resetAt time.Time
+			named := false
 			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
-				resetAt := time.Unix(resetUnix, 0).UTC()
-				untilReset := time.Until(resetAt).Round(time.Second)
+				resetAt = time.Unix(resetUnix, 0).UTC()
+				untilReset = time.Until(resetAt).Round(time.Second)
+				named = true
+			} else if hasRetryAfter {
+				untilReset = retryAfter.Round(time.Second)
+				resetAt = time.Now().Add(untilReset).UTC()
+				named = true
+			}
+			if named {
 				if untilReset < 0 {
 					untilReset = 0
 				}

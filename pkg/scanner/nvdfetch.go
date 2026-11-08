@@ -103,9 +103,21 @@ func (e *VulnEnricher) enrichDeadline() time.Time {
 }
 
 // parseRetryAfter reads a Retry-After header: delay in seconds or an HTTP
-// date. The result is capped at nvdRetryAfterCap; ok is false when the header
-// is absent or unparsable.
+// date. The result is capped at nvdRetryAfterCap, NVD's pacing limit; ok is
+// false when the header is absent or unparsable.
 func parseRetryAfter(h string, now time.Time) (time.Duration, bool) {
+	d, ok := parseRetryAfterUncapped(h, now)
+	if !ok {
+		return 0, false
+	}
+	return min(d, nvdRetryAfterCap), true
+}
+
+// parseRetryAfterUncapped reads a Retry-After header (delay in seconds or an
+// HTTP date) and returns the delay as sent, never negative; ok is false when
+// the header is absent or unparsable. Callers that only report the wait, such
+// as the GitHub client, use it so NVD's cap does not shorten what they show.
+func parseRetryAfterUncapped(h string, now time.Time) (time.Duration, bool) {
 	h = strings.TrimSpace(h)
 	if h == "" {
 		return 0, false
@@ -121,7 +133,7 @@ func parseRetryAfter(h string, now time.Time) (time.Duration, bool) {
 	if d < 0 {
 		d = 0
 	}
-	return min(d, nvdRetryAfterCap), true
+	return d, true
 }
 
 // nvdCVSSMetric is one entry in the NVD CVE metrics arrays. NVD lists the

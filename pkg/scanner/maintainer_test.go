@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1649,6 +1650,186 @@ func TestGitHubRateLimit_StatusAndHeader(t *testing.T) {
 			}
 			if hints != tc.wantHints {
 				t.Errorf("GITHUB_TOKEN hints = %d, want %d", hints, tc.wantHints)
+			}
+		})
+	}
+}
+
+// warnRecorder is a progress.Reporter that keeps every Warn message.
+type warnRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (r *warnRecorder) Stage(string)        {}
+func (r *warnRecorder) Step(string, ...any) {}
+func (r *warnRecorder) Progress(int, int)   {}
+func (r *warnRecorder) Done(string, ...any) {}
+func (r *warnRecorder) Warn(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
+}
+
+func (r *warnRecorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.msgs...)
+}
+
+var fromNowRe = regexp.MustCompile(`\(([0-9hms.]+) from now\)`)
+
+// TestGitHubRateLimit_RetryAfterAndReset pins how Retry-After and
+// X-RateLimit-Reset decide whether a response is a rate limit and what wait
+// the warning names. A secondary limit can arrive as a 429 or a 403 with
+// Retry-After and a nonzero X-RateLimit-Remaining; X-RateLimit-Reset wins over
+// Retry-After when both are present; an unusable Retry-After still counts as a
+// limit but names no wait.
+func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		remaining  string
+		retryAfter string
+		resetIn    time.Duration // X-RateLimit-Reset = now + resetIn; 0 = header absent
+		wantReason string
+		wantHints  int64
+		wantWait   bool          // the warning has "resets at ... (<wait> from now)"
+		minWait    time.Duration // bounds for the named wait, when wantWait
+		maxWait    time.Duration
+	}{
+		{
+			name: "403 with Retry-After and remaining left", status: http.StatusForbidden,
+			remaining: "12", retryAfter: "60",
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 55 * time.Second, maxWait: 60 * time.Second,
+		},
+		{
+			name: "403 with Retry-After and no remaining header", status: http.StatusForbidden,
+			retryAfter: "60",
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 55 * time.Second, maxWait: 60 * time.Second,
+		},
+		{
+			name: "429 with Retry-After and no reset", status: http.StatusTooManyRequests,
+			retryAfter: "120",
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 115 * time.Second, maxWait: 120 * time.Second,
+		},
+		{
+			name: "429 with Retry-After beyond the NVD cap", status: http.StatusTooManyRequests,
+			retryAfter: "7200",
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 7195 * time.Second, maxWait: 7200 * time.Second,
+		},
+		{
+			name: "429 with Retry-After as an HTTP date", status: http.StatusTooManyRequests,
+			retryAfter: time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat),
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 80 * time.Second, maxWait: 91 * time.Second,
+		},
+		{
+			name: "429 with unparseable Retry-After", status: http.StatusTooManyRequests,
+			retryAfter: "soon",
+			wantReason: UnavailableRateLimited, wantHints: 1,
+		},
+		{
+			name: "403 with unparseable Retry-After", status: http.StatusForbidden,
+			retryAfter: "soon", remaining: "12",
+			wantReason: UnavailableAPIError,
+		},
+		{
+			name: "403 with remaining 0 and reset", status: http.StatusForbidden,
+			remaining: "0", resetIn: 10 * time.Minute,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
+		},
+		{
+			name: "429 with reset and Retry-After: reset wins", status: http.StatusTooManyRequests,
+			retryAfter: "30", resetIn: 10 * time.Minute,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
+		},
+		{
+			name: "403 without headers", status: http.StatusForbidden,
+			wantReason: UnavailableAPIError,
+		},
+		{
+			name: "403 with remaining left and no Retry-After", status: http.StatusForbidden,
+			remaining:  "12",
+			wantReason: UnavailableAPIError,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.remaining != "" {
+					w.Header().Set("X-RateLimit-Remaining", tc.remaining)
+				}
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				if tc.resetIn != 0 {
+					w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(tc.resetIn).Unix(), 10))
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			rec := &warnRecorder{}
+			ctx := progress.WithReporter(context.Background(), rec)
+
+			ms := newTestMaintainerScanner(srv.URL)
+			info := ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+			if info.DataAvailable {
+				t.Fatal("expected DataAvailable=false")
+			}
+			if info.UnavailableReason != tc.wantReason {
+				t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, tc.wantReason)
+			}
+
+			var hints, limitWarns []string
+			for _, m := range rec.all() {
+				if strings.Contains(m, "set GITHUB_TOKEN") {
+					hints = append(hints, m)
+				}
+				if strings.Contains(m, "rate limit hit") {
+					limitWarns = append(limitWarns, m)
+				}
+			}
+			if int64(len(hints)) != tc.wantHints {
+				t.Errorf("GITHUB_TOKEN hints = %d, want %d (warnings: %q)", len(hints), tc.wantHints, rec.all())
+			}
+			if tc.wantReason != UnavailableRateLimited {
+				if len(limitWarns) != 0 {
+					t.Errorf("unexpected rate-limit warning: %q", limitWarns)
+				}
+				return
+			}
+			if len(limitWarns) != 1 {
+				t.Fatalf("rate-limit warnings = %d, want 1: %q", len(limitWarns), limitWarns)
+			}
+			warn := limitWarns[0]
+			if !tc.wantWait {
+				if strings.Contains(warn, "resets at") {
+					t.Errorf("warning names a wait without a usable header: %q", warn)
+				}
+				return
+			}
+			if !strings.Contains(warn, "resets at") {
+				t.Fatalf("warning has no reset time: %q", warn)
+			}
+			m := fromNowRe.FindStringSubmatch(warn)
+			if m == nil {
+				t.Fatalf("warning has no \"(<wait> from now)\": %q", warn)
+			}
+			wait, err := time.ParseDuration(m[1])
+			if err != nil {
+				t.Fatalf("wait %q: %v", m[1], err)
+			}
+			if wait < tc.minWait || wait > tc.maxWait {
+				t.Errorf("wait = %s, want within [%s, %s]: %q", wait, tc.minWait, tc.maxWait, warn)
 			}
 		})
 	}
