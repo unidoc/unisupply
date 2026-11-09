@@ -28,8 +28,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   recover, and the process died. govulncheck now runs in a child process of the same executable, so the scan returns a
   typed `*scanner.ScanError` (a crash of the child is `internal_panic`) and the host survives. The CLI does this by
   itself; a program that scans through the library must call `scanner.RunVulnChildIfRequested()` first thing in `main`.
-  Without that call govulncheck stays in-process, crash included. `--network-log` still shows govulncheck's requests
-  (#174).
+  Without that call govulncheck stays in-process, crash included. On Linux and macOS a cancelled scan also stops the
+  `go list` that govulncheck was running, which used to load packages to the end. The child does not see what the host
+  set up in code, such as a replaced `http.DefaultTransport`; proxy settings in the environment apply. `--network-log`
+  still shows govulncheck's requests (#174).
 - **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none`, the
   setup `go help private` documents for a proxy that also serves the private modules, the CLI appended the list and made
   it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a runner that reaches

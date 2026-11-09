@@ -109,7 +109,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
-	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
+	// govulncheck is compiled with unisupply's own Go (in a child process or in this one): code that needs a newer one
+	// cannot be loaded.
 	if projectErr == nil {
 		if err := CheckToolchain(projectEnv.version); err != nil {
 			return nil, nil, false, &ScanError{Kind: FailPermanent, Reason: ReasonNeedsNewerGo, Err: err}

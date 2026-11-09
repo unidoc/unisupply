@@ -9,11 +9,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -31,13 +30,33 @@ const fakeChildURLEnv = "UNISUPPLY_TEST_FAKE_CHILD_URL"
 // this process.
 const childMultipleMains = "govulncheck: loading packages: \nThere are errors with the provided package patterns:\n\n/x/b.go:3:6: main redeclared in this block\n\t/x/a.go:3:6: other declaration of main"
 
-// fakeChildBody is what the child runs instead of govulncheck in the given mode.
-func fakeChildBody(mode string) func([]string) error {
-	return func([]string) error {
+// fakeChildBody is what the child runs instead of govulncheck in the given mode. Like golang.org/x/vuln v1.9.0's package
+// loader, the blocking fakes do not watch ctx.
+func fakeChildBody(mode string) func(context.Context, []string) error {
+	return func(ctx context.Context, _ []string) error {
 		switch mode {
 		case "block":
-			signal.Ignore(os.Interrupt, syscall.SIGTERM)
 			time.Sleep(time.Hour)
+		case "stubborn":
+			// a child that does not stop when asked (TestMain makes its stop hang): only the kill after childWaitDelay
+			// ends it
+			time.Sleep(time.Hour)
+		case "golist":
+			// a process started the way the go command starts `go list`: in a process group of its own, with no context
+			return fakeGoList()
+		case "paniconcancel":
+			// golang.org/x/vuln's nil dereference when the call graph build is cancelled (#174)
+			<-ctx.Done()
+			go func() { panic("runtime error: invalid memory address or nil pointer dereference") }()
+			time.Sleep(time.Hour)
+		case "noisyerror":
+			// what an init function of the host could write: text that the failure rules match
+			fmt.Fprintln(os.Stderr, "dial tcp: connection refused, 429 too many requests, vuln.go.dev")
+			return errors.New(childMultipleMains)
+		case "exit1":
+			// a log.Fatal in an init function of the host, or a TerminateProcess on Windows: status 1 and no error line
+			fmt.Fprintln(os.Stderr, "init: config not found")
+			os.Exit(1)
 		case "panic":
 			go func() { panic("boom") }()
 			time.Sleep(time.Hour)
@@ -360,5 +379,87 @@ func TestChild_CannotStartIsATypedFailureNotAFallback(t *testing.T) {
 	}
 	if freed != 0 {
 		t.Errorf("releaseMemory ran %d times: the scan fell back to the in-process run", freed)
+	}
+}
+
+func TestChild_ErrorIsOnlyItsErrorLines(t *testing.T) {
+	warnings, err, _ := passWithChild(t, context.Background(), "noisyerror")
+	se := asScanError(t, err)
+	sameClass(t, se, childMultipleMains, nil)
+	for _, text := range append(warnings, se.Error()) {
+		if strings.Contains(text, "dial tcp") || strings.Contains(text, "429") {
+			t.Errorf("stderr that is not the error reached the failure: %q", text)
+		}
+	}
+}
+
+func TestChild_StatusOneWithoutAnErrorIsACrash(t *testing.T) {
+	warnings, err, _ := passWithChild(t, context.Background(), "exit1")
+	se := asScanError(t, err)
+	if se.Reason != ReasonInternalPanic || se.Kind != FailPermanent {
+		t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic", se.Kind, se.Reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "crashed (exit status 1)") {
+		t.Errorf("warnings = %q, want the crash with its status", warnings)
+	}
+	if !strings.Contains(se.Error(), "init: config not found") {
+		t.Errorf("the stderr tail should stay in the error: %q", se.Error())
+	}
+}
+
+func TestChild_StubbornChildIsKilledAfterTheWaitDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	defer cancel()
+	start := time.Now()
+	_, err, _ := passWithChild(t, ctx, "stubborn")
+	if d := time.Since(start); d > childWaitDelay+5*time.Second {
+		t.Errorf("the scan took %v to return after the cancel, want about childWaitDelay (%v)", d, childWaitDelay)
+	}
+	sameClass(t, asScanError(t, err), context.Canceled.Error(), context.Canceled)
+}
+
+func TestChild_PanicAfterTheCancelIsStillTheCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	defer cancel()
+	_, err, _ := passWithChild(t, ctx, "paniconcancel")
+	sameClass(t, asScanError(t, err), context.Canceled.Error(), context.Canceled)
+}
+
+func TestChildExecutable_IsTheRunningImageOnLinux(t *testing.T) {
+	got, err := childExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "linux" {
+		if got != procSelfExe {
+			t.Errorf("childExecutable() = %q, want %q", got, procSelfExe)
+		}
+		return
+	}
+	want, _ := os.Executable()
+	if got != want {
+		t.Errorf("childExecutable() = %q, want os.Executable() %q", got, want)
+	}
+}
+
+func TestChildStderr_ErrorLines(t *testing.T) {
+	s := &childStderr{}
+	writeChildError(s, errors.New("govulncheck: loading packages:\n\n/x/b.go:3:6: main redeclared"))
+	fmt.Fprint(s, "noise from an init function\nERR ")
+	s.flush()
+	if got, want := s.errorText(), "govulncheck: loading packages:\n\n/x/b.go:3:6: main redeclared\n\n"; got != want {
+		t.Errorf("errorText = %q, want %q", got, want)
+	}
+	if tail := s.tailText(); tail != "noise from an init function\n" {
+		t.Errorf("tail = %q, want only the noise", tail)
+	}
+	big := &childStderr{}
+	for range 2 * childErrMax / 1000 {
+		fmt.Fprint(big, childErrPrefix+strings.Repeat("e", 999)+"\n")
+	}
+	if n := len(big.errorText()); n > childErrMax {
+		t.Errorf("errorText is %d bytes, want at most %d", n, childErrMax)
 	}
 }

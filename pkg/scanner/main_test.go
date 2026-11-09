@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestMain points the on-disk response caches at temporary directories, a new
@@ -19,6 +20,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(vulnChildEnv) == "1" {
 		if mode := os.Getenv(fakeChildEnv); mode != "" {
 			vulnChildBody = fakeChildBody(mode)
+			if mode == "stubborn" {
+				vulnChildStopProcesses = func(time.Duration) { time.Sleep(time.Hour) }
+			}
 		}
 	}
 	RunVulnChildIfRequested()
