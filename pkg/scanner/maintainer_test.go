@@ -1621,7 +1621,7 @@ func TestGitHubRateLimit_StatusAndHeader(t *testing.T) {
 	}{
 		{name: "429 without header", status: http.StatusTooManyRequests, wantReason: UnavailableRateLimited, wantHints: 1},
 		{name: "429 with remaining 0", status: http.StatusTooManyRequests, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
-		{name: "429 with remaining left", status: http.StatusTooManyRequests, remaining: "12", wantReason: UnavailableRateLimited, wantHints: 1},
+		{name: "429 with remaining left", status: http.StatusTooManyRequests, remaining: "12", wantReason: UnavailableRateLimited}, // a secondary limit: the hint says to wait
 		{name: "403 with remaining 0", status: http.StatusForbidden, remaining: "0", wantReason: UnavailableRateLimited, wantHints: 1},
 		{name: "403 without header", status: http.StatusForbidden, wantReason: UnavailableAPIError},
 		{name: "403 with remaining left", status: http.StatusForbidden, remaining: "12", wantReason: UnavailableAPIError},
@@ -1694,6 +1694,7 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 		resetIn    time.Duration // X-RateLimit-Reset = now + resetIn; 0 = header absent
 		wantReason string
 		wantHints  int64
+		waitHint   bool          // the hint says to wait (a secondary limit with quota left), not to set a token
 		wantWait   bool          // the warning has "resets at ... (<wait> from now)"
 		minWait    time.Duration // bounds for the named wait, when wantWait
 		maxWait    time.Duration
@@ -1701,7 +1702,7 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 		{
 			name: "403 with Retry-After and remaining left", status: http.StatusForbidden,
 			remaining: "12", retryAfter: "60",
-			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			wantReason: UnavailableRateLimited, waitHint: true, wantWait: true,
 			minWait: 55 * time.Second, maxWait: 60 * time.Second,
 		},
 		{
@@ -1745,19 +1746,39 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
 		},
 		{
-			name: "429 with reset and Retry-After: reset wins", status: http.StatusTooManyRequests,
+			// What GitHub sends for a secondary limit: the X-RateLimit-* headers come on every response, so the reset
+			// time is the hourly window's and the wait is Retry-After's.
+			name: "403 secondary limit as GitHub sends it: Retry-After wins over reset", status: http.StatusForbidden,
+			remaining: "4800", retryAfter: "60", resetIn: 50 * time.Minute,
+			wantReason: UnavailableRateLimited, waitHint: true, wantWait: true,
+			minWait: 55 * time.Second, maxWait: 60 * time.Second,
+		},
+		{
+			name: "429 with reset and Retry-After, no remaining header: Retry-After wins", status: http.StatusTooManyRequests,
 			retryAfter: "30", resetIn: 10 * time.Minute,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 25 * time.Second, maxWait: 30 * time.Second,
+		},
+		{
+			name: "403 primary limit (remaining 0) with Retry-After: reset wins", status: http.StatusForbidden,
+			remaining: "0", retryAfter: "30", resetIn: 10 * time.Minute,
 			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
 			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
 		},
 		{
-			name: "403 without headers", status: http.StatusForbidden,
+			name: "403 with Retry-After 0 is not a rate limit", status: http.StatusForbidden,
+			remaining: "12", retryAfter: "0",
 			wantReason: UnavailableAPIError,
 		},
 		{
-			name: "403 with remaining left and no Retry-After", status: http.StatusForbidden,
-			remaining:  "12",
-			wantReason: UnavailableAPIError,
+			name: "429 with Retry-After 0 names no wait", status: http.StatusTooManyRequests,
+			retryAfter: "0",
+			wantReason: UnavailableRateLimited, wantHints: 1,
+		},
+		{
+			name: "429 with a Retry-After too large for a duration names no wait", status: http.StatusTooManyRequests,
+			retryAfter: "99999999999",
+			wantReason: UnavailableRateLimited, wantHints: 1,
 		},
 	}
 	for _, tc := range tests {
@@ -1811,6 +1832,9 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 				t.Fatalf("rate-limit warnings = %d, want 1: %q", len(limitWarns), limitWarns)
 			}
 			warn := limitWarns[0]
+			if got := strings.Contains(warn, "secondary rate limit was reached; wait and re-run"); got != tc.waitHint {
+				t.Errorf("wait-and-re-run hint = %v, want %v: %q", got, tc.waitHint, warn)
+			}
 			if !tc.wantWait {
 				if strings.Contains(warn, "resets at") {
 					t.Errorf("warning names a wait without a usable header: %q", warn)

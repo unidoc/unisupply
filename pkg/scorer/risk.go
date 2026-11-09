@@ -399,7 +399,8 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// top-level warnings so consumers understand the scoring gap. A degraded
 	// scan that reports no gap is indistinguishable from a complete one.
 	maintainerUnavailable := 0
-	maintainerErrored := 0 // subset of maintainerUnavailable that failed with an API error
+	maintainerErrored := 0     // subset of maintainerUnavailable that failed with an API error
+	maintainerRateLimited := 0 // subset of maintainerUnavailable that GitHub rate-limited
 	maintenanceUnavailable := 0
 	resilienceUnavailable := 0
 
@@ -456,8 +457,11 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 		// A repository that does not exist (404) is not a rate limit or an outage: it is neither counted here nor blamed on the API.
 		if m := input.Maintainers[dep.Module.Path]; m != nil && !m.DataAvailable && m.UnavailableReason != scanner.UnavailableNotFound {
 			maintainerUnavailable++
-			if m.UnavailableReason == scanner.UnavailableAPIError {
+			switch m.UnavailableReason {
+			case scanner.UnavailableAPIError:
 				maintainerErrored++
+			case scanner.UnavailableRateLimited:
+				maintainerRateLimited++
 			}
 		}
 
@@ -480,7 +484,7 @@ func ScoreAll(input ScoreInput) *ProjectScore {
 	// Name the actual cause. Offline is not a rate-limit problem, and telling an
 	// air-gapped user their token is missing sends them after a fix that cannot
 	// work.
-	cause := maintainerUnavailableCause(maintainerUnavailable, maintainerErrored, input.GitHubAuthenticated)
+	cause := maintainerUnavailableCause(maintainerUnavailable, maintainerErrored, maintainerRateLimited, input.GitHubAuthenticated)
 	// prefix applies to the proxy-sourced axes below. Only the maintainer axis
 	// reads the GitHub API, so `cause` must not be reused for the others —
 	// naming the wrong service sends the user after a fix that cannot work, the
@@ -2095,15 +2099,20 @@ func buildDebugScoring(ps *ProjectScore, sev *severityAdjustedResult) *DebugScor
 // maintainerUnavailableCause names why maintainer data is missing, from the
 // per-module MaintainerInfo.UnavailableReason and from whether the scan used a
 // token. errored of unavailable modules failed with an API error
-// (scanner.UnavailableAPIError); the rest were rate-limited or carry no
-// reason. For those, a scan without a token is "unauthenticated", the case
-// this warning has always described, and a scan with one is "rate-limited":
-// telling a user who did set a token to set one sends them after a fix that
-// cannot work. The same goes for naming an API error as "unauthenticated".
-func maintainerUnavailableCause(unavailable, errored int, authenticated bool) string {
+// (scanner.UnavailableAPIError) and rateLimited were rate-limited
+// (scanner.UnavailableRateLimited); the rest carry no reason. Without API
+// errors, a scan without a token is "unauthenticated", the case this warning
+// has always described, and a scan with one is "rate-limited" when GitHub said
+// so for at least one module: telling a user who did set a token to set one
+// sends them after a fix that cannot work. A scan with a token and no stated
+// reason names no cause. The same goes for naming an API error as
+// "unauthenticated".
+func maintainerUnavailableCause(unavailable, errored, rateLimited int, authenticated bool) string {
 	switch {
-	case errored == 0 && authenticated:
+	case errored == 0 && authenticated && rateLimited > 0:
 		return "GitHub API rate-limited"
+	case errored == 0 && authenticated:
+		return "GitHub API unavailable"
 	case errored == 0:
 		return "GitHub API unauthenticated"
 	case errored == unavailable:

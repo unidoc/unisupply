@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -115,7 +116,7 @@ func parseRetryAfter(h string, now time.Time) (time.Duration, bool) {
 
 // parseRetryAfterUncapped reads a Retry-After header (delay in seconds or an
 // HTTP date) and returns the delay as sent, never negative; ok is false when
-// the header is absent or unparsable. Callers that only report the wait, such
+// the header is absent, unparsable, or more seconds than a time.Duration holds. Callers that only report the wait, such
 // as the GitHub client, use it so NVD's cap does not shorten what they show.
 func parseRetryAfterUncapped(h string, now time.Time) (time.Duration, bool) {
 	h = strings.TrimSpace(h)
@@ -123,8 +124,16 @@ func parseRetryAfterUncapped(h string, now time.Time) (time.Duration, bool) {
 		return 0, false
 	}
 	var d time.Duration
-	if secs, err := strconv.Atoi(h); err == nil {
-		d = time.Duration(secs) * time.Second
+	if secs, err := strconv.ParseInt(h, 10, 64); err == nil {
+		switch {
+		case secs <= 0:
+			d = 0
+		case secs > math.MaxInt64/int64(time.Second):
+			// more seconds than a time.Duration holds: the product would wrap around
+			return 0, false
+		default:
+			d = time.Duration(secs) * time.Second
+		}
 	} else if t, err := http.ParseTime(h); err == nil {
 		d = t.Sub(now)
 	} else {

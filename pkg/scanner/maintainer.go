@@ -23,9 +23,25 @@ import (
 
 // errRateLimited is returned by githubGet when GitHub reports a rate limit:
 // any 429 response, a 403 with X-RateLimit-Remaining: 0 (the primary limit),
-// or a 403 with a usable Retry-After header (a secondary limit, which can
-// arrive with requests still remaining).
+// or a 403 whose Retry-After names a wait above zero (a secondary limit,
+// which can arrive with requests still remaining). githubGet returns it
+// wrapped in a *rateLimitError.
 var errRateLimited = errors.New("github rate limit exceeded")
+
+// rateLimitError is errRateLimited with what the response said about it.
+type rateLimitError struct {
+	wait      string // "resets at <time> (<duration> from now)", or empty when the response named no wait
+	quotaLeft bool   // X-RateLimit-Remaining was above 0: a secondary limit, which a token does not lift
+}
+
+func (e *rateLimitError) Error() string {
+	if e.wait == "" {
+		return errRateLimited.Error()
+	}
+	return errRateLimited.Error() + ": " + e.wait
+}
+
+func (e *rateLimitError) Unwrap() error { return errRateLimited }
 
 // Values of MaintainerInfo.UnavailableReason.
 const (
@@ -357,13 +373,19 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
+			var rl *rateLimitError
 			switch {
 			case ms.TokenRejected:
 				hint = "the GitHub token was rejected (401), so requests ran unauthenticated"
 			case ms.token != "":
 				// Authenticated requests still hit the token's quota or a
-				// secondary limit (a 429); asking for a token would not help.
+				// secondary limit (a 429, or a 403 with Retry-After); asking for a
+				// token would not help.
 				hint = "requests were authenticated, so the token's quota or a secondary rate limit was reached; wait and re-run"
+			case errors.As(err, &rl) && rl.quotaLeft:
+				// Requests were left in the hourly quota, so this is a secondary
+				// limit, which a token does not lift.
+				hint = "requests remained in the hourly quota, so a secondary rate limit was reached; wait and re-run"
 			}
 			ms.rateLimitWarnOnce.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
@@ -715,32 +737,35 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 		// remaining count is 0 (the primary limit) or when it carries a
 		// usable Retry-After (a secondary limit, possibly with requests
 		// still remaining); any other 403 is a permission error.
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
 		retryAfter, hasRetryAfter := parseRetryAfterUncapped(resp.Header.Get("Retry-After"), time.Now())
+		// A Retry-After of zero or in the past names no wait, and is no sign of a limit on a 403.
+		hasRetryAfter = hasRetryAfter && retryAfter > 0
 		if resp.StatusCode == http.StatusTooManyRequests ||
-			(resp.StatusCode == http.StatusForbidden &&
-				(resp.Header.Get("X-RateLimit-Remaining") == "0" || hasRetryAfter)) {
-			// The wait comes from X-RateLimit-Reset when it parses, else from
-			// Retry-After, else it is not named.
-			var untilReset time.Duration
+			(resp.StatusCode == http.StatusForbidden && (remaining == "0" || hasRetryAfter)) {
+			// GitHub sends the X-RateLimit-* headers on every response, so the
+			// reset time is the wait only when the quota is spent (remaining 0);
+			// otherwise Retry-After names it, as GitHub's guidance says, and the
+			// reset time is the last resort.
+			rl := &rateLimitError{}
+			if n, err := strconv.Atoi(remaining); err == nil && n > 0 {
+				rl.quotaLeft = true
+			}
+			resetUnix, resetErr := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
 			var resetAt time.Time
-			named := false
-			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			switch {
+			case remaining == "0" && resetErr == nil:
 				resetAt = time.Unix(resetUnix, 0).UTC()
-				untilReset = time.Until(resetAt).Round(time.Second)
-				named = true
-			} else if hasRetryAfter {
-				untilReset = retryAfter.Round(time.Second)
-				resetAt = time.Now().Add(untilReset).UTC()
-				named = true
+			case hasRetryAfter:
+				resetAt = time.Now().Add(retryAfter.Round(time.Second)).UTC()
+			case resetErr == nil:
+				resetAt = time.Unix(resetUnix, 0).UTC()
 			}
-			if named {
-				if untilReset < 0 {
-					untilReset = 0
-				}
-				return nil, fmt.Errorf("%w: resets at %s (%s from now)",
-					errRateLimited, resetAt.Format(time.RFC3339), untilReset)
+			if !resetAt.IsZero() {
+				untilReset := max(time.Until(resetAt).Round(time.Second), 0)
+				rl.wait = fmt.Sprintf("resets at %s (%s from now)", resetAt.Format(time.RFC3339), untilReset)
 			}
-			return nil, fmt.Errorf("%w", errRateLimited)
+			return nil, rl
 		}
 		if resp.StatusCode == http.StatusNotFound {
 			// A definitive answer, not a failure: the callers cache it.

@@ -53,7 +53,8 @@ func TestMaintainerUnavailableWarning_NamesTheCause(t *testing.T) {
 		{"no token: mixed", false, []string{ae, rl}, "GitHub API rate-limited or errored — maintainer data unavailable for 2 module(s)"},
 
 		{"token: rate limited", true, []string{rl, rl}, "GitHub API rate-limited — maintainer data unavailable for 2 module(s)"},
-		{"token: no reason", true, []string{""}, "GitHub API rate-limited — maintainer data unavailable for 1 module(s)"},
+		{"token: no reason names no cause", true, []string{""}, "GitHub API unavailable — maintainer data unavailable for 1 module(s)"},
+		{"token: rate limited and no reason", true, []string{rl, ""}, "GitHub API rate-limited — maintainer data unavailable for 2 module(s)"},
 		{"token: api errors", true, []string{ae, ae}, "GitHub API error — maintainer data unavailable for 2 module(s)"},
 		{"token: mixed", true, []string{ae, rl}, "GitHub API rate-limited or errored — maintainer data unavailable for 2 module(s)"},
 	}
