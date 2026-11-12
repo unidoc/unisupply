@@ -90,11 +90,14 @@ const (
 // result replaces the first. The loaded packages and call graph of each pass are released before the next network step.
 func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanOptions) (vulns map[string][]Vulnerability, warnings []string, scanned bool, err error) {
 	if offline.Enabled() {
-		// govulncheck runs in-process and reaches vuln.go.dev through
-		// http.DefaultClient, so offline mode would refuse its requests and
-		// leave a transport error dressed up as a scan failure. Skip it
-		// outright and say why: an empty vulnerability set with no explanation
-		// reads as "no vulnerabilities found", which is the one wrong answer.
+		// govulncheck reaches vuln.go.dev through http.DefaultClient. In-process,
+		// offline mode would refuse its requests and leave a transport error
+		// dressed up as a scan failure. In the child process nothing refuses
+		// them: the child never installs offline's transport, so this skip is
+		// the only thing that keeps --offline from reaching vuln.go.dev. Skip
+		// the scan outright and say why: an empty vulnerability set with no
+		// explanation reads as "no vulnerabilities found", which is the one
+		// wrong answer.
 		return nil, []string{"offline — vulnerability scan skipped (no local vuln DB mirror configured)"}, false, nil
 	}
 
@@ -106,7 +109,8 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 	if projectErr != nil {
 		warnings = append(warnings, fmt.Sprintf("could not resolve the project's Go toolchain (%v); standard-library vulnerabilities are checked against the Go version of unisupply's working directory", projectErr))
 	}
-	// govulncheck runs in this process, compiled with unisupply's own Go: code that needs a newer one cannot be loaded.
+	// govulncheck is compiled with unisupply's own Go (in a child process or in this one): code that needs a newer one
+	// cannot be loaded.
 	if projectErr == nil {
 		if err := CheckToolchain(projectEnv.version); err != nil {
 			return nil, nil, false, &ScanError{Kind: FailPermanent, Reason: ReasonNeedsNewerGo, Err: err}
@@ -190,21 +194,24 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 
 	// govulncheck exits non-zero when vulns are found (JSON mode returns nil in that
 	// case via jsonHandler.Flush), so exitErr != nil only signals a real scan failure.
-	// scan.Command runs govulncheck in-process; errors come back through Wait() as Go
-	// error values, not written to stderr. Prefer stderrBuf when populated (future-proof),
-	// fall back to exitErr.Error() for the common in-process case.
+	// The error comes back as the returned error, in-process from Wait() and from a child as the text the child printed
+	// to stderr (which runGovulncheckChild keeps for itself): stderrBuf stays empty.
+	// A govulncheck that ran in this process hands its memory back before the stages that follow, which wait on the
+	// network (see runGovulncheckInProcess); one that ran in a child needs no such thing.
 	exitErr := runGovulncheck(ctx, r.env, r.projectDir, level, &stdout, &stderrBuf)
-	// The packages and the call graph govulncheck loaded are garbage now; the stages that follow wait on the network
-	// (severity and threat-intel lookups), and without this the process would keep several GB until the runtime
-	// returns them, which can take minutes. Nothing here holds them: cmd keeps only the output buffers.
-	releaseMemory()
 
 	// scanErr is the typed failure the caller gets next to the warnings; nil while the scan is sound.
 	var scanErr *ScanError
-	if exitErr != nil {
-		// scan.Command runs govulncheck in-process; errors surface via Wait(), not stderr.
-		// The library already prefixes errors with "govulncheck:" (derrors.Wrap).
-		// Prefer stderrBuf when populated (future subprocess mode), but don't double-prefix.
+	var crash *childCrashError
+	if exitErr != nil && errors.As(exitErr, &crash) {
+		// The child process died (a panic, a kill that no context asked for). What it printed is a stack trace, not a
+		// failure message: it is not matched against the failure rules, which a line of it could satisfy by chance.
+		var warning string
+		warning, scanErr = r.crashFailure(crash)
+		warnings = append(warnings, warning)
+	} else if exitErr != nil {
+		// The library prefixes its errors with "govulncheck:" (derrors.Wrap). stderrBuf is not written by either run
+		// mode; if one ever does, it is preferred, without a second prefix.
 		msg := strings.TrimSpace(stderrBuf.String())
 		if msg == "" {
 			msg = exitErr.Error()
@@ -216,10 +223,7 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 		}
 		// The warning and the reason are published: neither carries the path of the project or of the module cache on this
 		// machine. The project's go env gives the cache; when it failed (the project needs a newer Go), the scanner's does.
-		modCache := r.projectEnv.modCache
-		if r.projectErr != nil && r.scannerErr == nil {
-			modCache = r.scannerEnv.modCache
-		}
+		modCache := r.modCache()
 		// The excluded package's directory is read before the cut, which takes the module cache out of it.
 		excluded := excludedDir(msg)
 		msg = trimPaths(msg, r.projectDir, modCache)
@@ -290,6 +294,28 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 	return results, warnings, true, nil
 }
 
+// modCache is the module cache that published text is cut of. The project's go env gives it; when that failed (the
+// project needs a newer Go), the scanner's does.
+func (r *govulncheckRun) modCache() string {
+	if r.projectErr != nil && r.scannerErr == nil {
+		return r.scannerEnv.modCache
+	}
+	return r.projectEnv.modCache
+}
+
+// crashFailure is the warning and the typed failure of a govulncheck child that crashed: ReasonInternalPanic, permanent.
+// The warning is one line (the exit status and the first panic line); the failure's text carries that line and the end
+// of the child's stderr. Neither carries the path of the project or of the module cache on this machine.
+func (r *govulncheckRun) crashFailure(crash *childCrashError) (string, *ScanError) {
+	modCache := r.modCache()
+	warning := trimPaths(crash.summary(), r.projectDir, modCache)
+	text := warning
+	if crash.tail != "" {
+		text += "\n" + stderrTail(trimPaths(crash.tail, r.projectDir, modCache))
+	}
+	return warning, &ScanError{Kind: FailPermanent, Reason: ReasonInternalPanic, Err: &tailError{text: text, err: crash}}
+}
+
 // MarkCallPathChecked sets CallPathChecked on every finding: they come from a finished called pass, so each one's tier is
 // govulncheck's verdict on its call path.
 func MarkCallPathChecked(vulns map[string][]Vulnerability) {
@@ -301,9 +327,23 @@ func MarkCallPathChecked(vulns map[string][]Vulnerability) {
 }
 
 // releaseMemory hands the heap govulncheck used back to the operating system now. It is a variable so tests can count calls.
-// runGovulncheck runs govulncheck in this process at the given scan level and returns its error. It is a variable so tests can
-// answer with recorded output instead of loading packages and reading the vulnerability database.
+// Only a govulncheck that ran in this process needs it: a child process gives its memory back when it exits.
+var releaseMemory = debug.FreeOSMemory
+
+// runGovulncheck runs govulncheck at the given scan level and returns its error: in a child process when the executable
+// can serve as one (its main called RunVulnChildIfRequested), else in this process. It is a variable so tests can answer
+// with recorded output instead of loading packages and reading the vulnerability database.
 var runGovulncheck = func(ctx context.Context, env []string, dir, level string, stdout, stderr io.Writer) error {
+	if vulnChildCapable.Load() {
+		return runGovulncheckChild(ctx, env, dir, level, stdout, stderr)
+	}
+	return runGovulncheckInProcess(ctx, env, dir, level, stdout, stderr)
+}
+
+// runGovulncheckInProcess runs govulncheck in this process. The packages and the call graph it loaded are garbage when it
+// returns, and are handed back to the operating system.
+func runGovulncheckInProcess(ctx context.Context, env []string, dir, level string, stdout, stderr io.Writer) error {
+	defer releaseMemory()
 	cmd := scan.Command(ctx, "-json", "-scan", level, "-C", dir, "./...")
 	cmd.Env = env
 	cmd.Stdout = stdout
@@ -313,5 +353,3 @@ var runGovulncheck = func(ctx context.Context, env []string, dir, level string, 
 	}
 	return cmd.Wait()
 }
-
-var releaseMemory = debug.FreeOSMemory

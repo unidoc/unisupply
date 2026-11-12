@@ -76,6 +76,15 @@ func Subprocess(command, note string) {
 	}
 }
 
+// Line writes a log line that another process produced, verbatim, through the sink Enable installed, so that it stays
+// serialized with this process's own lines. It is how the output of a child process that logs its own requests (the
+// govulncheck child of a vulnerability scan) joins this process's log. No-op when disabled.
+func Line(line string) {
+	if s := global.Load(); s != nil {
+		s.printf("%s", line)
+	}
+}
+
 // NewTransport wraps inner with a logging round-tripper writing to w. Used by
 // Enable, and directly by tests.
 func NewTransport(inner http.RoundTripper, w io.Writer) http.RoundTripper {

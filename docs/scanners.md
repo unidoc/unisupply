@@ -410,8 +410,10 @@ The vulnerability scan records what it ran with (`scanner.ScanInfo`, `Result.Sca
 the platform (`goos/goarch`, from `GOOS`/`GOARCH` or the running binary), the Go
 version, the govulncheck version and the vulnerability database with its
 last-modified time. The govulncheck version is that of `golang.org/x/vuln` in the
-binary's build info (govulncheck runs in-process, so its own `scanner_version`
-would be unisupply's version); it is left out when the build info does not list it.
+binary's build info (govulncheck runs in a child process of the same unisupply
+binary, or in-process for a library host that does not call
+`scanner.RunVulnChildIfRequested`, so its own `scanner_version` would be
+unisupply's version); it is left out when the build info does not list it.
 The database fields come from govulncheck's leading `config` message; output
 without that message leaves them empty.
 
