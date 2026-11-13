@@ -146,8 +146,8 @@ no grade and no JSON report at all. The CLI prints the cause on stderr and exits
 
 **A scan that needs a newer Go than unisupply was built with.** govulncheck runs inside unisupply, compiled with one Go release. When
 the Go the scan resolves for the project (its `go` directive or `toolchain` line) is a newer minor version, the scan stops before loading anything
-and the grade is Pending (`vulnerability_scan`) with the reason "this unisupply was built with go1.26.9 and cannot scan code that
-needs go1.27; rebuild unisupply with go1.27 or newer". Only a newer Go minor (language) version stops the scan. The same sentence replaces the loader's "file requires newer Go version"
+and the grade is Pending (`vulnerability_scan`) with the reason "this unisupply was built with go1.N.x and cannot scan code that
+needs go1.M; rebuild unisupply with go1.M or newer" (the Go unisupply was built with and the project's Go minor version). Only a newer Go minor (language) version stops the scan. The same sentence replaces the loader's "file requires newer Go version"
 error when that surfaces during a scan. A caller can check at startup with `scanner.CheckToolchain(scanGo)`.
 
 **The standard library** is listed, not graded, by default (`--grade-stdlib` grades it as a row named `stdlib`): its advisories

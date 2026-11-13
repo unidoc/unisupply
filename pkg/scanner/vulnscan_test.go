@@ -43,7 +43,12 @@ func scanWithFake(t *testing.T, f *fakeGovulncheck, opts VulnScanOptions) (map[s
 	}
 	prevRun, prevFree := runGovulncheck, releaseMemory
 	freed := 0
-	runGovulncheck, releaseMemory = f.run, func() { freed++ }
+	// The memory is released by the in-process run, not by pass: the stub stands in for that run, so it releases too.
+	inProcess := func(ctx context.Context, env []string, dir, level string, stdout, stderr io.Writer) error {
+		defer releaseMemory()
+		return f.run(ctx, env, dir, level, stdout, stderr)
+	}
+	runGovulncheck, releaseMemory = inProcess, func() { freed++ }
 	t.Cleanup(func() { runGovulncheck, releaseMemory = prevRun, prevFree })
 	info := &ScanInfo{}
 	opts.Info = info

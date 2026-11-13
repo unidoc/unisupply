@@ -617,8 +617,9 @@ With `--module-version`, a finding whose fix was released before that version sa
 (120 days to the scan date)"); the field is omitted when the release time is unknown or the fix came after the release.
 
 govulncheck runs inside unisupply, so it can only scan code that needs a Go minor version no newer than the one unisupply was
-built with. Otherwise the vulnerability scan is Pending with "this unisupply was built with go1.26.9 and cannot scan code
-that needs go1.27; rebuild unisupply with go1.27 or newer". Only a newer Go minor (language) version stops the scan; a newer patch release of the same minor version is scanned. Library callers (gorisk) can check at startup with
+built with. Otherwise the vulnerability scan is Pending with "this unisupply was built with go1.N.x and cannot scan code
+that needs go1.M; rebuild unisupply with go1.M or newer" (the Go unisupply was built with and the project's Go minor
+version). Only a newer Go minor (language) version stops the scan; a newer patch release of the same minor version is scanned. Library callers (gorisk) can check at startup with
 `scanner.CheckToolchain("go1.27.2")`, which returns that error or nil.
 
 An offline scan cannot look up vulnerabilities, because govulncheck needs the Go
