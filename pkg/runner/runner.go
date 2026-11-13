@@ -199,6 +199,9 @@ type Result struct {
 // scanVulns is the vulnerability scan; tests replace it.
 var scanVulns = scanner.ScanVulnsWithOptions
 
+// scoreAll scores the scan results; tests replace it to see the ScoreInput the runner built.
+var scoreAll = scorer.ScoreAll
+
 // Run executes unisupply's full scan-and-score pipeline: parse go.mod,
 // resolve the dependency graph, run every applicable scanner, and compute
 // the project's risk score. Returns a Result with an empty

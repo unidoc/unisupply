@@ -38,6 +38,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   private code only through the proxy the download failed and the scan exited 4. `GONOPROXY=none` is now left as it is; a
   `GONOPROXY` that holds a list still gets the patterns added. `GONOSUMDB` is unchanged: when set, `none` included, it
   gets the patterns, so the checksum database is not asked about the private paths (#169).
+- **A GitHub secondary rate limit sent as a 403 with `Retry-After` is now reported as rate-limited.** A maintainer lookup
+  that GitHub refused this way (a 403 with a `Retry-After` above zero, `X-RateLimit-Remaining` above 0) used to read as a
+  plain API error; its `unavailable_reason` is now `rate_limited` where it was `github_api_error`. The rate-limit warning
+  names the wait from `Retry-After`, as GitHub advises, and from `X-RateLimit-Reset` only when no requests remain or the
+  response does not say how many remain (GitHub sends that header on every response, so it used to name the hourly reset
+  for a one-minute limit); with requests remaining and no usable `Retry-After` it names no wait. When requests remain, a
+  scan without a token is told to wait and re-run instead of to set `GITHUB_TOKEN`, since a token does not lift a
+  secondary limit; that warning and the `GITHUB_TOKEN` one are each shown once, so a scan that meets both sees both
+  (#145).
+- **A scan that used a GitHub token and was rate-limited no longer says it was unauthenticated.** The warning now reads
+  "GitHub API rate-limited — maintainer data unavailable for N module(s)" when GitHub rate-limited at least one module,
+  instead of telling a user who set a token to set one. A scan without a token, or with one GitHub rejected (401), keeps
+  the "GitHub API unauthenticated" wording. `scorer.ScoreInput` gains `GitHubAuthenticated` (the zero value keeps the old
+  wording) (#145).
 
 ## [0.9.0] - 2026-10-29
 

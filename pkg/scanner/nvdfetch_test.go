@@ -190,6 +190,8 @@ func TestParseRetryAfter(t *testing.T) {
 		{"7", 7 * time.Second, true},
 		{"0", 0, true},
 		{"-5", 0, true},
+		{"99999999999", 0, false}, // more seconds than a time.Duration holds
+		{"-99999999999", 0, true},
 		{"3600", nvdRetryAfterCap, true},
 		{now.Add(25 * time.Second).UTC().Format(http.TimeFormat), 25 * time.Second, true},
 		{now.Add(-time.Hour).UTC().Format(http.TimeFormat), 0, true},
