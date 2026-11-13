@@ -192,9 +192,13 @@ type MaintainerScanner struct {
 	// warning does not tell the user to set a token they did set.
 	TokenRejected bool
 
-	// rateLimitWarnOnce ensures the rate-limit warning is emitted at most once
-	// per scanner instance, even when many goroutines hit the limit simultaneously.
-	rateLimitWarnOnce sync.Once
+	// rateLimitWarnOnce and secondaryLimitWarnOnce ensure each kind of
+	// rate-limit warning is emitted at most once per scanner instance, even
+	// when many goroutines hit the limit simultaneously. A scan without a token
+	// can see both kinds: a secondary limit with requests left in the hourly
+	// quota (wait and re-run) and the spent quota (set GITHUB_TOKEN).
+	rateLimitWarnOnce      sync.Once
+	secondaryLimitWarnOnce sync.Once
 }
 
 // CountGitHubDeps returns the number of dependencies in graph whose module path
@@ -373,6 +377,7 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 			info.UnavailableReason = UnavailableRateLimited
 			rep := progress.From(ctx)
 			hint := "set GITHUB_TOKEN for higher limits"
+			once := &ms.rateLimitWarnOnce
 			var rl *rateLimitError
 			switch {
 			case ms.TokenRejected:
@@ -384,10 +389,13 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 				hint = "requests were authenticated, so the token's quota or a secondary rate limit was reached; wait and re-run"
 			case errors.As(err, &rl) && rl.quotaLeft:
 				// Requests were left in the hourly quota, so this is a secondary
-				// limit, which a token does not lift.
+				// limit, which a token does not lift. It has its own once: a
+				// secondary limit seen first must not hide the token hint when
+				// the hourly quota runs out later in the same scan.
 				hint = "requests remained in the hourly quota, so a secondary rate limit was reached; wait and re-run"
+				once = &ms.secondaryLimitWarnOnce
 			}
-			ms.rateLimitWarnOnce.Do(func() {
+			once.Do(func() {
 				rep.Warn("GitHub API rate limit hit — %s; %s: https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api", err, hint)
 			})
 		default:
@@ -737,29 +745,33 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 		// remaining count is 0 (the primary limit) or when it carries a
 		// usable Retry-After (a secondary limit, possibly with requests
 		// still remaining); any other 403 is a permission error.
-		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		n, remainingErr := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining"))
+		quotaSpent := remainingErr == nil && n == 0 // the primary (hourly) limit
+		quotaLeft := remainingErr == nil && n > 0   // any limit now is a secondary one
 		retryAfter, hasRetryAfter := parseRetryAfterUncapped(resp.Header.Get("Retry-After"), time.Now())
 		// A Retry-After of zero or in the past names no wait, and is no sign of a limit on a 403.
 		hasRetryAfter = hasRetryAfter && retryAfter > 0
 		if resp.StatusCode == http.StatusTooManyRequests ||
-			(resp.StatusCode == http.StatusForbidden && (remaining == "0" || hasRetryAfter)) {
+			(resp.StatusCode == http.StatusForbidden && (quotaSpent || hasRetryAfter)) {
 			// GitHub sends the X-RateLimit-* headers on every response, so the
-			// reset time is the wait only when the quota is spent (remaining 0);
-			// otherwise Retry-After names it, as GitHub's guidance says, and the
-			// reset time is the last resort.
-			rl := &rateLimitError{}
-			if n, err := strconv.Atoi(remaining); err == nil && n > 0 {
-				rl.quotaLeft = true
+			// reset time is the hourly window's. It is the wait when the quota
+			// is spent; otherwise Retry-After names the wait, as GitHub's
+			// guidance says. With requests left and no usable Retry-After the
+			// response names no wait, and the reset time would overstate it.
+			// It stays the last resort when the remaining count is not given.
+			rl := &rateLimitError{quotaLeft: quotaLeft}
+			var reset time.Time
+			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+				reset = time.Unix(resetUnix, 0).UTC()
 			}
-			resetUnix, resetErr := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64)
 			var resetAt time.Time
 			switch {
-			case remaining == "0" && resetErr == nil:
-				resetAt = time.Unix(resetUnix, 0).UTC()
+			case quotaSpent && !reset.IsZero():
+				resetAt = reset
 			case hasRetryAfter:
 				resetAt = time.Now().Add(retryAfter.Round(time.Second)).UTC()
-			case resetErr == nil:
-				resetAt = time.Unix(resetUnix, 0).UTC()
+			case !quotaLeft:
+				resetAt = reset // zero when the header is absent: no wait named
 			}
 			if !resetAt.IsZero() {
 				untilReset := max(time.Until(resetAt).Round(time.Second), 0)

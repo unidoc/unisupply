@@ -1682,9 +1682,12 @@ var fromNowRe = regexp.MustCompile(`\(([0-9hms.]+) from now\)`)
 // TestGitHubRateLimit_RetryAfterAndReset pins how Retry-After and
 // X-RateLimit-Reset decide whether a response is a rate limit and what wait
 // the warning names. A secondary limit can arrive as a 429 or a 403 with
-// Retry-After and a nonzero X-RateLimit-Remaining; X-RateLimit-Reset wins over
-// Retry-After when both are present; an unusable Retry-After still counts as a
-// limit but names no wait.
+// Retry-After and a nonzero X-RateLimit-Remaining. The wait is
+// X-RateLimit-Reset when the quota is spent (remaining 0), else Retry-After;
+// with requests remaining and no usable Retry-After no wait is named, and
+// X-RateLimit-Reset is the last resort only when the remaining count is
+// absent. An unusable Retry-After (unparseable, zero, too large) names no wait;
+// it still counts as a limit on a 429, but not on a 403.
 func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1779,6 +1782,23 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 			name: "429 with a Retry-After too large for a duration names no wait", status: http.StatusTooManyRequests,
 			retryAfter: "99999999999",
 			wantReason: UnavailableRateLimited, wantHints: 1,
+		},
+		{
+			// Requests remain, so the reset is the hourly window's, not the wait for this (secondary) limit.
+			name: "429 with remaining left and reset, no Retry-After: no wait named", status: http.StatusTooManyRequests,
+			remaining: "4800", resetIn: 50 * time.Minute,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			name: "429 with remaining left, reset and Retry-After 0: no wait named", status: http.StatusTooManyRequests,
+			remaining: "4800", retryAfter: "0", resetIn: 50 * time.Minute,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			name: "429 with reset only, no remaining header: reset is the last resort", status: http.StatusTooManyRequests,
+			resetIn:    10 * time.Minute,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
 		},
 	}
 	for _, tc := range tests {
@@ -1886,6 +1906,64 @@ func TestGitHubRateLimit_WarnOnceConcurrent(t *testing.T) {
 
 	if warnCount != 1 {
 		t.Errorf("expected rate-limit warning exactly once, got %d", warnCount)
+	}
+}
+
+// TestGitHubRateLimit_OneWarningPerHintKind verifies that a scan without a
+// token warns once per kind of limit: a secondary limit seen first (requests
+// left, wait and re-run) does not hide the GITHUB_TOKEN hint when the hourly
+// quota runs out later, and the reverse order keeps both too. Owners named
+// "sec*" get a secondary limit, "pri*" the spent quota.
+func TestGitHubRateLimit_OneWarningPerHintKind(t *testing.T) {
+	resetAt := time.Now().Add(30 * time.Minute).Unix()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetAt, 10))
+		if strings.HasPrefix(r.URL.Path, "/repos/sec") {
+			w.Header().Set("X-RateLimit-Remaining", "12")
+			w.Header().Set("Retry-After", "60")
+		} else {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name       string
+		owners     []string // analysed in order; each is a separate repo, so none is served from the scanner's cache
+		wantToken  int      // warnings with the GITHUB_TOKEN hint
+		wantWaitRe int      // warnings with the wait-and-re-run hint
+	}{
+		{name: "secondary then primary", owners: []string{"sec1", "pri1"}, wantToken: 1, wantWaitRe: 1},
+		{name: "primary then secondary", owners: []string{"pri1", "sec1"}, wantToken: 1, wantWaitRe: 1},
+		{name: "secondary twice", owners: []string{"sec1", "sec2"}, wantWaitRe: 1},
+		{name: "primary twice", owners: []string{"pri1", "pri2"}, wantToken: 1},
+		{name: "mixed, repeated", owners: []string{"sec1", "pri1", "sec2", "pri2"}, wantToken: 1, wantWaitRe: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &warnRecorder{}
+			ctx := progress.WithReporter(context.Background(), rec)
+			ms := newTestMaintainerScanner(srv.URL)
+			for _, owner := range tc.owners {
+				if info := ms.analyzeRepo(ctx, owner, "repo"); info.UnavailableReason != UnavailableRateLimited {
+					t.Fatalf("%s: UnavailableReason = %q, want %q", owner, info.UnavailableReason, UnavailableRateLimited)
+				}
+			}
+			var token, waitRe int
+			for _, m := range rec.all() {
+				if strings.Contains(m, "set GITHUB_TOKEN") {
+					token++
+				}
+				if strings.Contains(m, "secondary rate limit was reached; wait and re-run") {
+					waitRe++
+				}
+			}
+			if token != tc.wantToken || waitRe != tc.wantWaitRe {
+				t.Errorf("GITHUB_TOKEN hints = %d, wait-and-re-run hints = %d; want %d and %d (warnings: %q)",
+					token, waitRe, tc.wantToken, tc.wantWaitRe, rec.all())
+			}
+		})
 	}
 }
 
