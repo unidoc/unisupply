@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/unidoc/unisupply/pkg/progress"
+	"github.com/unidoc/unisupply/pkg/scorer"
 )
 
 // stubGitHub replaces http.DefaultTransport (which the scanner client
@@ -328,5 +329,60 @@ func TestRun_OptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 	if !hasDeadline || remaining <= 0 || remaining > limit {
 		t.Errorf("the request carried a deadline of %v (set: %v), want at most Options.Timeout (%v)", remaining, hasDeadline, limit)
+	}
+}
+
+// TestRun_ScoreInputCarriesTheTokenStateUsed verifies the runner tells the
+// scorer whether the scans really used a token: the maintainer warning names
+// "unauthenticated" only when they did not. A token GitHub rejected (401) is
+// cleared before the scanners run, so it counts as unauthenticated; one that
+// could not be validated is kept and used.
+func TestRun_ScoreInputCarriesTheTokenStateUsed(t *testing.T) {
+	tests := []struct {
+		name   string
+		token  string
+		status int
+		want   bool
+	}{
+		{name: "token accepted", token: "good", status: http.StatusOK, want: true},
+		{name: "no token", token: "", status: http.StatusOK, want: false},
+		{name: "token rejected", token: "bad", status: http.StatusUnauthorized, want: false},
+		{name: "token not validated is still used", token: "maybe", status: http.StatusServiceUnavailable, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// stubGitHub answers only the token probe and refuses every other
+			// request, so no test reaches the network.
+			stubGitHub(t, tc.status)
+			stubScan(t, nil, nil, true, nil)
+			var inputs []scorer.ScoreInput
+			prev := scoreAll
+			t.Cleanup(func() { scoreAll = prev })
+			scoreAll = func(in scorer.ScoreInput) *scorer.ProjectScore {
+				inputs = append(inputs, in)
+				return prev(in)
+			}
+
+			dir := t.TempDir()
+			gomod := "module github.com/example/app\n\ngo 1.25\n\nrequire github.com/example/dep v1.0.0\n"
+			if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(context.Background(), Options{
+				Path:        dir,
+				DirectOnly:  true,
+				GithubToken: tc.token,
+				Now:         time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(inputs) != 1 {
+				t.Fatalf("scorer called %d times, want 1", len(inputs))
+			}
+			if got := inputs[0].GitHubAuthenticated; got != tc.want {
+				t.Errorf("ScoreInput.GitHubAuthenticated = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
