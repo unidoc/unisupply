@@ -32,14 +32,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `go list` that govulncheck was running, which used to load packages to the end. The child does not see what the host
   set up in code, such as a replaced `http.DefaultTransport`; proxy settings in the environment apply. `--network-log`
   still shows govulncheck's requests (#174).
-- **A govulncheck child killed with SIGKILL is now a retryable failure.** The out-of-memory killer, macOS memory pressure
-  and `kill -9` all end the child with SIGKILL, and the scan reported it as the permanent `internal_panic`, which a caller
-  that retries only transient failures never retries. The scan now fails with reason `scan_killed` (`scanner.ReasonScanKilled`),
-  kind `transient`, and the warning says the child "was killed" rather than "crashed", so a caller can retry it with more
-  memory or fewer scans at once. unisupply cannot tell an out-of-memory kill from any other SIGKILL. A child whose Go
-  runtime could not get memory (an address-space limit, `vm.overcommit_memory=2`: "fatal error: out of memory", status
-  2) fails with reason `out_of_memory` (`scanner.ReasonOutOfMemory`), also transient. A child that panicked, died of
-  another signal, or was killed while it dumped a panic keeps `internal_panic` (#182).
+- **A govulncheck child killed with SIGKILL is now a retryable failure.** The out-of-memory killer, macOS memory
+  pressure and `kill -9` all end the child with SIGKILL, and the scan reported it as the permanent `internal_panic`,
+  which a caller that retries only transient failures never retries. The scan now fails with reason `scan_killed`
+  (`scanner.ReasonScanKilled`), kind `transient`, and the warning says the child "was killed" rather than "crashed", so
+  a caller can retry it with more memory or fewer scans at once. unisupply cannot tell an out-of-memory kill from any
+  other SIGKILL. A child whose Go runtime could not get memory (an address-space limit, `vm.overcommit_memory=2`: a
+  `fatal error:` that says so, such as "runtime: out of memory" or "pageAlloc: out of memory", status 2) fails with
+  reason `out_of_memory` (`scanner.ReasonOutOfMemory`), also transient. A child that panicked keeps `internal_panic`,
+  even if it was then killed or ran out of memory, and so does one that died of another signal (#182).
 - **`--private-modules` no longer routes private modules around a company module proxy.** With `GONOPROXY=none`, the
   setup `go help private` documents for a proxy that also serves the private modules, the CLI appended the list and made
   it `none,acme.example`, so the go command fetched those modules from their VCS directly. On a runner that reaches

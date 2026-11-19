@@ -71,12 +71,24 @@ func fakeChildBody(mode string) func(context.Context, []string) error {
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Kill()
 			time.Sleep(time.Hour)
-		case "oomruntime", "oomalloc":
-			// the Go runtime that cannot get memory: its fatal error (mem_linux.go, mem_darwin.go; mcache.go, Windows), a
-			// goroutine dump without a "panic:" line, and status 2
-			line := map[string]string{"oomruntime": "fatal error: runtime: out of memory", "oomalloc": "fatal error: out of memory"}[mode]
-			fmt.Fprintln(os.Stderr, "runtime: out of memory: cannot allocate 4194304-byte block (5368709120 in use)")
+		case "oomruntime", "oomalloc", "oomarena", "oompagealloc", "oomcannotalloc", "fatalother":
+			// a fatal error of the Go runtime, as throw prints it: the line, a goroutine dump without a "panic:" line, and
+			// status 2. All but the last say the runtime could not get memory (mem_linux.go, mcache.go, malloc.go,
+			// mpagealloc.go, mheap.go).
+			line := map[string]string{
+				"oomruntime":     "fatal error: runtime: out of memory",
+				"oomalloc":       "fatal error: out of memory",
+				"oomarena":       "fatal error: out of memory allocating heap arena metadata",
+				"oompagealloc":   "fatal error: pageAlloc: out of memory",
+				"oomcannotalloc": "fatal error: runtime: cannot allocate memory",
+				"fatalother":     "fatal error: concurrent map writes",
+			}[mode]
 			fmt.Fprintf(os.Stderr, "%s\n\ngoroutine 1 [running]:\nmain.main()\n", line)
+			os.Exit(2)
+		case "panicoom":
+			// a child that panics and runs out of memory while the panic unwinds
+			fmt.Fprintln(os.Stderr, "panic: boom\n\ngoroutine 1 [running]:")
+			fmt.Fprintln(os.Stderr, "fatal error: out of memory")
 			os.Exit(2)
 		case "panicrule":
 			// the dump says things that scanFailureRules match (a network fault, a rate limit)
@@ -268,7 +280,7 @@ func TestChild_SIGKILLDuringAPanicStaysInternalPanic(t *testing.T) {
 // A child whose Go runtime could not get memory (an address-space limit, vm.overcommit_memory=2) exits with status 2
 // and no panic line: out_of_memory, which more memory or fewer scans at once can fix.
 func TestChild_RuntimeOutOfMemoryIsATransientOutOfMemory(t *testing.T) {
-	for _, mode := range []string{"oomruntime", "oomalloc"} {
+	for _, mode := range []string{"oomruntime", "oomalloc", "oomarena", "oompagealloc", "oomcannotalloc"} {
 		t.Run(mode, func(t *testing.T) {
 			warnings, err, _ := passWithChild(t, context.Background(), mode)
 			se := asScanError(t, err)
@@ -283,6 +295,44 @@ func TestChild_RuntimeOutOfMemoryIsATransientOutOfMemory(t *testing.T) {
 				t.Errorf("Summary = %q, want %q", got, wantSummary)
 			}
 		})
+	}
+}
+
+// A runtime fatal error that is not about memory, and a panic that ran out of memory while it unwound, are crashes: a
+// retry would end the same way.
+func TestChild_OtherFatalErrorOrPanicStaysInternalPanic(t *testing.T) {
+	for mode, want := range map[string]string{
+		"fatalother": "govulncheck child process crashed (exit status 2)",
+		"panicoom":   "govulncheck child process crashed (exit status 2): panic: boom",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			warnings, err, _ := passWithChild(t, context.Background(), mode)
+			se := asScanError(t, err)
+			if se.Kind != FailPermanent || se.Reason != ReasonInternalPanic {
+				t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic", se.Kind, se.Reason)
+			}
+			if len(warnings) == 0 || warnings[0] != want {
+				t.Errorf("warnings = %q, want first %q", warnings, want)
+			}
+		})
+	}
+}
+
+func TestOutOfMemoryLine(t *testing.T) {
+	for line, want := range map[string]bool{
+		"fatal error: runtime: out of memory":                         true,
+		"fatal error: out of memory (stackalloc)":                     true,
+		"fatal error: out of memory allocating allArenas":             true,
+		"fatal error: runtime: cannot allocate memory":                true,
+		"fatal error: concurrent map writes":                          false,
+		"runtime: out of memory: cannot allocate 8192-byte block":     false, // the line before the fatal error
+		"panic: out of memory":                                        false, // a panic whose message says so
+		"\tfatal error: out of memory":                                false,
+		"ERR govulncheck: fatal error: out of memory in a dependency": false,
+	} {
+		if got := outOfMemoryLine(line); got != want {
+			t.Errorf("outOfMemoryLine(%q) = %v, want %v", line, got, want)
+		}
 	}
 }
 
