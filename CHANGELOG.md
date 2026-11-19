@@ -53,6 +53,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   the "GitHub API unauthenticated" wording. `scorer.ScoreInput` gains `GitHubAuthenticated` (the zero value keeps the old
   wording) (#145).
 
+### Security Patches
+
+- **Built with Go 1.26.11 instead of 1.26.10**, clearing GO-2026-6859 (`net/http`: an HTTP/1 server can crash from a
+  race between `MaxBytesReader` and the response headers). govulncheck reported it as reachable from unisupply's HTTP
+  client calls; unisupply runs no HTTP server, so it was not exploitable here. Building from source now needs Go 1.26.11
+  or newer, and so does a module that requires the next unisupply release (`go get`, or a library caller of
+  `pkg/runner`), since `go.mod` says `go 1.26.11`. CI tests against Go 1.26.11 and 1.27.4 (1.27.4 is the first 1.27
+  release with the fix).
+
 ## [0.9.0] - 2026-10-29
 
 Service release. One run now gives everything a service needs: the dependency
