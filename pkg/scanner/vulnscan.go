@@ -206,6 +206,7 @@ func (r *govulncheckRun) pass(ctx context.Context, level string, warnings []stri
 	if exitErr != nil && errors.As(exitErr, &crash) {
 		// The child process died (a panic, a kill that no context asked for). What it printed is a stack trace, not a
 		// failure message: it is not matched against the failure rules, which a line of it could satisfy by chance.
+		// A SIGKILL is its own reason, ReasonScanKilled; every other death is ReasonInternalPanic.
 		var warning string
 		warning, scanErr = r.crashFailure(crash)
 		warnings = append(warnings, warning)
@@ -303,9 +304,13 @@ func (r *govulncheckRun) modCache() string {
 	return r.projectEnv.modCache
 }
 
-// crashFailure is the warning and the typed failure of a govulncheck child that crashed: ReasonInternalPanic, permanent.
-// The warning is one line (the exit status and the first panic line); the failure's text carries that line and the end
-// of the child's stderr. Neither carries the path of the project or of the module cache on this machine.
+// crashFailure is the warning and the typed failure of a govulncheck child that died. A child that SIGKILL ended (the
+// out-of-memory killer, `kill -9`) and printed no panic line is ReasonScanKilled, transient: nothing says the scan itself
+// is at fault, and it can succeed with more memory or fewer scans at once. Every other death is ReasonInternalPanic,
+// permanent: a panic, another signal (a panic under GOTRACEBACK=crash dies of SIGABRT), a child killed while it dumped a
+// panic, an exit status that is not the child's. The warning is one line (the exit status and the first panic line); the
+// failure's text carries that line and the end of the child's stderr. Neither carries the path of the project or of the
+// module cache on this machine.
 func (r *govulncheckRun) crashFailure(crash *childCrashError) (string, *ScanError) {
 	modCache := r.modCache()
 	warning := trimPaths(crash.summary(), r.projectDir, modCache)
@@ -313,7 +318,11 @@ func (r *govulncheckRun) crashFailure(crash *childCrashError) (string, *ScanErro
 	if crash.tail != "" {
 		text += "\n" + stderrTail(trimPaths(crash.tail, r.projectDir, modCache))
 	}
-	return warning, &ScanError{Kind: FailPermanent, Reason: ReasonInternalPanic, Err: &tailError{text: text, err: crash}}
+	kind, reason := FailPermanent, ReasonInternalPanic
+	if crash.killed && crash.panicLine == "" {
+		kind, reason = FailTransient, ReasonScanKilled
+	}
+	return warning, &ScanError{Kind: kind, Reason: reason, Err: &tailError{text: text, err: crash}}
 }
 
 // MarkCallPathChecked sets CallPathChecked on every finding: they come from a finished called pass, so each one's tier is

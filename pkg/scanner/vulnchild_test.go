@@ -60,6 +60,11 @@ func fakeChildBody(mode string) func(context.Context, []string) error {
 		case "panic":
 			go func() { panic("boom") }()
 			time.Sleep(time.Hour)
+		case "sigkill":
+			// what the out-of-memory killer, macOS memory pressure and `kill -9` do: SIGKILL, which no process can catch
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Kill()
+			time.Sleep(time.Hour)
 		case "panicrule":
 			// the dump says things that scanFailureRules match (a network fault, a rate limit)
 			go func() { panic("dial tcp: connection refused, 429 too many requests, vuln.go.dev") }()
@@ -207,6 +212,44 @@ func TestChild_PanicIsInternalPanic(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestChild_SIGKILLIsATransientScanKilled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Kill is TerminateProcess on Windows: the child ends with status 1, not a signal")
+	}
+	warnings, err, _ := passWithChild(t, context.Background(), "sigkill")
+	se := asScanError(t, err)
+	if se.Kind != FailTransient || se.Reason != "scan_killed" {
+		t.Fatalf("Kind/Reason = %v/%s, want transient/scan_killed (a retry can help, as it cannot for a panic)", se.Kind, se.Reason)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("no warning")
+	}
+	w := warnings[0]
+	if !strings.Contains(w, "killed") || !strings.Contains(w, "signal: killed") || strings.Contains(w, "crashed") || strings.Contains(w, "\n") {
+		t.Errorf("warning = %q, want one line that says the child was killed, with its status, and not that it crashed", w)
+	}
+	want := "scan_killed: govulncheck child process was killed (signal: killed)"
+	if got := se.Summary(); got != want {
+		t.Errorf("Summary = %q, want %q", got, want)
+	}
+}
+
+// A Go panic under GOTRACEBACK=crash ends the process with SIGABRT: a signal, but not a kill, and a retry cannot help it.
+func TestChild_PanicThatDiesBySIGABRTStaysInternalPanic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("GOTRACEBACK=crash ends a process with a signal on Unix only")
+	}
+	warnings, err := passWithEnv(t, "panic", "GOTRACEBACK=crash")
+	se := asScanError(t, err)
+	if se.Reason != ReasonInternalPanic || se.Kind != FailPermanent {
+		t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic (SIGABRT is how a panic dies here, not a kill)", se.Kind, se.Reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "crashed (signal: ") || !strings.Contains(warnings[0], "panic: boom") {
+		t.Errorf("warnings = %q, want the crash with its signal and the panic line", warnings)
+	}
+	t.Logf("warning: %s", warnings[0])
 }
 
 func TestChild_ErrorClassifiesLikeInProcess(t *testing.T) {

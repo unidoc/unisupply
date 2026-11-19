@@ -188,16 +188,22 @@ func writeChildError(w io.Writer, err error) {
 }
 
 // childCrashError is a govulncheck child that did not end the way a child does: it panicked, was killed, or failed to
-// finish its output. Its text is for people; the scan reports it as ReasonInternalPanic without classifying it.
+// finish its output. Its text is for people; the scan reports it as ReasonInternalPanic without classifying it, except a
+// child that SIGKILL ended, which is ReasonScanKilled.
 type childCrashError struct {
 	status    string // how the process ended: "exit status 2", "signal: killed"
+	killed    bool   // SIGKILL ended the process: the out-of-memory killer, memory pressure, `kill -9`
 	panicLine string // the first "panic:" line of its stderr, if any
 	tail      string // the end of its stderr
 }
 
 // summary is the one line that is published: the status and the panic line.
 func (e *childCrashError) summary() string {
-	s := "govulncheck child process crashed (" + e.status + ")"
+	what := "crashed"
+	if e.killed {
+		what = "was killed"
+	}
+	s := "govulncheck child process " + what + " (" + e.status + ")"
 	if e.panicLine != "" {
 		s += ": " + e.panicLine
 	}
@@ -214,7 +220,7 @@ func (e *childCrashError) Error() string {
 // runGovulncheckChild runs govulncheck at the given scan level in a child process of this executable and returns its
 // error. A context that ends stops the child (its stdin closes, then a kill after childWaitDelay) and gives back the
 // context's error, like the in-process run does for a context that has ended; a child that panicked, was killed, or ended without
-// an error text gives a *childCrashError.
+// an error text gives a *childCrashError (killed is set when SIGKILL ended it).
 func runGovulncheckChild(ctx context.Context, env []string, dir, level string, stdout, _ io.Writer) error {
 	exe, err := vulnChildExecutable()
 	if err != nil {
@@ -267,7 +273,15 @@ func runGovulncheckChild(ctx context.Context, env []string, dir, level string, s
 			return errors.New(text)
 		}
 	}
-	return &childCrashError{status: waitErr.Error(), panicLine: stderr.panicText(), tail: strings.TrimSpace(stderr.tailText())}
+	// SIGKILL is what the out-of-memory killer, memory pressure and `kill -9` send. The child catches the other signals a
+	// parent or a terminal sends, and a context that ended was handled above, so nothing of ours kills it this way.
+	killed := false
+	if errors.As(waitErr, &exitErr) && exitErr.ProcessState != nil {
+		if ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok {
+			killed = ws.Signaled() && ws.Signal() == syscall.SIGKILL
+		}
+	}
+	return &childCrashError{status: waitErr.Error(), killed: killed, panicLine: stderr.panicText(), tail: strings.TrimSpace(stderr.tailText())}
 }
 
 // childStderr splits the child's stderr into lines as they come. Network-log lines go to net; error lines (childErrPrefix)
