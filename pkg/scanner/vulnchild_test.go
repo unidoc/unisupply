@@ -65,6 +65,19 @@ func fakeChildBody(mode string) func(context.Context, []string) error {
 			p, _ := os.FindProcess(os.Getpid())
 			_ = p.Kill()
 			time.Sleep(time.Hour)
+		case "panicsigkill":
+			// a child that SIGKILL ends while it prints a panic
+			fmt.Fprintln(os.Stderr, "panic: boom\n\ngoroutine 1 [running]:")
+			p, _ := os.FindProcess(os.Getpid())
+			_ = p.Kill()
+			time.Sleep(time.Hour)
+		case "oomruntime", "oomalloc":
+			// the Go runtime that cannot get memory: its fatal error (mem_linux.go, mem_darwin.go; mcache.go, Windows), a
+			// goroutine dump without a "panic:" line, and status 2
+			line := map[string]string{"oomruntime": "fatal error: runtime: out of memory", "oomalloc": "fatal error: out of memory"}[mode]
+			fmt.Fprintln(os.Stderr, "runtime: out of memory: cannot allocate 4194304-byte block (5368709120 in use)")
+			fmt.Fprintf(os.Stderr, "%s\n\ngoroutine 1 [running]:\nmain.main()\n", line)
+			os.Exit(2)
 		case "panicrule":
 			// the dump says things that scanFailureRules match (a network fault, a rate limit)
 			go func() { panic("dial tcp: connection refused, 429 too many requests, vuln.go.dev") }()
@@ -220,14 +233,14 @@ func TestChild_SIGKILLIsATransientScanKilled(t *testing.T) {
 	}
 	warnings, err, _ := passWithChild(t, context.Background(), "sigkill")
 	se := asScanError(t, err)
-	if se.Kind != FailTransient || se.Reason != "scan_killed" {
+	if se.Kind != FailTransient || se.Reason != ReasonScanKilled {
 		t.Fatalf("Kind/Reason = %v/%s, want transient/scan_killed (a retry can help, as it cannot for a panic)", se.Kind, se.Reason)
 	}
 	if len(warnings) == 0 {
 		t.Fatal("no warning")
 	}
 	w := warnings[0]
-	if !strings.Contains(w, "killed") || !strings.Contains(w, "signal: killed") || strings.Contains(w, "crashed") || strings.Contains(w, "\n") {
+	if !strings.Contains(w, "was killed") || !strings.Contains(w, "signal: killed") || strings.Contains(w, "crashed") || strings.Contains(w, "\n") {
 		t.Errorf("warning = %q, want one line that says the child was killed, with its status, and not that it crashed", w)
 	}
 	want := "scan_killed: govulncheck child process was killed (signal: killed)"
@@ -236,20 +249,41 @@ func TestChild_SIGKILLIsATransientScanKilled(t *testing.T) {
 	}
 }
 
-// A Go panic under GOTRACEBACK=crash ends the process with SIGABRT: a signal, but not a kill, and a retry cannot help it.
-func TestChild_PanicThatDiesBySIGABRTStaysInternalPanic(t *testing.T) {
+// A child that SIGKILL ends while it prints a panic is the panic: its reason and its warning both say so.
+func TestChild_SIGKILLDuringAPanicStaysInternalPanic(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("GOTRACEBACK=crash ends a process with a signal on Unix only")
+		t.Skip("Kill is TerminateProcess on Windows: the child ends with status 1, not a signal")
 	}
-	warnings, err := passWithEnv(t, "panic", "GOTRACEBACK=crash")
+	warnings, err, _ := passWithChild(t, context.Background(), "panicsigkill")
 	se := asScanError(t, err)
 	if se.Reason != ReasonInternalPanic || se.Kind != FailPermanent {
-		t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic (SIGABRT is how a panic dies here, not a kill)", se.Kind, se.Reason)
+		t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic (the child was panicking)", se.Kind, se.Reason)
 	}
-	if len(warnings) == 0 || !strings.Contains(warnings[0], "crashed (signal: ") || !strings.Contains(warnings[0], "panic: boom") {
-		t.Errorf("warnings = %q, want the crash with its signal and the panic line", warnings)
+	want := "govulncheck child process crashed (signal: killed): panic: boom"
+	if len(warnings) == 0 || warnings[0] != want {
+		t.Errorf("warnings = %q, want first %q (a crash, not a kill, as the reason says)", warnings, want)
 	}
-	t.Logf("warning: %s", warnings[0])
+}
+
+// A child whose Go runtime could not get memory (an address-space limit, vm.overcommit_memory=2) exits with status 2
+// and no panic line: out_of_memory, which more memory or fewer scans at once can fix.
+func TestChild_RuntimeOutOfMemoryIsATransientOutOfMemory(t *testing.T) {
+	for _, mode := range []string{"oomruntime", "oomalloc"} {
+		t.Run(mode, func(t *testing.T) {
+			warnings, err, _ := passWithChild(t, context.Background(), mode)
+			se := asScanError(t, err)
+			if se.Kind != FailTransient || se.Reason != ReasonOutOfMemory {
+				t.Fatalf("Kind/Reason = %v/%s, want transient/out_of_memory", se.Kind, se.Reason)
+			}
+			want := "govulncheck child process ran out of memory (exit status 2)"
+			if len(warnings) == 0 || warnings[0] != want {
+				t.Errorf("warnings = %q, want first %q", warnings, want)
+			}
+			if got, wantSummary := se.Summary(), "out_of_memory: "+want; got != wantSummary {
+				t.Errorf("Summary = %q, want %q", got, wantSummary)
+			}
+		})
+	}
 }
 
 func TestChild_ErrorClassifiesLikeInProcess(t *testing.T) {
