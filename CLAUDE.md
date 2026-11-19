@@ -228,7 +228,7 @@ CI/CD fail-fast. Without `--policy` or `--policy-preset` the exit code ignores t
 Single binary, no CGo, cross-compiles to all platforms.
 
 ```bash
-# Prerequisites: Go 1.26+
+# Prerequisites: Go 1.26+ (at least the patch release in go.mod's go line; GOTOOLCHAIN=auto downloads it)
 
 # Build for current platform
 just build                     # → bin/unisupply

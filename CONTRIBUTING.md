@@ -14,7 +14,9 @@ For security issues, **do not** open a public issue or PR — see
 
 You need:
 
-- **Go 1.26** or newer (the toolchain is pinned in `go.mod`).
+- **Go 1.26** or newer. The `go` line in `go.mod` names the exact patch release: with the
+  default `GOTOOLCHAIN=auto` the go command downloads it, with `GOTOOLCHAIN=local` your Go
+  must be at least that release.
 - **`just`** — the task runner used by every recipe in the [Justfile](Justfile).
   If you don't want to install it, run the underlying `go` commands directly;
   `just <recipe> --explain` (or just reading the Justfile) shows what they

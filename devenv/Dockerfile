@@ -7,7 +7,9 @@ FROM debian:trixie-slim
 
 # ── Build args ───────────────────────────────────────────────────────────────
 ARG CRONTAB_URL_DEPS
+# GO_SHA256 is the tarball's SHA-256 from https://go.dev/dl/; change it together with GO_DL.
 ARG GO_DL=go1.26.11.linux-amd64.tar.gz
+ARG GO_SHA256=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
 ARG USER_NAME=tower
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -59,6 +61,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
 # ── Go ───────────────────────────────────────────────────────────────────────
 RUN mkdir -p ${LOCAL_INSTALL} && cd ${LOCAL_INSTALL} \
     && wget -q ${CRONTAB_URL_DEPS}/${GO_DL} \
+    && echo "${GO_SHA256}  ${GO_DL}" | sha256sum -c - \
     && tar -zxf ${GO_DL} \
     && rm -f ${GO_DL}
 
