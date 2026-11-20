@@ -295,7 +295,8 @@ three fixes), as context and not a forecast.
 
 ## What would change the letter
 
-When a D or F can be improved by an upgrade, `grade.next_step` names the one that would improve it most:
+When the letter has a deciding row (or a whole-tree rule) and an upgrade would change it, `grade.next_step` names the one that would
+improve it most. It is given for any letter with a deciding row, not only for a D or F: a C that rests on an imported medium gets one too.
 
 ```json
 "next_step": {
@@ -312,21 +313,28 @@ When a D or F can be improved by an upgrade, `grade.next_step` names the one tha
 golang.org/x/image@v0.43.0 (clears 3 advisories; the letter would be A)`.
 
 - **The target** is the highest fixed version, compared as a semantic version (`v0.10.0` is above `v0.9.0`), among the row's *counted*
-  findings that have a fix. A fixed version that is not a version is skipped. A finding in the grace window, or a graph-only one,
-  does not set the target.
+  and *graced* findings that have a fix. A fix still in the grace window sets the target because it counts in a few days: an
+  upgrade that skipped it would be undone by it. A graph-only finding does not set the target. A fixed version that is not a
+  version is skipped. The row is a candidate only if it has at least one counted finding with a fix.
 - **`clears`** lists, sorted, every advisory of that row that the target fixes (every one whose fixed version is at or below it), in
   any tier. It includes graph-only advisories and advisories in the grace window that the upgrade also fixes.
-- **`letter_after` and `score_after`** come from grading again with those advisories removed from the row, so they are honest: when
-  another row is nearly as bad the letter after is D, not A. If the grade after the upgrade would be Pending, `letter_after` is
-  absent and `pending_after` names the check that would not have run.
-- **Which row.** When a row decides by its vulnerability score, it is that row's upgrade. When a whole-tree rule decides, every row
+- **`letter_after` and `score_after`** come from grading again, the full decision, with those advisories removed from the row, so they
+  are honest: when another row is nearly as bad the letter after is D, not A. If the grade after the upgrade would be Pending (a
+  check that the letter would then depend on did not run, a severity lookup that failed, say), `letter_after` and `score_after` are
+  absent and `pending_after` names the check that would not have run. With a letter, `score_after` is always there, 0 included.
+- **Which row.** When a row decides by its vulnerability score, it is that row's upgrade, named only when it changes something: the
+  score after is lower, or the grade after would be Pending. (A deciding high with no fix, next to a medium that has one, gets no
+  step: upgrading the medium leaves the score as it is. A D that stays a D with a lower score, as another row takes over, is
+  named.) When a whole-tree rule decides, every row
   with a counted finding that has a fix is graded again and the best result is taken: one that is not Pending, then the better letter,
   then the lower score, then the row that comes first in `grade.rows`. A whole-tree rule names a step **only if it improves the
   letter**: there is none for a checksum mismatch, which no upgrade clears.
 - **There is no `next_step`** when the grade is Pending, when nothing decides it (an A), when upkeep decides the row (an archived
-  dependency), or when the deciding row has no counted finding with a fix.
+  dependency), when the deciding row has no counted finding with a fix, or when the upgrade would change nothing.
 - **The module itself** gets the same `go get` command (a consumer moves to the fixed release). **The standard library** (graded
-  with `--grade-stdlib`) gets the toolchain form: `go get toolchain@go1.24.4`, with `version` `v1.24.4`.
+  with `--grade-stdlib`) gets the toolchain form: `go get toolchain@go1.24.4`, with `version` `v1.24.4`. A fixed version is read as `go1.26.9`, `v1.26.9`,
+  `1.26.9`, `1.21` (the release Go calls go1.21.0) or a release candidate or beta (`go1.22rc1`, which compares below the release,
+  and is `version` `v1.22.0-rc.1`); the command uses the Go spelling of the chosen version, never the semver form.
 
 The step is a statement about the letter, not a promise about the build: the fixed version may need a newer Go than the module
 supports (see [Pending](#pending), "A fix that needs a newer Go").

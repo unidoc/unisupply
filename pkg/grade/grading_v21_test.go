@@ -355,3 +355,18 @@ func TestV21_AtLeastDTreeRuleNeedsTwoModules(t *testing.T) {
 		t.Errorf("%d %+v", r.Score, r.TreeRows)
 	}
 }
+
+// The overdue weight starts exactly 60 days after the fix: one second short is not overdue, 60 days is.
+func TestV21_OverdueBoundary(t *testing.T) {
+	m := "example.com/a"
+	r := gradeDeps(dep(m, aged("GO-1", m, "HIGH", "imported", "v1.1.0", days(60)-time.Second)))
+	wantRow(t, "60 days minus a second", r, m, 49, LetterC)
+	if strings.Contains(row(t, r, m).Reason, "+5") {
+		t.Errorf("%q", row(t, r, m).Reason)
+	}
+	r = gradeDeps(dep(m, aged("GO-1", m, "HIGH", "imported", "v1.1.0", days(60))))
+	wantRow(t, "exactly 60 days", r, m, 54, LetterD)
+	if !strings.Contains(row(t, r, m).Reason, "+5: fix for GO-1 available 60 days") {
+		t.Errorf("%q", row(t, r, m).Reason)
+	}
+}

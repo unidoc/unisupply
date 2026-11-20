@@ -21,15 +21,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **A stored analysis made by v0.9.0** has no `call_path_checked` on its findings; `runner.Grade` marks every finding checked
   when its `scan.called_pass` is `ran` (#169).
 
-#### A D or F names the upgrade that would change it
+#### The grade names the upgrade that would change the letter
 
 - **`grade.next_step`** names the one upgrade that would improve the letter most: the module, the version to move to, the
   command (`go get golang.org/x/image@v0.43.0`; `go get toolchain@go1.24.4` for the standard library), the advisories it
   clears (graph-only ones and ones whose fix is under 14 days old included, when the same upgrade fixes them), and the
   letter after it. The letter after comes from grading again without those advisories, so it can stay D when another row
-  decides. When a row decides, it is that row's upgrade; when a whole-tree rule decides, each candidate row is graded again
-  and the best result is named, and only if it improves the letter (none for a checksum mismatch). There is none for a
-  Pending grade, an upkeep-decided row, or a row whose counted findings have no fix. The text and PDF reports show it next
+  decides. When a row decides, it is that row's upgrade, named only when it changes something (the score after is lower, or
+  the grade after would be Pending); when a whole-tree rule decides, each candidate row is graded again and the best result is
+  named, and only if it improves the letter (none for a checksum mismatch). A fix still in the grace period sets the target
+  version. There is none for a Pending grade, an upkeep-decided row, or a row whose counted findings have no fix. `score_after`
+  is left out when the grade after would be Pending. It is given for any letter with a deciding row. The text and PDF reports show it next
   to "Decided by". In Go: `grade.NextStep` and `grade.Result.NextStep` (#181).
 
 ### Improvements
