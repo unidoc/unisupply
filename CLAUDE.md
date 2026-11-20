@@ -117,7 +117,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 
 ## Tech stack
 
-- Go 1.26.10, no CGo
+- Go 1.26.11, no CGo
 - `github.com/spf13/pflag` — CLI flags
 - `github.com/unidoc/unipdf/v5` — PDF report generation (dogfooding)
 - `github.com/unidoc/unichart` — Charts in PDF reports
@@ -228,7 +228,7 @@ CI/CD fail-fast. Without `--policy` or `--policy-preset` the exit code ignores t
 Single binary, no CGo, cross-compiles to all platforms.
 
 ```bash
-# Prerequisites: Go 1.26+
+# Prerequisites: Go 1.26+ (at least the patch release in go.mod's go line; GOTOOLCHAIN=auto downloads it)
 
 # Build for current platform
 just build                     # → bin/unisupply

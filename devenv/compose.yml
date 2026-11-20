@@ -9,9 +9,11 @@ services:
   unisupply:
     build:
       context: .
+      # GO_DL and GO_SHA256 are passed only when set, so the Dockerfile ARGs stay the single default.
       args:
-        CRONTAB_URL_DEPS: ${CRONTAB_URL_DEPS:-https://go.dev/dl}
-        GO_DL: ${GO_DL:-go1.26.10.linux-amd64.tar.gz}
+        - CRONTAB_URL_DEPS=${CRONTAB_URL_DEPS:-https://go.dev/dl}
+        - GO_DL
+        - GO_SHA256
     container_name: unisupply-dev
     hostname: unisupply-dev
     stdin_open: true

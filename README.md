@@ -29,7 +29,8 @@ release-time decisions about third-party Go code.
 ## Install
 
 ```bash
-# Latest release (Go 1.26+ required)
+# Latest release. Needs Go 1.26 or newer: the default GOTOOLCHAIN=auto downloads
+# the patch release named in go.mod; with GOTOOLCHAIN=local, your Go must be at least that release.
 go install github.com/unidoc/unisupply/cmd/unisupply@latest
 
 # Pinned version (recommended for reproducible environments)
