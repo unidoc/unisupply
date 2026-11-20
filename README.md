@@ -63,36 +63,50 @@ unisupply ./ --policy-preset strict
 ```
 
 A text-format run reports the grade first, then the rows behind it. This is the
-real output (truncated: the dependency has two more findings, and your output
-lists every row that needs attention, `--verbose` all of them) for a small
-module that imports `gopkg.in/yaml.v2 v2.2.2` and calls `yaml.Unmarshal`:
+real output (your output lists every row that needs attention, `--verbose` all
+of them) for a small module that imports `gopkg.in/yaml.v2 v2.2.2` and calls
+`yaml.Unmarshal`:
 
 ```
 SUPPLY-CHAIN GRADE: D
-  Decided by: gopkg.in/yaml.v2 (score 70) — called high GO-2022-0956 (70)
+  Decided by: gopkg.in/yaml.v2 (score 75) — called high GO-2022-0956 (70); +5: fix for GO-2022-0956 available 1543 days
+  Next step: go get gopkg.in/yaml.v2@v2.2.8 (clears 3 advisories; the letter would be B)
 
 GRADE TABLE (worst first)
-  MODULE                         VERSION                             GRADE  SCORE  UPKEEP      REASON
-  gopkg.in/yaml.v2               v2.2.2                              D         70  unknown     called high GO-2022-0956 (70)
+  MODULE                         VERSION  GRADE  SCORE  UPKEEP      REASON
+  gopkg.in/yaml.v2               v2.2.2   D         75  archived    called high GO-2022-0956 (70); +5: fix for GO-2022-0956 available 1543 days
       GO-2022-0956  severity HIGH, tier called, counted
         Fixed in: v2.2.4
-        Response: Fix available for 1506 days; the graded version still requires the affected gopkg.in/yaml.v2 version.
+        Response: Fix available for 1543 days; the graded version still requires the affected gopkg.in/yaml.v2 version.
         History: Not enough response history.
         VEX: affected
         Condition: reached through gopkg.in/yaml.v2.Unmarshal
-  example.com/app (this module)                                      A          0  finished    nothing found
-  gopkg.in/check.v1              v0.0.0-20161208181325-20d25e280405  A          0  unknown     upkeep could not be read
+      GO-2020-0036  severity MEDIUM, tier called, counted
+        Fixed in: v2.2.8
+        Response: Fix available for 2045 days; the graded version still requires the affected gopkg.in/yaml.v2 version.
+        History: Not enough response history.
+        VEX: affected
+        Condition: reached through gopkg.in/yaml.v2.Unmarshal
+      GO-2021-0061  severity MEDIUM, tier called, counted
+        Fixed in: v2.2.3
+        Response: Fix available for 2045 days; the graded version still requires the affected gopkg.in/yaml.v2 version.
+        History: Not enough response history.
+        VEX: affected
+        Condition: reached through gopkg.in/yaml.v2.Unmarshal
+  example.com/app (this module)           A          0  not_assessed  not assessed
+  1 more row graded A with nothing found — use --verbose to list them
 
 GRADE NOTES
-  - The known-exploited status (CISA's catalog) could not be checked for 3 reached findings: one on that list would grade F.
+  - The standard library was scanned at go1.26.11, the Go toolchain this scan ran with; its findings are listed, not graded.
   - The module's own advisories were not looked up: no module version was given.
 ```
 
-This output was captured with rules version 2: under rules version 3 the score here is 75 (the fix has been available for more than 60
-days, which adds 5, and the reason says so) and a `Next step:` line follows "Decided by". The SCORE column holds the policy values
-the letter is picked from. They are
+The SCORE column holds the policy values the letter is picked from. They are
 shown so you can follow the arithmetic; they are not a measurement and not a
-risk score (see [docs/grading.md](docs/grading.md)).
+risk score (see [docs/grading.md](docs/grading.md)). The score is 75 because the
+worst finding scores 70 and its fix has been available for more than 60 days,
+which adds 5. The next step says the letter would be B, not A, because
+`gopkg.in/yaml.v2` is archived (the UPKEEP column).
 
 An offline run (`unisupply ./ --offline --module-version v1.0.0`, captured from
 the built CLI on a one-dependency module) cannot check for vulnerabilities, so
