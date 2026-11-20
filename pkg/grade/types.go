@@ -368,6 +368,19 @@ type NextStep struct {
 	PendingAfter string `json:"pending_after,omitempty"`
 }
 
+// MarshalJSON leaves out the score after a Pending upgrade: there is no grade then to take it from, so a published 0 would read
+// as a clean result. With a letter it is always there, 0 included.
+func (n NextStep) MarshalJSON() ([]byte, error) {
+	type plain NextStep // no methods: avoids recursion
+	if n.PendingAfter != "" {
+		return json.Marshal(struct {
+			plain
+			ScoreAfter *int `json:"score_after,omitempty"`
+		}{plain: plain(n)})
+	}
+	return json.Marshal(plain(n))
+}
+
 // Deciding names what set the letter: a row, or a whole-tree rule.
 type Deciding struct {
 	Module string `json:"module,omitempty"`

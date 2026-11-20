@@ -177,7 +177,7 @@ func TestNextStep_TargetIsTheHighestSemver(t *testing.T) {
 	r := gradeDeps(dep(m,
 		aged("GO-2026-9006", m, "HIGH", "called", "v0.9.0", days(30)),
 		aged("GO-2026-9007", m, "HIGH", "called", "v0.10.0", days(30)),
-		aged("GO-2026-9008", m, "HIGH", "called", "not-a-version", days(30))))
+		aged("GO-2026-9008", m, "LOW", "called", "not-a-version", days(30))))
 	n := wantStep(t, r, m, "v0.10.0")
 	if strings.Join(n.Clears, ",") != "GO-2026-9006,GO-2026-9007" {
 		t.Errorf("clears %v (a fixed version that is not a version is not cleared)", n.Clears)
@@ -186,18 +186,68 @@ func TestNextStep_TargetIsTheHighestSemver(t *testing.T) {
 	wantStep(t, r, m, "v0.10.0")
 }
 
-// The target is the highest fix among the COUNTED findings; a graced finding, or one in another tier, that has a higher fix does
-// not set it, but is cleared when the target covers it.
-func TestNextStep_GracedAndGraphOnlyDoNotSetTheTarget(t *testing.T) {
+// The target is the highest fix among the row's counted AND graced findings (a fix that is still in the grace period counts in a
+// few days, so an upgrade that skips it would be undone by it); a graph-only finding does not set it. Everything the target fixes
+// is cleared, graced ones included.
+func TestNextStep_GracedFixSetsTheTargetGraphOnlyDoesNot(t *testing.T) {
 	m := "golang.org/x/net"
 	r := gradeDeps(dep(m,
 		aged("GO-2026-9009", m, "HIGH", "called", "v0.50.0", days(30)),
 		aged("GO-2026-9010", m, "HIGH", "imported", "v0.40.0", days(30)),
 		aged("GO-2026-9011", m, "CRITICAL", "called", "v0.99.0", days(2)),
-		aged("GO-2026-9012", m, "CRITICAL", "required", "v0.98.0", days(30))))
-	n := wantStep(t, r, m, "v0.50.0")
-	if strings.Join(n.Clears, ",") != "GO-2026-9009,GO-2026-9010" {
+		aged("GO-2026-9012", m, "CRITICAL", "required", "v1.20.0", days(30))))
+	n := wantStep(t, r, m, "v0.99.0")
+	if strings.Join(n.Clears, ",") != "GO-2026-9009,GO-2026-9010,GO-2026-9011" {
 		t.Errorf("clears %v", n.Clears)
+	}
+	// a high in the grace period beside a counted one: the step goes to the newer fix, and the letter after is honest
+	a, b := "GO-2026-9020", "GO-2026-9021"
+	r = gradeDeps(dep(m, aged(a, m, "HIGH", "called", "v0.35.0", days(3)), aged(b, m, "HIGH", "called", "v0.30.0", days(100))))
+	if r.Letter != LetterD || r.Score != 75 {
+		t.Fatalf("%s %d", r.Letter, r.Score)
+	}
+	n = wantStep(t, r, m, "v0.35.0")
+	if n.LetterAfter != LetterA || n.ScoreAfter != 0 || strings.Join(n.Clears, ",") != a+","+b {
+		t.Errorf("%+v", *n)
+	}
+}
+
+// A row is a candidate only if it has a counted finding with a fix: a fix in the grace period alone is nothing to act on yet.
+func TestNextStep_RowWithOnlyAGracedFixIsNoCandidate(t *testing.T) {
+	m, w := "golang.org/x/net", "example.com/w"
+	in := Input{Self: self(), Now: now, Deps: []Row{
+		dep(m, aged("GO-2026-9022", m, "HIGH", "called", "v0.60.0", days(30))),
+		dep(w, aged("GO-2026-9023", w, "HIGH", "called", "v9.0.0", days(3))),
+	}}
+	merged := mergedInput(&in)
+	r := Grade(&in)
+	for i := range r.Rows {
+		if r.Rows[i].Module == w {
+			if n := upgradeFor(&merged, &r.Rows[i]); n != nil {
+				t.Errorf("a row with only a graced fix is no candidate: %+v", *n)
+			}
+		}
+	}
+	wantStep(t, r, m, "v0.60.0")
+}
+
+// A row-decided step is named only if it changes something: here the deciding high has no fix, so upgrading the medium that does
+// leaves the grade as it is.
+func TestNextStep_RowStepOnlyWhenItHelps(t *testing.T) {
+	m := "golang.org/x/net"
+	r := gradeDeps(dep(m, aged("GO-2026-9030", m, "HIGH", "called", "", 0), aged("GO-2026-9031", m, "MEDIUM", "called", "v0.35.0", days(30))))
+	if r.Letter != LetterD || r.Score != 70 || r.Deciding == nil || r.NextStep != nil {
+		t.Errorf("%s %d %+v next step %+v", r.Letter, r.Score, r.Deciding, r.NextStep)
+	}
+	// the same score after, but the letter is the same too, while the score falls: still named (unioffice: 75 to 54, D after)
+	img := "golang.org/x/image"
+	r = gradeDeps(dep(img, aged("GO-1", img, "HIGH", "called", "", 0), aged("GO-2", img, "HIGH", "called", "v0.43.0", days(30))),
+		dep(m, aged("GO-3", m, "MEDIUM", "called", "v0.35.0", days(30))))
+	if r.Deciding == nil || r.Deciding.Module != img {
+		t.Fatalf("%+v", r.Deciding)
+	}
+	if n := wantStep(t, r, img, "v0.43.0"); n.ScoreAfter >= r.Score {
+		t.Errorf("%+v", *n)
 	}
 }
 
@@ -247,11 +297,11 @@ func TestNextStep_TreeRuleNamesNothingThatCannotImproveTheLetter(t *testing.T) {
 	}
 	// a row that decides keeps its own step even when the letter after is the same (the honest "D after" case, see a)
 	m, o := "golang.org/x/net", "example.com/other"
-	r = gradeDeps(dep(m, aged("GO-2", m, "HIGH", "called", "v0.60.0", days(30))), dep(o, aged("GO-3", o, "HIGH", "called", "v2", days(30))))
-	if r.Deciding == nil || r.Deciding.Module != o {
-		t.Fatalf("%+v", r.Deciding)
+	r = gradeDeps(dep(m, aged("GO-2", m, "MEDIUM", "called", "v0.60.0", days(30))), dep(o, aged("GO-3", o, "HIGH", "called", "v2", days(30)), aged("GO-4", o, "HIGH", "called", "", 0)))
+	if r.Deciding == nil || r.Deciding.Module != o || r.Score != 75 {
+		t.Fatalf("%+v %d", r.Deciding, r.Score)
 	}
-	if n := wantStep(t, r, o, "v2"); n.LetterAfter != LetterD {
+	if n := wantStep(t, r, o, "v2"); n.LetterAfter != LetterD || n.ScoreAfter != 70 {
 		t.Errorf("%+v", *n)
 	}
 }
@@ -270,5 +320,89 @@ func TestNextStep_TreeRuleNamesNothingWhenOnlyPendingImproves(t *testing.T) {
 	r := Grade(&in)
 	if r.Pending != nil || r.Letter != LetterF || r.NextStep != nil {
 		t.Errorf("%s %+v next step %+v", r.Letter, r.Pending, r.NextStep)
+	}
+}
+
+// The re-grade after an upgrade is the full decision: a severity that could not be looked up decides the letter after it, so the
+// letter after is Pending ("severity_lookup") instead of a letter that rests on a guess. Before the upgrade the high decides the
+// letter whatever the unknown severity is.
+func TestNextStep_LetterAfterReadsTheSeverityLookup(t *testing.T) {
+	x, y := "example.com/x", "example.com/y"
+	failed := Finding{ID: "GO-2026-9040", Module: y, Severity: "", Reachability: "imported", SeverityLookupFailed: true, FixedVersion: "v2", FixReleasedAt: ptr(now.Add(-days(30))), FixDateSource: "module_proxy"}
+	r := gradeDeps(dep(x, aged("GO-2026-9041", x, "HIGH", "called", "v1.1.0", days(30))), dep(y, failed))
+	if r.Pending != nil || r.Letter != LetterD {
+		t.Fatalf("%s %+v", r.Letter, r.Pending)
+	}
+	n := wantStep(t, r, x, "v1.1.0")
+	if n.LetterAfter != "" || n.PendingAfter != "severity_lookup" {
+		t.Errorf("%+v", *n)
+	}
+}
+
+// score_after is left out when the grade after the upgrade would be Pending (there is no score then), and kept, 0 included,
+// when there is a letter.
+func TestNextStep_ScoreAfterJSON(t *testing.T) {
+	a, _ := json.Marshal(NextStep{Module: "m", Version: "v1.0.0", Command: "go get m@v1.0.0", Clears: []string{"X"}, LetterAfter: LetterA})
+	if !strings.Contains(string(a), `"letter_after":"A"`) || !strings.Contains(string(a), `"score_after":0`) {
+		t.Errorf("%s", a)
+	}
+	p, _ := json.Marshal(NextStep{Module: "m", Version: "v1.0.0", Command: "go get m@v1.0.0", Clears: []string{"X"}, PendingAfter: "dependency_maintenance"})
+	if strings.Contains(string(p), "score_after") || strings.Contains(string(p), "letter_after") || !strings.Contains(string(p), `"pending_after":"dependency_maintenance"`) {
+		t.Errorf("%s", p)
+	}
+	var back NextStep
+	if err := json.Unmarshal(p, &back); err != nil || back.PendingAfter != "dependency_maintenance" || back.ScoreAfter != 0 {
+		t.Errorf("%+v %v", back, err)
+	}
+	// and inside a result
+	m := "golang.org/x/net"
+	missing := dep("example.com/unread")
+	missing.Upkeep = Upkeep{Missing: true}
+	r := gradeDeps(dep(m, aged("GO-2026-9005", m, "HIGH", "called", "v0.60.0", days(30))), missing)
+	b, _ := json.Marshal(r)
+	var top struct {
+		NextStep map[string]any `json:"next_step"`
+	}
+	if err := json.Unmarshal(b, &top); err != nil || top.NextStep == nil {
+		t.Fatalf("%s %v", b, err)
+	}
+	if _, ok := top.NextStep["score_after"]; ok {
+		t.Errorf("%v", top.NextStep)
+	}
+}
+
+// The Go spellings of a fixed version (scanner.stdlibVersionPattern): "go1.26.9", "v1.26.9", "1.26.9", "1.21", "go1.22rc1". They
+// compare as versions, and the command uses the Go spelling of the chosen one.
+func TestNextStep_StdlibSpellings(t *testing.T) {
+	step := func(fixes ...string) *NextStep {
+		var fs []Finding
+		for i, v := range fixes {
+			fs = append(fs, aged("GO-2026-91"+string(rune('0'+i)), "stdlib", "HIGH", "called", v, days(30)))
+		}
+		return gradeDeps(dep("stdlib", fs...)).NextStep
+	}
+	n := step("go1.26.9", "v1.26.10")
+	if n == nil || n.Version != "v1.26.10" || n.Command != "go get toolchain@go1.26.10" || len(n.Clears) != 2 {
+		t.Fatalf("%+v", n)
+	}
+	n = step("go1.26.10", "v1.26.9")
+	if n == nil || n.Version != "v1.26.10" || n.Command != "go get toolchain@go1.26.10" {
+		t.Fatalf("%+v", n)
+	}
+	if n = step("go1.24.4"); n == nil || n.Version != "v1.24.4" || n.Command != "go get toolchain@go1.24.4" {
+		t.Fatalf("a go-prefixed version alone: %+v", n)
+	}
+	if n = step("1.26.9"); n == nil || n.Command != "go get toolchain@go1.26.9" {
+		t.Fatalf("%+v", n)
+	}
+	// 1.21 is the release Go calls go1.21.0; a release candidate is below it, and keeps its own spelling
+	if n = step("go1.22rc1", "1.22"); n == nil || n.Version != "v1.22.0" || n.Command != "go get toolchain@go1.22.0" || len(n.Clears) != 2 {
+		t.Fatalf("%+v", n)
+	}
+	if n = step("go1.22rc1"); n == nil || n.Version != "v1.22.0-rc.1" || n.Command != "go get toolchain@go1.22rc1" {
+		t.Fatalf("%+v", n)
+	}
+	if n = step("go1.23beta2"); n == nil || n.Version != "v1.23.0-beta.2" || n.Command != "go get toolchain@go1.23beta2" {
+		t.Fatalf("%+v", n)
 	}
 }
