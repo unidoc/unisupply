@@ -327,7 +327,7 @@ type Result struct {
 	// Deciding is the row (or whole-tree rule) that set the letter; nil when nothing crossed the A threshold.
 	Deciding *Deciding `json:"deciding,omitempty"`
 	// NextStep is the one upgrade that would improve the letter most; nil when the grade is Pending, when nothing decides it,
-	// or when no counted finding that decides has a fix.
+	// when no counted finding that decides has a fix, or when a whole-tree rule decides and no upgrade improves the letter.
 	NextStep *NextStep   `json:"next_step,omitempty"`
 	Rows     []RowResult `json:"rows"`
 	TreeRows []TreeRow   `json:"tree_rows,omitempty"`
@@ -348,7 +348,8 @@ type Result struct {
 }
 
 // NextStep is the one upgrade that would improve the letter most, and the letter after it. The letter after is graded again
-// without the advisories the upgrade fixes, so it is honest: when another row is nearly as bad it says D, not A.
+// without the advisories the upgrade fixes, so it is honest: when another row is nearly as bad it says D, not A. When a
+// whole-tree rule decides, a step is given only if it improves the letter (none for a checksum mismatch).
 type NextStep struct {
 	Module  string `json:"module"`
 	Version string `json:"version"` // the fixed version to move to

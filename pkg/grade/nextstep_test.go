@@ -226,9 +226,40 @@ func TestOverdueReasonPrefersTheScoringFinding(t *testing.T) {
 	}
 }
 
-// A candidate whose grade after the upgrade would be Pending loses to one that is not: with the known-exploited check missing, an
-// upgrade that leaves D would make the grade Pending ("a finding on that list would grade F"), while one that leaves F would not.
-func TestNextStep_NotPendingBeatsPending(t *testing.T) {
+// When a whole-tree rule decides, an upgrade is named only if it improves the letter. Otherwise the reader would be told to run
+// something that cannot change their grade.
+func TestNextStep_TreeRuleNamesNothingThatCannotImproveTheLetter(t *testing.T) {
+	// a checksum mismatch is not cleared by any upgrade
+	x := "example.com/x"
+	r := run(Input{Self: self(), ChecksumMismatch: true, ChecksumDetail: "example.com/x v1.0.0",
+		Deps: []Row{dep(x, aged("GO-1", x, "HIGH", "called", "v1.1.0", days(30)))}})
+	if r.Letter != LetterF || r.Deciding == nil || r.Deciding.Tree != "checksum_mismatch" || r.NextStep != nil {
+		t.Errorf("checksum mismatch: %s %+v next step %+v", r.Letter, r.Deciding, r.NextStep)
+	}
+	// four called highs in four modules: any one upgrade leaves three in three modules, still F
+	var rows []Row
+	for _, m := range []string{"example.com/a", "example.com/b", "example.com/c", "example.com/d"} {
+		rows = append(rows, dep(m, aged("H-"+m, m, "HIGH", "called", "v2", days(30))))
+	}
+	r = gradeDeps(rows...)
+	if r.Letter != LetterF || r.Deciding == nil || r.Deciding.Tree != "called_findings" || r.NextStep != nil {
+		t.Errorf("no single upgrade improves it: %s %+v next step %+v", r.Letter, r.Deciding, r.NextStep)
+	}
+	// a row that decides keeps its own step even when the letter after is the same (the honest "D after" case, see a)
+	m, o := "golang.org/x/net", "example.com/other"
+	r = gradeDeps(dep(m, aged("GO-2", m, "HIGH", "called", "v0.60.0", days(30))), dep(o, aged("GO-3", o, "HIGH", "called", "v2", days(30))))
+	if r.Deciding == nil || r.Deciding.Module != o {
+		t.Fatalf("%+v", r.Deciding)
+	}
+	if n := wantStep(t, r, o, "v2"); n.LetterAfter != LetterD {
+		t.Errorf("%+v", *n)
+	}
+}
+
+// An upgrade after which the grade would be Pending is not named by a whole-tree rule either: with the known-exploited check
+// missing, any upgrade that improves an F would make the grade Pending ("a finding on that list would grade F"), and one that
+// leaves F improves nothing.
+func TestNextStep_TreeRuleNamesNothingWhenOnlyPendingImproves(t *testing.T) {
 	a, b, z := "example.com/a", "example.com/b", "example.com/z"
 	in := Input{Self: self(), Now: now, Deps: []Row{
 		dep(a, aged("A1", a, "HIGH", "called", "v0.5.0", days(30))),
@@ -237,11 +268,7 @@ func TestNextStep_NotPendingBeatsPending(t *testing.T) {
 	}}
 	in.Checks.KEVUnchecked = 1
 	r := Grade(&in)
-	if r.Pending != nil || r.Letter != LetterF {
-		t.Fatalf("%s %+v", r.Letter, r.Pending)
-	}
-	n := wantStep(t, r, a, "v0.5.0")
-	if n.LetterAfter != LetterF || n.PendingAfter != "" {
-		t.Errorf("%+v", *n)
+	if r.Pending != nil || r.Letter != LetterF || r.NextStep != nil {
+		t.Errorf("%s %+v next step %+v", r.Letter, r.Pending, r.NextStep)
 	}
 }

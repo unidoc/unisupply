@@ -17,7 +17,9 @@ const stdlibRow = "stdlib"
 //   - A row decides by its vulnerability score: that row's upgrade. A row that decides by upkeep has no upgrade that changes it.
 //   - A whole-tree rule decides: every row with a counted finding that has a fix is a candidate, each is graded again without
 //     what its upgrade fixes, and the best result wins: one that is not Pending, then the better letter, then the lower score,
-//     then the earlier row (res.Rows is worst first and deterministic).
+//     then the earlier row (res.Rows is worst first and deterministic). It is named only if it improves the letter: an upgrade
+//     that leaves the letter as it is (or after which the grade would be Pending) is not offered. A row that decides keeps its
+//     own step even when another row leaves the same letter: that is the honest "D after" answer.
 func nextStep(in *Input, res *Result) *NextStep {
 	if res.Pending != nil || res.Deciding == nil || len(res.Rows) == 0 {
 		return nil
@@ -39,6 +41,11 @@ func nextStep(in *Input, res *Result) *NextStep {
 		if best == nil || betterStep(n, best) {
 			best = n
 		}
+	}
+	if best != nil && res.Deciding.Tree != "" && (best.LetterAfter == "" || best.LetterAfter >= res.Letter) {
+		// a whole-tree rule decides and no upgrade improves the letter (a checksum mismatch, say, which no upgrade clears):
+		// nothing is named, so the reader is not told to run something that cannot change the grade
+		return nil
 	}
 	return best
 }
