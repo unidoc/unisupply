@@ -55,7 +55,7 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   test-only halving.
 - **Next step** (`grade.next_step`, `grade.NextStep`): the upgrade that would improve the letter most (target = highest
   fixed version among the row's counted and graced findings, `letter_after` from `gradeDecided`), computed once in
-  `grade.Grade`, never in `gradeOnce`. A row-decided step needs a lower score after (or Pending); a whole-tree rule names one only
+  `grade.Grade`, never in `gradeOnce`. A row-decided step needs a lower score after for that row, not the result (or Pending), so tied rows keep it; a whole-tree rule names one only
   if it improves the letter; none for upkeep-decided rows, rows without a fix, or Pending. Stdlib: `go get toolchain@goX`.
 - **Upkeep score**: archived or deprecated rows count, but only up to C. A quiet project scores 0.
 - **Whole-tree rules** only raise the letter (many called high or critical findings, a called KEV finding, a checksum

@@ -223,7 +223,7 @@ func TestNextStep_RowWithOnlyAGracedFixIsNoCandidate(t *testing.T) {
 	r := Grade(&in)
 	for i := range r.Rows {
 		if r.Rows[i].Module == w {
-			if n := upgradeFor(&merged, &r.Rows[i]); n != nil {
+			if n, _ := upgradeFor(&merged, &r.Rows[i]); n != nil {
 				t.Errorf("a row with only a graced fix is no candidate: %+v", *n)
 			}
 		}
@@ -247,6 +247,20 @@ func TestNextStep_RowStepOnlyWhenItHelps(t *testing.T) {
 		t.Fatalf("%+v", r.Deciding)
 	}
 	if n := wantStep(t, r, img, "v0.43.0"); n.ScoreAfter >= r.Score {
+		t.Errorf("%+v", *n)
+	}
+}
+
+// Two modules, each with one called high fixed 30 days ago: the rows tie at 70. The deciding row's upgrade leaves the other row,
+// so the result stays D 70, but the deciding row falls to 0 and the upgrade is the first of the two needed: it is named.
+func TestNextStep_TiedRowsKeepTheStep(t *testing.T) {
+	a, b := "golang.org/x/net", "golang.org/x/text"
+	r := gradeDeps(dep(a, aged("GO-1", a, "HIGH", "called", "v0.35.0", days(30))), dep(b, aged("GO-2", b, "HIGH", "called", "v0.20.0", days(30))))
+	if r.Letter != LetterD || r.Score != 70 || r.Deciding == nil || r.Deciding.Module != a {
+		t.Fatalf("%s %d %+v", r.Letter, r.Score, r.Deciding)
+	}
+	n := wantStep(t, r, a, "v0.35.0")
+	if n.LetterAfter != LetterD || n.ScoreAfter != 70 || len(n.Clears) != 1 || n.Clears[0] != "GO-1" {
 		t.Errorf("%+v", *n)
 	}
 }

@@ -15,14 +15,15 @@ const stdlibRow = "stdlib"
 // merged input in. It is nil when the grade is Pending, when nothing decides it, or when no candidate has a counted finding with
 // a fix.
 //
-//   - A row decides by its vulnerability score: that row's upgrade, when it changes something (the score falls, or the grade
-//     after it would be Pending). A row that decides by upkeep has no upgrade that changes it, and neither has one whose
-//     deciding finding has no fix.
+//   - A row decides by its vulnerability score: that row's upgrade, when it changes something (that row's own score falls, or
+//     the grade after it would be Pending). A row that decides by upkeep has no upgrade that changes it, and neither has one
+//     whose deciding finding has no fix. The row's score, not the result's, is compared: when another row ties with it, the
+//     result keeps its score after the upgrade, but the upgrade is still the first of the two needed.
 //   - A whole-tree rule decides: every row with a counted finding that has a fix is a candidate, each is graded again without
 //     what its upgrade fixes, and the best result wins: one that is not Pending, then the better letter, then the lower score,
 //     then the earlier row (res.Rows is worst first and deterministic). It is named only if it improves the letter: an upgrade
 //     that leaves the letter as it is (or after which the grade would be Pending) is not offered. A row that decides keeps its
-//     own step when the score falls even if another row leaves the same letter: that is the honest "D after" answer.
+//     own step when its score falls even if another row leaves the same letter: that is the honest "D after" answer.
 func nextStep(in *Input, res *Result) *NextStep {
 	if res.Pending != nil || res.Deciding == nil || len(res.Rows) == 0 {
 		return nil
@@ -36,13 +37,14 @@ func nextStep(in *Input, res *Result) *NextStep {
 		candidates = res.Rows[:1]
 	}
 	var best *NextStep
+	bestRowAfter := 0
 	for i := range candidates {
-		n := upgradeFor(in, &candidates[i])
+		n, rowAfter := upgradeFor(in, &candidates[i])
 		if n == nil {
 			continue
 		}
 		if best == nil || betterStep(n, best) {
-			best = n
+			best, bestRowAfter = n, rowAfter
 		}
 	}
 	if best != nil && res.Deciding.Tree != "" && (best.LetterAfter == "" || best.LetterAfter >= res.Letter) {
@@ -50,8 +52,9 @@ func nextStep(in *Input, res *Result) *NextStep {
 		// nothing is named, so the reader is not told to run something that cannot change the grade
 		return nil
 	}
-	if best != nil && res.Deciding.Tree == "" && best.PendingAfter == "" && best.ScoreAfter >= res.Score {
-		// the row decides and its upgrade changes nothing (the deciding finding has no fix, and what has one is below it)
+	if best != nil && res.Deciding.Tree == "" && best.PendingAfter == "" && bestRowAfter >= res.Rows[0].Score {
+		// the row decides and its upgrade does not lower that row's score (the deciding finding has no fix, and what has one is
+		// below it)
 		return nil
 	}
 	return best
@@ -72,8 +75,9 @@ func betterStep(a, b *NextStep) bool {
 // upgradeFor is the upgrade of one row: the highest fixed version among its counted and its graced findings, and the grade without
 // what that version fixes. A graced finding (its fix is under 14 days old) is in the target because it counts in a few days, and an
 // upgrade that skipped it would be undone by it; a graph-only finding is not. The row is a candidate only if it has a counted
-// finding with a fix: nil when it has none, or none of them has a fix that is a version.
-func upgradeFor(in *Input, r *RowResult) *NextStep {
+// finding with a fix: nil when it has none, or none of them has a fix that is a version. rowAfter is the row's own score after the
+// upgrade (its score now when the grade after is Pending).
+func upgradeFor(in *Input, r *RowResult) (step *NextStep, rowAfter int) {
 	var target, spelled string
 	counted := false
 	for i := range r.Findings {
@@ -91,7 +95,7 @@ func upgradeFor(in *Input, r *RowResult) *NextStep {
 		}
 	}
 	if target == "" || !counted {
-		return nil
+		return nil, 0
 	}
 	clears := map[string]bool{}
 	for i := range r.Findings {
@@ -133,10 +137,17 @@ func upgradeFor(in *Input, r *RowResult) *NextStep {
 	if r.Module == stdlibRow && !r.Self {
 		n.Command = "go get toolchain@go" + goRelease(spelled)
 	}
+	rowAfter = r.Score
+	for i := range after.Rows {
+		if after.Rows[i].Module == r.Module && after.Rows[i].Self == r.Self {
+			rowAfter = after.Rows[i].Score
+			break
+		}
+	}
 	if after.Pending != nil {
 		n.LetterAfter, n.ScoreAfter, n.PendingAfter = "", 0, after.Pending.Check
 	}
-	return n
+	return n, rowAfter
 }
 
 // fixPattern reads a fixed version as the scanners write it: "v1.2.3", "1.2.3", "go1.26.9", "1.21", "go1.22rc1", "go1.23beta2".

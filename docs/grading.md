@@ -322,10 +322,11 @@ golang.org/x/image@v0.43.0 (clears 3 advisories; the letter would be A)`.
   are honest: when another row is nearly as bad the letter after is D, not A. If the grade after the upgrade would be Pending (a
   check that the letter would then depend on did not run, a severity lookup that failed, say), `letter_after` and `score_after` are
   absent and `pending_after` names the check that would not have run. With a letter, `score_after` is always there, 0 included.
-- **Which row.** When a row decides by its vulnerability score, it is that row's upgrade, named only when it changes something: the
-  score after is lower, or the grade after would be Pending. (A deciding high with no fix, next to a medium that has one, gets no
-  step: upgrading the medium leaves the score as it is. A D that stays a D with a lower score, as another row takes over, is
-  named.) When a whole-tree rule decides, every row
+- **Which row.** When a row decides by its vulnerability score, it is that row's upgrade, named only when it changes something:
+  that row's own score after is lower, or the grade after would be Pending. (A deciding high with no fix, next to a medium that has
+  one, gets no step: upgrading the medium leaves the row's score as it is. A D that stays a D with a lower score, as another row
+  takes over, is named, and so is one that stays D 70 because another row ties with it: the upgrade is the first of the two
+  needed.) When a whole-tree rule decides, every row
   with a counted finding that has a fix is graded again and the best result is taken: one that is not Pending, then the better letter,
   then the lower score, then the row that comes first in `grade.rows`. A whole-tree rule names a step **only if it improves the
   letter**: there is none for a checksum mismatch, which no upgrade clears.
