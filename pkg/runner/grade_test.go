@@ -96,7 +96,8 @@ func TestGrade_EndToEndThroughTheEngine(t *testing.T) {
 		Self:        grade.Row{Module: "example.com/app", Self: true},
 	})
 	r := grade.Grade(&in)
-	if r.Letter != grade.LetterF || r.Score != 80 {
+	// three called highs that one upgrade (v9) fixes are one problem: D 70
+	if r.Letter != grade.LetterD || r.Score != 70 {
 		t.Fatalf("%s %d", r.Letter, r.Score)
 	}
 }

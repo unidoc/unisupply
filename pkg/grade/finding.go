@@ -13,7 +13,7 @@ import (
 func findingResult(f *scored, r Row, in *Input) FindingResult {
 	fr := FindingResult{
 		ID: f.ID, Aliases: f.Aliases, Module: f.Module, Severity: f.sev, Estimated: f.estimated, Tier: f.tier, TierAssumed: f.assumed,
-		CallPathChecked: f.CallPathChecked, Score: f.score, Counted: f.tier != TierGraphOnly, Exploited: f.Exploited, FixedVersion: f.FixedVersion,
+		CallPathChecked: f.CallPathChecked, Score: f.score, Counted: f.tier != TierGraphOnly && !f.graced, Exploited: f.Exploited, FixedVersion: f.FixedVersion,
 		AffectedPackages: f.AffectedPackages, Condition: f.Condition, VEX: vexFor(f.tier),
 	}
 	if fr.Module == "" {
@@ -31,9 +31,34 @@ func findingResult(f *scored, r Row, in *Input) FindingResult {
 	if f.estimated {
 		notes = append(notes, "Severity is unknown and is scored as medium.")
 	}
-	fr.Note = strings.Join(notes, " ")
 	fr.Response = responseFor(&f.Finding, r, in)
+	if f.graced && fr.Response.WindowEnds != nil {
+		notes = append(notes, fmt.Sprintf("Fix is %d days old: it counts toward the letter from %s.", fr.Response.DaysSinceFix, dayMonth(*fr.Response.WindowEnds, in.Now)))
+	}
+	fr.Note = strings.Join(notes, " ")
 	return fr
+}
+
+// hasFix is true when the advisory names a fixed version.
+func hasFix(f *Finding) bool { return strings.TrimSpace(f.FixedVersion) != "" }
+
+// graced is the one answer to "does this finding's fix give the project time yet": the fix is under ResponseWindowDays old at
+// now. Such a finding is shown and does not count toward the letter (not in its row, not in a whole-tree rule). A known-exploited
+// finding is never graced, and neither is one whose fix date is unknown or that has no fix.
+func graced(f *Finding, now time.Time) bool {
+	if f.Exploited || !hasFix(f) || f.FixReleasedAt == nil {
+		return false
+	}
+	return now.Before(f.FixReleasedAt.Add(ResponseWindowDays * 24 * time.Hour))
+}
+
+// overdueDays is how many whole days the fix of a finding has been available when that is overdueFixDays or more, else 0.
+// A finding without a fix or with an unknown fix date is never overdue.
+func overdueDays(f *Finding, now time.Time) int {
+	if !hasFix(f) || f.FixReleasedAt == nil || now.Before(f.FixReleasedAt.Add(overdueFixDays*24*time.Hour)) {
+		return 0
+	}
+	return int(now.Sub(*f.FixReleasedAt).Hours() / 24)
 }
 
 func joinLimited(items []string, n int) string {
@@ -43,15 +68,17 @@ func joinLimited(items []string, n int) string {
 	return fmt.Sprintf("%s and %d more", strings.Join(items[:n], ", "), len(items)-n)
 }
 
-// responseFor words the situation around a fix: a label next to the letter, never part of it.
+// responseFor words the situation around a fix. The label is next to the letter, but its status follows the rules: a fix
+// inside the response window (within_window) means the finding does not count yet (see graced), and a fix available for 60 days
+// or more weighs 5 on its row (see overdueDays).
 //
-//	while the fix is new:   "Fix released 8 October · response window ends 22 October."
+//	while the fix is new:   "Fix released 8 October · response window ends 22 October." (it counts from that day)
 //	after 14 days:          "Fix available for 14 days; the graded version still requires the affected x/net version."
 //	scanned version known:  "Fix available for 87 days before this version was released (120 days to the scan date); ..."
 //	no fix:                 "No fix available" (no clock);  no fix date: "Fix release date unavailable" (no deadline)
 //	known exploited:        counts at once; no response label.
 //
-// A generic "overdue" label is deliberately not used: users can usually take the fix themselves.
+// The overdue weight is not a label of its own: the row's reason names it, and users can usually take the fix themselves.
 func responseFor(f *Finding, r Row, in *Input) Response {
 	resp := responseBase(f, r, in)
 	addFixGo(&resp, f, in)
@@ -87,7 +114,7 @@ func responseBase(f *Finding, r Row, in *Input) Response {
 	if in.SelfReleasedAt != nil && t.Before(*in.SelfReleasedAt) {
 		resp.FixAgeAtReleaseDays = int(in.SelfReleasedAt.Sub(t).Hours() / 24)
 	}
-	if in.Now.Before(ends) {
+	if graced(f, in.Now) {
 		resp.Status = "within_window"
 		resp.Text = fmt.Sprintf("Fix released %s · response window ends %s.", dayMonth(t, in.Now), dayMonth(ends, in.Now))
 		if resp.FixAgeAtReleaseDays > 0 {

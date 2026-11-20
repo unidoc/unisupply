@@ -1,8 +1,10 @@
-// Package grade turns what the scanners found into the letter (rules version 2, "Grading v2").
+// Package grade turns what the scanners found into the letter (rules version 3, "Grading v2.1").
 //
 // One rule you can trace: every row (the module itself, and each dependency) gets ONE score; the letter comes from the
 // worst row, and the result names that row and why. D and F mean a confirmed problem: a known vulnerability in code
-// that is actually reached, or a checksum that does not match. Vulnerable code that is never compiled is shown, not
+// that is actually reached, a vulnerable package that is imported and whose fix has waited 60 days or more, or a checksum
+// that does not match. A row counts per upgrade (the advisories one upgrade clears are one problem), a fix under 14 days
+// old does not count yet, and a fix that has waited 60 days weighs 5. Vulnerable code that is never compiled is shown, not
 // graded. Upkeep counts, but only up to C. A missing check is Pending, never a letter.
 //
 //	row score    = max(vulnerability score, upkeep score)                         (0-100)
@@ -20,10 +22,11 @@ import (
 )
 
 // RuleVersion is the version of these rules. A result is never re-labelled: new rules produce new results.
-const RuleVersion = 2
+const RuleVersion = 3
 
-// ResponseWindowDays is how long after a fix is released a project is "within the response window". It is a label next to
-// the letter; it never changes it.
+// ResponseWindowDays is how long after a fix is released a project is "within the response window". A finding whose fix is
+// inside it is shown and does not count toward the letter yet (a known-exploited finding has no window); after it, the finding
+// counts. It is the grace period of the grade.
 const ResponseWindowDays = 14
 
 // Letter is A to F; "" when the grade is Pending.
@@ -222,10 +225,12 @@ type VEXStatus struct {
 	Justification string `json:"justification,omitempty"` // vulnerable_code_not_present | vulnerable_code_not_in_execute_path
 }
 
-// Response is the context around a finding's fix: a label next to the letter, never part of it.
+// Response is the context around a finding's fix. Its status follows the grade: within_window is a finding that does not count
+// yet, past_window one that counts (and weighs 5 on its row once the fix is 60 days old or more); the other fields, the history
+// and the Go version the fix needs, are context only.
 type Response struct {
-	// Status: within_window, past_window, no_fix, date_unknown, or exploited (a known-exploited finding counts at once and
-	// has no response label).
+	// Status: within_window (the fix is under ResponseWindowDays old: the finding does not count yet), past_window, no_fix,
+	// date_unknown, or exploited (a known-exploited finding counts at once and has no response label).
 	Status        string     `json:"status"`
 	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
 	DateSource    string     `json:"fix_date_source,omitempty"`
@@ -256,7 +261,7 @@ type FindingResult struct {
 	TierAssumed      bool      `json:"tier_assumed,omitempty"` // reachability was not determined and is scored as called
 	CallPathChecked  bool      `json:"call_path_checked"`      // govulncheck's called pass covered it (Finding.CallPathChecked)
 	Score            int       `json:"score"`                  // the table value; 0 for a graph-only finding
-	Counted          bool      `json:"counted"`                // false = shown, not graded
+	Counted          bool      `json:"counted"`                // false = shown, not graded (graph-only, or its fix is under 14 days old)
 	Exploited        bool      `json:"exploited,omitempty"`
 	FixedVersion     string    `json:"fixed_version,omitempty"`
 	AffectedPackages []string  `json:"affected_packages,omitempty"`
