@@ -29,8 +29,8 @@ sentence, with the arithmetic.
 | F      | 76 to 100 |
 
 D and F mean a confirmed problem: a known vulnerability in code that is reached, or a checksum that does not match.
-There is one more way to a D, and it is a deliberate rules choice: a vulnerability in a package that is imported, whose
-vulnerable function no call path reaches, scores C (49 or 50) until the fix for it has been available for 60 days. Then the
+There is one more way to a D, and it is a deliberate rules choice: a high or critical vulnerability in a package that is
+imported, whose vulnerable function no call path reaches, scores C (49 or 50) until the fix for it has been available for 60 days. Then the
 [overdue weight](#overdue-fixes) adds 5 and the row is a D (54 or 55). That finding's VEX status is still `not_affected` /
 `vulnerable_code_not_in_execute_path`: the D says that a fix has waited two months, not that the function is reached.
 Upkeep alone can reach C, never D or F.

@@ -149,8 +149,8 @@ path that pulled the module in.
 **The grade.** `unisupply` publishes one letter, A to F, with the evidence behind it. The module itself and every
 dependency get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst
 row, and the report names that row and says why. D and F mean a confirmed problem: a known vulnerability in code that is
-reached, or a checksum that does not match; an imported vulnerability whose fix has been available for 60 days or more is a D
-too. A row counts per upgrade (the advisories one upgrade fixes are one problem), a fix less than 14 days old does not count
+reached, or a checksum that does not match; an imported high or critical vulnerability whose fix has been available for 60 days or more
+is a D too. A row counts per upgrade (the advisories one upgrade fixes are one problem), a fix less than 14 days old does not count
 yet, and a D or F names the upgrade that would improve it (`grade.next_step`). Archived or deprecated projects count, but only up to C. Vulnerable code that
 is never compiled is shown, not graded. When a check the grade needs did not run, the grade is **Pending** and has no
 letter. A means nothing crossed a scoring threshold in this assessment; it does not certify that the project is secure.
