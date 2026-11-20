@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -201,4 +202,31 @@ func TestChild_HangupDoesNotLeaveTheGoListBehind(t *testing.T) {
 		t.Fatal("the child kept running after its stdin closed")
 	}
 	waitGone(t, goList, "the go list the child started")
+}
+
+// noCoreDumps sets this process's core file limit to 0 until the test ends. A child inherits it, so a child that
+// GOTRACEBACK=crash makes raise SIGABRT leaves no core file on a machine where `ulimit -c` is above 0.
+func noCoreDumps(t *testing.T) {
+	t.Helper()
+	var old syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &old); err != nil {
+		t.Fatalf("reading the core file limit: %v", err)
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: old.Max}); err != nil {
+		t.Fatalf("setting the core file limit to 0: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_CORE, &old) })
+}
+
+// A Go panic under GOTRACEBACK=crash ends the process with SIGABRT: a signal, but not a kill, and a retry cannot help it.
+func TestChild_PanicThatDiesBySIGABRTStaysInternalPanic(t *testing.T) {
+	noCoreDumps(t)
+	warnings, err := passWithEnv(t, "panic", "GOTRACEBACK=crash")
+	se := asScanError(t, err)
+	if se.Reason != ReasonInternalPanic || se.Kind != FailPermanent {
+		t.Fatalf("Kind/Reason = %v/%s, want permanent/internal_panic (SIGABRT is how a panic dies here, not a kill)", se.Kind, se.Reason)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[0], "crashed (signal: ") || !strings.Contains(warnings[0], "panic: boom") {
+		t.Errorf("warnings = %q, want the crash with its signal and the panic line", warnings)
+	}
 }
