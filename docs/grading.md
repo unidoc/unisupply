@@ -1,4 +1,4 @@
-# Grading (rules version 2)
+# Grading (rules version 3, Grading v2.1)
 
 `unisupply` publishes one letter, A to F, and the evidence behind it. This page is the reference for how the letter is
 decided. The code is `pkg/grade`; if this page and the code disagree, the code wins.
@@ -29,6 +29,10 @@ sentence, with the arithmetic.
 | F      | 76 to 100 |
 
 D and F mean a confirmed problem: a known vulnerability in code that is reached, or a checksum that does not match.
+There is one more way to a D, and it is a deliberate rules choice: a vulnerability in a package that is imported, whose
+vulnerable function no call path reaches, scores C (49 or 50) until the fix for it has been available for 60 days. Then the
+[overdue weight](#overdue-fixes) adds 5 and the row is a D (54 or 55). That finding's VEX status is still `not_affected` /
+`vulnerable_code_not_in_execute_path`: the D says that a fix has waited two months, not that the function is reached.
 Upkeep alone can reach C, never D or F.
 
 ### Vulnerability score
@@ -42,8 +46,15 @@ Reachability comes from govulncheck.
 | Medium   | 45                                   | 32                                                |
 | Low      | 15                                   | 11                                                |
 
-- Imported code alone never scores above 50, so it cannot reach D.
-- Each further distinct *called* high or critical advisory on the same row adds 5.
+- An imported finding scores at most 50 (the cap applies to the imported score). Only the [overdue weight](#overdue-fixes)
+  can lift an imported row above it: an imported high whose fix is 60 days old or more is 49 + 5 = 54, a D.
+- A row counts *per upgrade*. Among the called high or critical advisories of a row, all those that have a fix are **one
+  problem** (one upgrade takes them all), and each advisory **without** a fix is a problem of its own. The worst
+  advisory's score is taken, and each further problem adds 5. Three called highs in one module that one upgrade fixes
+  are 70 (D); two without a fix, and a third with one, are 70 + 5 + 5 = 80 (F). Imported advisories add nothing for
+  further problems.
+- A finding whose fix is less than 14 days old is not counted: see [Grace for a fresh fix](#grace-for-a-fresh-fix).
+- A row with a counted finding whose fix is 60 days old or more adds 5, once: see [Overdue fixes](#overdue-fixes).
 - A called finding on CISA's Known Exploited Vulnerabilities list scores at least 76 (F).
 - A finding in a package that is never imported (*graph-only*) is shown and **not graded**. Its VEX status is
   `not_affected` / `vulnerable_code_not_present`.
@@ -53,6 +64,36 @@ Reachability comes from govulncheck.
 - A finding with no published severity is scored as medium. The letter is marked with `*` (for example `C*`) when that estimate could change it: the grade is computed again with every such severity as low and as critical, and a different letter in either run marks the result, whichever row the unknown severity is on. When rows tie, a row that does not rest on an estimate decides, so the text never depends on module names.
 - A module that is confirmed not to be compiled in is graph-only whatever the reachability of its findings says.
 - A row's vulnerability score is capped at 100.
+
+The order of operations on one row's vulnerability score:
+
+1. the called findings: the worst one's table value, plus 5 for each further problem (above);
+2. the imported findings: the worst one's table value, capped at 50;
+3. the higher of the two;
+4. plus 5 when a counted finding of the row has an overdue fix, then at most 100;
+5. a called known-exploited finding: at least 76;
+6. a confirmed test-only row: halved, at most 50.
+
+A finding that is not counted (graph-only, or a fix under 14 days old) is in none of these steps.
+
+### Overdue fixes
+
+A row that has at least one *counted* finding (called or imported, not graph-only, not graced) whose fix has been available for
+60 days or more (the scan time is on or after the fix release date plus 60 days) adds 5 to its vulnerability score, **once**,
+however many such findings it has. It fires on any counted finding of the row, not only the one that sets the score: a row whose
+worst finding is an imported high with a fix 23 days old, and which also has an imported medium whose fix is 181 days old, is
+49 + 5 = 54. The +5 comes after the imported cap and before the known-exploited floor and the test-only halving. The row's
+reason names the fix: `called high GO-2026-5032 (70); +5: fix for GO-2026-5032 available 174 days` (the finding that sets the score
+when it is overdue itself, else the one whose fix is oldest). A finding with no fix, or whose fix date is unknown, is never overdue.
+
+| Case | Arithmetic | Row |
+| ---- | ---------- | --- |
+| Three called highs in one module, one upgrade fixes them, the oldest fix 174 days old | 70 + 5 | 75, D |
+| Two called highs with fixes 128 and 43 days old | 70 + 5 | 75, D |
+| Two called highs, one has no fix, the other has a fix 100 days old | 70 + 5 (two problems) + 5 | 80, F |
+| An imported high, fix 128 days old | 49 + 5 | 54, D |
+| An imported high, fix 30 days old | 49 | 49, C |
+| The same imported high, in a confirmed test-only row | (49 + 5) / 2 | 27, C |
 
 ### Upkeep score
 
@@ -70,11 +111,13 @@ A quiet project with nothing open scores 0. Being quiet is not a finding.
 
 These only raise the letter:
 
-- three or more *called* high or critical findings across the tree, any called critical, a called KEV finding, or a
-  checksum mismatch (`go mod verify`): **F** (76);
+- three or more *called* high or critical findings in **two or more modules**, any called critical, a called KEV finding, or a
+  checksum mismatch (`go mod verify`): **F** (76). Three called highs in one module are that row's business: the row counts
+  per upgrade (above);
 - five or more called or imported high or critical findings: at least **D** (51).
 
-Test-only dependencies are left out of the counts. A checksum mismatch applies in full everywhere. The rule that decided
+A finding whose fix is under 14 days old counts in no rule (a called critical with a fix 5 days old is not an F), and
+neither does a graph-only one. Test-only dependencies are left out of the counts. A checksum mismatch applies in full everywhere. The rule that decided
 is listed in `grade.tree_rows` and named in `grade.deciding`.
 
 ### Ties
@@ -217,13 +260,68 @@ A dependency whose archived flag could not be read because its repository is not
 is not "not archived". It does not make the grade Pending (no retry could change it); one note in `grade.notes` names
 how many such modules there are and the first three, sorted.
 
-## Response window
+## Grace for a fresh fix
 
-A fix that was released recently still counts: current exposure is shown at once. Each finding carries a label such as
-*"Fix released 8 October. Response window ends 22 October."* The window is 14 days from the fix release date (the later of
-the advisory's fix date and the module proxy's time for the fixed version) and **never changes the letter**. A known
-exploited finding has no window. With `--response-history`, a finding also says how fast the project adopted comparable
-fixes in the past (the median over at least three fixes), as context and not a forecast.
+A finding whose fix was released less than 14 days ago **does not count toward the letter**. It is excluded from its row's
+score, from the [overdue check](#overdue-fixes) and from every whole-tree rule. It is still listed: `counted` is `false`,
+`vex` and `tier` are unchanged, `response.status` is `within_window`, and the finding's `note` gives the day it starts to
+count ("Fix is 8 days old: it counts toward the letter from 16 October."). The result has one note in `grade.notes` that says how many
+findings are in the window and the earliest day one starts to count. A row whose only findings are in the window reads
+"findings with a fix under 14 days old are shown, not graded yet". Each finding also carries a label such as
+*"Fix released 8 October · response window ends 22 October."*
+
+- The window runs from the fix release date (the later of the advisory's fix date and the module proxy's time for the fixed
+  version). A finding counts from exactly 14 days after that moment: 13 days 16 hours after it is graced, 14 days after it is not.
+- A known-exploited finding (CISA KEV) gets no grace: it counts on the day the fix is out.
+- A finding with no fix has nothing to wait for, and one whose fix date is unknown counts, with no grace. Neither is ever overdue.
+- A finding in a package that is not imported (graph-only) is not counted anyway and has no grace note.
+- A fix that is under 14 days old is never "overdue": the two states do not overlap.
+
+The grace delays the effect of a new fix on the letter. It does not remove it. A scan run a few hours after the fix turns 14 days old
+can grade a band or more worse than one run a few hours before, with no change to the advisory or the project; the same holds at
+60 days, when the overdue weight starts. A caller that grades a stored analysis again should do it on a date, not only when an
+advisory changes.
+
+With `--response-history`, a finding also says how fast the project adopted comparable fixes in the past (the median over at least
+three fixes), as context and not a forecast.
+
+## What would change the letter
+
+When a D or F can be improved by an upgrade, `grade.next_step` names the one that would improve it most:
+
+```json
+"next_step": {
+  "module": "golang.org/x/image",
+  "version": "v0.43.0",
+  "command": "go get golang.org/x/image@v0.43.0",
+  "clears": ["GO-2026-5032", "GO-2026-5062", "GO-2026-5066"],
+  "letter_after": "A",
+  "score_after": 0
+}
+```
+
+(In Go: `grade.NextStep`, `grade.Result.NextStep`.) The text and PDF reports show it as one line next to "Decided by": `Next step: go get
+golang.org/x/image@v0.43.0 (clears 3 advisories; the letter would be A)`.
+
+- **The target** is the highest fixed version, compared as a semantic version (`v0.10.0` is above `v0.9.0`), among the row's *counted*
+  findings that have a fix. A fixed version that is not a version is skipped. A finding in the grace window, or a graph-only one,
+  does not set the target.
+- **`clears`** lists, sorted, every advisory of that row that the target fixes (every one whose fixed version is at or below it), in
+  any tier. It includes graph-only advisories and advisories in the grace window that the upgrade also fixes.
+- **`letter_after` and `score_after`** come from grading again with those advisories removed from the row, so they are honest: when
+  another row is nearly as bad the letter after is D, not A. If the grade after the upgrade would be Pending, `letter_after` is
+  absent and `pending_after` names the check that would not have run.
+- **Which row.** When a row decides by its vulnerability score, it is that row's upgrade. When a whole-tree rule decides, every row
+  with a counted finding that has a fix is graded again and the best result is taken: one that is not Pending, then the better letter,
+  then the lower score, then the row that comes first in `grade.rows`. A whole-tree rule names a step **only if it improves the
+  letter**: there is none for a checksum mismatch, which no upgrade clears.
+- **There is no `next_step`** when the grade is Pending, when nothing decides it (an A), when upkeep decides the row (an archived
+  dependency), or when the deciding row has no counted finding with a fix.
+- **The module itself** gets the same `go get` command (a consumer moves to the fixed release). **The standard library** (graded
+  with `--grade-stdlib`) gets the toolchain form: `go get toolchain@go1.24.4`, with `version` `v1.24.4`.
+
+The step is a statement about the letter, not a promise about the build: the fixed version may need a newer Go than the module
+supports (see [Pending](#pending), "A fix that needs a newer Go").
 
 ## What is not published
 
@@ -251,7 +349,10 @@ memory of a scan. unisupply runs the imported pass first and the called pass onl
 `grade.CalledPassCanChangeLetter` answers by scoring every imported finding as imported and as called, alone and under the
 whole-tree rules, and asking whether the band differs. With the rules above that is true for any high or critical advisory, any
 known-exploited one (called is at least F), and any with no severity yet; medium and low advisories land in the same band
-either way. The standard library's advisories do not count unless `--grade-stdlib` grades them.
+either way (imported 32 and called 45 are both C, and with the overdue 5 added, 37 and 50 still are; halved for a test-only row,
+18 and 25 are both B). The findings it builds have no fix date, so neither the grace nor the overdue weight is applied to them. That
+is the safe side: a date can only move a medium or low finding within its band, and a high or critical finding is a "yes" already.
+An answer of yes costs a scan, never a wrong letter. The standard library's advisories do not count unless `--grade-stdlib` grades them.
 
 When the called pass is skipped, the findings are reported as imported, with no call path, and `scan.called_pass` is `skipped`
 with `scan.called_pass_reason`. Each finding says the same on its own in `call_path_checked` (in `dependencies[].vulnerabilities[]`,
@@ -283,17 +384,23 @@ The `grade` object of `--format json`:
 
 ```json
 {
-  "rule_version": 2,
-  "letter": "F",
-  "score": 80,
-  "deciding": { "module": "golang.org/x/image", "reason": "called high GO-2026-0101 (70), +10 for 2 more called high or critical advisories", "score": 80 },
-  "rows": [ { "module": "golang.org/x/image", "letter": "F", "vulnerability_score": 80, "upkeep_score": 0, "findings": [ ... ] } ],
+  "rule_version": 3,
+  "letter": "D",
+  "score": 75,
+  "deciding": { "module": "golang.org/x/image", "reason": "called high GO-2026-5032 (70); +5: fix for GO-2026-5032 available 174 days", "score": 75 },
+  "next_step": { "module": "golang.org/x/image", "version": "v0.43.0", "command": "go get golang.org/x/image@v0.43.0", "clears": ["GO-2026-5032", "GO-2026-5062", "GO-2026-5066"], "letter_after": "A", "score_after": 0 },
+  "rows": [ { "module": "golang.org/x/image", "letter": "D", "vulnerability_score": 75, "upkeep_score": 0, "findings": [ ... ] } ],
   "tree_rows": [],
   "notes": []
 }
 ```
 
 Next to `grade`, the JSON has `scan_status` (`{"status": "complete" | "pending" | "interrupted" | "failed", "reason": ..., "kind": ..., "detail": ...}`: whether the result is final, and why not) and `dependency_graph` (`{"root": ..., "source": ..., "edges": [{"from": ..., "to": ...}]}`: which module requires which). A gate should read `scan_status.status` and treat everything but `complete` as no result.
+
+`rule_version` is 3. A result is never re-labelled: a grade made under another version was made under that version's rules, and a stored
+analysis graded again today gets today's. `counted` on a finding is `false` for a graph-only finding and, since rules version 3, for a
+finding whose fix is under 14 days old. The grade of a stored analysis can change from one day to the next with no advisory change
+(day 14 and day 60 after a fix), so a service that re-grades should do it on a date.
 
 `letter` is absent and `pending` present when the grade is Pending: `pending.check` names the check that did not run, and
 for a failed `vulnerability_scan` `pending.code` and `pending.kind` carry the scan failure's reason code and kind (see

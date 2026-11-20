@@ -88,7 +88,9 @@ GRADE NOTES
   - The module's own advisories were not looked up: no module version was given.
 ```
 
-The SCORE column holds the policy values the letter is picked from. They are
+This output was captured with rules version 2: under rules version 3 the score here is 75 (the fix has been available for more than 60
+days, which adds 5, and the reason says so) and a `Next step:` line follows "Decided by". The SCORE column holds the policy values
+the letter is picked from. They are
 shown so you can follow the arithmetic; they are not a measurement and not a
 risk score (see [docs/grading.md](docs/grading.md)).
 
@@ -133,7 +135,9 @@ path that pulled the module in.
 **The grade.** `unisupply` publishes one letter, A to F, with the evidence behind it. The module itself and every
 dependency get one score (the higher of its vulnerability score and its upkeep score); the letter comes from the worst
 row, and the report names that row and says why. D and F mean a confirmed problem: a known vulnerability in code that is
-reached, or a checksum that does not match. Archived or deprecated projects count, but only up to C. Vulnerable code that
+reached, or a checksum that does not match; an imported vulnerability whose fix has been available for 60 days or more is a D
+too. A row counts per upgrade (the advisories one upgrade fixes are one problem), a fix less than 14 days old does not count
+yet, and a D or F names the upgrade that would improve it (`grade.next_step`). Archived or deprecated projects count, but only up to C. Vulnerable code that
 is never compiled is shown, not graded. When a check the grade needs did not run, the grade is **Pending** and has no
 letter. A means nothing crossed a scoring threshold in this assessment; it does not certify that the project is secure.
 The full rules are in [docs/grading.md](docs/grading.md).
@@ -630,7 +634,7 @@ documented local-mirror workflow is not yet available — track it before relyin
 
 ## Documentation
 
-- [docs/grading.md](docs/grading.md) — how the letter is decided (Grading v2)
+- [docs/grading.md](docs/grading.md) — how the letter is decided (rules version 3)
 - [docs/scanners.md](docs/scanners.md) — scanner reference
 - [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process

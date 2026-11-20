@@ -21,6 +21,37 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **A stored analysis made by v0.9.0** has no `call_path_checked` on its findings; `runner.Grade` marks every finding checked
   when its `scan.called_pass` is `ran` (#169).
 
+#### A D or F names the upgrade that would change it
+
+- **`grade.next_step`** names the one upgrade that would improve the letter most: the module, the version to move to, the
+  command (`go get golang.org/x/image@v0.43.0`; `go get toolchain@go1.24.4` for the standard library), the advisories it
+  clears (graph-only ones and ones whose fix is under 14 days old included, when the same upgrade fixes them), and the
+  letter after it. The letter after comes from grading again without those advisories, so it can stay D when another row
+  decides. When a row decides, it is that row's upgrade; when a whole-tree rule decides, each candidate row is graded again
+  and the best result is named, and only if it improves the letter (none for a checksum mismatch). There is none for a
+  Pending grade, an upkeep-decided row, or a row whose counted findings have no fix. The text and PDF reports show it next
+  to "Decided by". In Go: `grade.NextStep` and `grade.Result.NextStep` (#181).
+
+### Improvements
+
+#### Grading v2.1 (rules version 3)
+
+- **A row counts per upgrade.** Among a row's called high or critical advisories, all that have a fix are one problem and each
+  one without a fix is its own; each further problem adds 5. Three called highs in one module that one upgrade fixes
+  are 70 (D), where they were 80 (F). The whole-tree rule for three called high or critical findings now needs them in two
+  or more modules (#181).
+- **A fix under 14 days old does not count yet.** The finding is listed with `counted: false` (a graph-only finding was the only
+  one before), `response.status` `within_window` and a note with the day it starts to count, and `grade.notes` says how many
+  there are. It is left out of the row score, the overdue check and every whole-tree rule, a called critical included. A
+  known-exploited finding gets no grace, and one with an unknown fix date counts (#181).
+- **A fix that has been available for 60 days or more weighs 5.** A row with a counted finding whose fix is that old adds 5, once,
+  after the imported cap. An imported high with an overdue fix is therefore 54, a D, where it was 49, a C: a D can now rest
+  on a finding whose VEX status is `not_affected` (`vulnerable_code_not_in_execute_path`). The reason names the fix
+  (`; +5: fix for GO-2026-5032 available 174 days`) (#181).
+- **`rule_version` is 3.** Bands and per-finding scores are unchanged. The note "N reached findings are fixed only in versions that
+  need a newer Go" now counts only counted findings. Letters now change on day 14 and day 60 after a fix with no advisory
+  change: a service that grades a stored analysis again must do it on a date, not only when an advisory changes (#181).
+
 ### Bug Fixes
 
 - **A cancelled vulnerability scan no longer takes the host process down.** When the context ended while govulncheck built

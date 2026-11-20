@@ -32,7 +32,7 @@ CLI (pflag)
       └── SBOM (CycloneDX, SPDX)
 ```
 
-## Grading (rules version 2)
+## Grading (rules version 3, Grading v2.1)
 
 The published result is one letter, A to F. The reference is `docs/grading.md`; the code is `pkg/grade`, and if they
 disagree the code wins.
@@ -44,6 +44,19 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
 
 - **Vulnerability score** comes from the severity and the govulncheck reachability tier (called, imported, graph-only).
   A called finding on the CISA KEV list is at least F. Graph-only findings are shown, not graded.
+- **Per upgrade**: on a row, the called high or critical advisories that have a fix are one problem; each without a fix is its
+  own. `further = problems - 1`, +5 each. Three called highs one upgrade fixes are 70 (D). The tree rule `called_findings`
+  (3+ called high or critical) needs them in 2 or more modules.
+- **Grace**: a finding that is not known-exploited, has a fix date and a fix under 14 days old (`ResponseWindowDays`) is not
+  counted (row, overdue check, every tree rule). Listed with `counted: false`, a note and one `grade.notes` entry. Unknown
+  fix date counts. One predicate, `graced`, serves the score, the tree rules, `Counted` and the response label.
+- **Overdue**: a row with a counted finding whose fix is 60 days old or more (`overdueFixDays`) gets +5 once, after the
+  imported cap (an overdue imported high is 54, a D, though its VEX stays `not_affected`), before the KEV floor and the
+  test-only halving.
+- **Next step** (`grade.next_step`, `grade.NextStep`): the upgrade that would improve the letter most (target = highest
+  fixed version among the row's counted findings, `letter_after` from grading again), computed once in `grade.Grade`, never
+  in `gradeOnce`. A whole-tree rule names one only if it improves the letter; none for upkeep-decided rows, rows without a
+  fix, or Pending. Stdlib: `go get toolchain@goX`.
 - **Upkeep score**: archived or deprecated rows count, but only up to C. A quiet project scores 0.
 - **Whole-tree rules** only raise the letter (many called high or critical findings, a called KEV finding, a checksum
   mismatch from `go mod verify`).
@@ -70,6 +83,8 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
 - **Fix age at release**: with `--module-version`, `scanner.ModuleVersionTime` (proxy `.info`, cached) gives the scanned version's
   release time (`grade.Input.SelfReleasedAt`); `response.fix_age_at_release_days` is set when the fix predates it by a day or
   more (the `selfReleaseTime` seam in `pkg/runner`).
+- **Letters move with the date**: day 14 (grace ends) and day 60 (overdue starts) after a fix change a letter with no advisory
+  change, so a service re-grades on a date, not only on advisory changes.
 - **Estimated**: a letter that an unpublished severity (scored as medium) could change is shown with `*` (`C*`): the grade is recomputed with every such severity as low and as critical.
 - The 0-100 numbers in the rows (and `grade.score`) are policy values that pick a band. They are shown beside the
   letter for traceability; they are not a measurement and not a risk score.
@@ -85,7 +100,7 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
 
 `runner.Run` is `runner.Analyse` followed by `runner.Grade`. `Analyse` returns an `Analysis` (build list and requirement
 graph, go.mod/go.sum audit, govulncheck findings with tiers and call paths, `Identity` with a `Key()`); it is JSON and meant to
-be stored. `Grade(ctx, analysis, facts.Store, date, opts)` applies Grading v2 with the facts and the date of the day and never
+be stored. `Grade(ctx, analysis, facts.Store, date, opts)` applies the grading rules (version 3) with the facts and the date of the day and never
 changes the analysis. `pkg/facts` is the store interface (`Memory`, `None`; the CLI passes none); `pkg/vulndb` reads the Go
 vulnerability database's index (which modules' advisories changed since a time, and the fingerprint in `Identity`).
 govulncheck runs at package level first and at symbol level only when `grade.CalledPassCanChangeLetter` says it can change the
@@ -141,7 +156,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 | `pkg/scanner/ci.go` | CI/CD pipeline audit |
 | `pkg/scanner/trustindex.go` | unitrust API integration |
 | `pkg/scanner/integrity.go` | `go.mod` replace/exclude directive audit |
-| `pkg/grade/` | The grade: rows, letter, Pending (Grading v2) |
+| `pkg/grade/` | The grade: rows, letter, Pending, next step (rules version 3) |
 | `pkg/scorer/risk.go` | Scanner signals and the internal (unpublished) 0-100 score |
 | `pkg/policy/engine.go` | Organizational policy evaluation |
 | `pkg/report/text.go` | Terminal output |
