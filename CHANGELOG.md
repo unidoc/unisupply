@@ -61,6 +61,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   instead of telling a user who set a token to set one. A scan without a token, or with one GitHub rejected (401), keeps
   the "GitHub API unauthenticated" wording. `scorer.ScoreInput` gains `GitHubAuthenticated` (the zero value keeps the old
   wording) (#145).
+- **The weekly security workflow now reports this repository's CI/CD and build-file findings.** Only its policy gate ran
+  with `--scan-ci`, and that output went to the run log alone, so `ci_findings` and `build_file_findings` were `null` in
+  the `scan-results` artifact and the "CI/CD and build-file findings" section of the job summary and the weekly issue never
+  showed. The JSON and text self-scans now pass `--scan-ci`. The grade, the exit code and the conditions that file the
+  weekly issue are unchanged. A `|` in a finding's file or message (the `curl | bash` finding has one) is escaped, so it no
+  longer splits the table row (#150).
 
 ### Security Patches
 

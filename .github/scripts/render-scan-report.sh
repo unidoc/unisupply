@@ -355,9 +355,12 @@ if [ "$CI_FINDINGS" -gt 0 ]; then
   echo
   echo "| Severity | Rule | File | Line | Message |"
   echo "|---|---|---|---|---|"
+  # A "|" in a cell ends it, even inside a code span: the curl | bash finding's
+  # message would split its row. GFM reads "\|" as a literal pipe in both.
   jq_field '
+    def cell: gsub("\\|"; "\\|");
     ((.ci_findings // []) + (.build_file_findings // []))[]
-    | "| \(.severity) | `\(.rule_id)` | `\(.file)` | \(.line // "—") | \(.message) |"
+    | "| \(.severity) | `\(.rule_id)` | `\(.file | cell)` | \(.line // "—") | \(.message | cell) |"
   '
   echo
   echo "</details>"

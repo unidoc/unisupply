@@ -78,9 +78,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          /tmp/unisupply ./ --format json --github-token "$GITHUB_TOKEN" \
+          # --scan-ci fills ci_findings and build_file_findings, which the
+          # job summary and the weekly issue render. It does not change the
+          # grade or the exit code (there is no --policy here).
+          /tmp/unisupply ./ --scan-ci --format json --github-token "$GITHUB_TOKEN" \
             > /tmp/unisupply.json
-          /tmp/unisupply ./ --no-color --github-token "$GITHUB_TOKEN" \
+          /tmp/unisupply ./ --scan-ci --no-color --github-token "$GITHUB_TOKEN" \
             > /tmp/unisupply.txt
 
       - name: List stale direct dependencies
