@@ -325,7 +325,10 @@ type Result struct {
 	// Score is the worst row's score: a policy value that picks the band, not a measurement. It is not a published number.
 	Score int `json:"score"`
 	// Deciding is the row (or whole-tree rule) that set the letter; nil when nothing crossed the A threshold.
-	Deciding *Deciding   `json:"deciding,omitempty"`
+	Deciding *Deciding `json:"deciding,omitempty"`
+	// NextStep is the one upgrade that would improve the letter most; nil when the grade is Pending, when nothing decides it,
+	// or when no counted finding that decides has a fix.
+	NextStep *NextStep   `json:"next_step,omitempty"`
 	Rows     []RowResult `json:"rows"`
 	TreeRows []TreeRow   `json:"tree_rows,omitempty"`
 	Pending  *Pending    `json:"pending,omitempty"`
@@ -344,6 +347,22 @@ type Result struct {
 	ChecksumDetail   string `json:"checksum_detail,omitempty"`
 }
 
+// NextStep is the one upgrade that would improve the letter most, and the letter after it. The letter after is graded again
+// without the advisories the upgrade fixes, so it is honest: when another row is nearly as bad it says D, not A.
+type NextStep struct {
+	Module  string `json:"module"`
+	Version string `json:"version"` // the fixed version to move to
+	// Command is "go get <module>@<version>"; for the standard library "go get toolchain@go<version without v>".
+	Command string `json:"command"`
+	// Clears lists, sorted, the advisories of that row (any tier, also one whose fix is too new to count) that the upgrade fixes.
+	Clears []string `json:"clears"`
+	// LetterAfter is the letter once those advisories are gone; empty when the grade would then be Pending, and PendingAfter
+	// names the check that would not have run.
+	LetterAfter  Letter `json:"letter_after,omitempty"`
+	ScoreAfter   int    `json:"score_after"`
+	PendingAfter string `json:"pending_after,omitempty"`
+}
+
 // Deciding names what set the letter: a row, or a whole-tree rule.
 type Deciding struct {
 	Module string `json:"module,omitempty"`
@@ -355,6 +374,8 @@ type Deciding struct {
 
 // MarshalJSON leaves out the score of a Pending result: there is no worst row to take it from, so a published 0 would read
 // as a clean result.
+//
+//nolint:gocritic // a value receiver: json.Marshal of a Result value (not a pointer) must reach it
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result // no methods: avoids recursion
 	if r.Pending != nil {

@@ -282,6 +282,9 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 		score, top = is, itop
 		reason = describeVuln(itop, "imported", ifurther)
 	}
+	if top != nil && top.overdueDays > 0 {
+		overdue = top // the finding that sets the score names the +5 when it is overdue itself
+	}
 	if overdue != nil {
 		score += overdueAdd
 		reason += fmt.Sprintf("; +%d: fix for %s available %d days", overdueAdd, overdue.ID, overdue.overdueDays)
@@ -645,19 +648,29 @@ func Grade(input *Input) Result {
 	// Merge the advisories first: a Go advisory with no severity whose GitHub alias is rated HIGH has a published severity
 	// once they are one finding, and only what is still estimated after the merge is substituted below.
 	merged := mergedInput(input)
-	res := gradeOnce(&merged)
+	res := gradeDecided(&merged)
+	// the next step is worked out once, on the final result: its re-grades are gradeOnce runs and never come back here
+	if res.Pending == nil {
+		res.NextStep = nextStep(&merged, &res)
+	}
+	return res
+}
+
+// gradeDecided is the grade with the estimate and severity-lookup checks, for an input whose advisories are merged.
+func gradeDecided(merged *Input) Result {
+	res := gradeOnce(merged)
 	if res.Pending != nil {
 		return res
 	}
-	if p := severityLookupPending(&merged, &res); p != nil {
+	if p := severityLookupPending(merged, &res); p != nil {
 		res.Pending, res.Letter, res.Deciding, res.Score, res.Estimated = p, "", nil, 0, false
 		return res
 	}
-	if !hasEstimatedSeverity(&merged) {
+	if !hasEstimatedSeverity(merged) {
 		return res
 	}
 	for _, sev := range []string{"LOW", "CRITICAL"} {
-		alt := withEstimatedSeverity(&merged, sev)
+		alt := withEstimatedSeverity(merged, sev)
 		if r := gradeOnce(&alt); r.Letter != res.Letter {
 			res.Estimated = true
 			break
