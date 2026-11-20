@@ -128,13 +128,15 @@ letter, `grade.pending` says which check failed and why, and lists what is known
 A Pending result publishes no letter, no deciding row and no score; `pending.known` says what is known.
 
 **`pending.code` and `pending.kind`.** When the check is `vulnerability_scan` and the failure is a typed scan failure,
-`pending` also has `code`, the failure's reason code (`multiple_mains`, `needs_newer_go`, `cgo_dependency`, `module_fetch`,
-...), and `kind`, which says whether a retry can help: `transient` (network, timeout, rate limit), `permanent` (the
-project cannot be scanned as it is) or `too_large` (a limit was exceeded). Both are absent for every other check, and for
-a scan that failed with an error that is not a scan failure (the scan was skipped offline, for example). The codes are the
-`scanner.Reason*` constants, listed in the CHANGELOG. A caller that decides on a retry reads `kind`, and `code` for what to
-tell the user; `reason` is text for people, starts with the code (`the vulnerability scan did not run: multiple_mains:
-b.go:3:6: main redeclared in this block`) and may change its wording.
+`pending` also has `code`, the failure's reason code (`multiple_mains`, `needs_newer_go`, `cgo_dependency`,
+`module_fetch`, ...), and `kind`, which says whether a retry can help: `transient` (network, timeout, rate limit, or the
+scan's child process killed with SIGKILL, as the out-of-memory killer does, or out of memory: a later retry, or one with
+more memory or fewer scans at once, can help), `permanent` (the project cannot be scanned as it is) or `too_large` (a
+limit was exceeded). Both are absent for every other check, and for a scan that failed with an error that is not a scan
+failure (the scan was skipped offline, for example). The codes are the `scanner.Reason*` constants, listed in the
+CHANGELOG. A caller that decides on a retry reads `kind`, and `code` for what to tell the user; `reason` is text for
+people, starts with the code (`the vulnerability scan did not run: multiple_mains: b.go:3:6: main redeclared in this
+block`) and may change its wording.
 
 ```json
 "pending": { "check": "vulnerability_scan", "code": "multiple_mains", "kind": "permanent", "reason": "the vulnerability scan did not run: multiple_mains: b.go:3:6: main redeclared in this block" }

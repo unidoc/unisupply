@@ -187,17 +187,38 @@ func writeChildError(w io.Writer, err error) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// childCrashError is a govulncheck child that did not end the way a child does: it panicked, was killed, or failed to
-// finish its output. Its text is for people; the scan reports it as ReasonInternalPanic without classifying it.
+// crashCause is why a govulncheck child died. runGovulncheckChild decides it once; crashCauses gives the warning's
+// wording and the failure's kind and reason, so the two cannot disagree.
+type crashCause int
+
+const (
+	causeCrash       crashCause = iota // a panic, another signal, an exit status that is not the child's
+	causeKilled                        // SIGKILL ended it (the out-of-memory killer, `kill -9`), no panic printed
+	causeOutOfMemory                   // its Go runtime could not get memory (outOfMemoryLine), no panic printed
+)
+
+var crashCauses = [...]struct {
+	what   string // in the warning: "govulncheck child process <what> (<status>)"
+	kind   FailKind
+	reason string
+}{
+	causeCrash:       {"crashed", FailPermanent, ReasonInternalPanic},
+	causeKilled:      {"was killed", FailTransient, ReasonScanKilled},
+	causeOutOfMemory: {"ran out of memory", FailTransient, ReasonOutOfMemory},
+}
+
+// childCrashError is a govulncheck child that did not end the way a child does: it panicked, was killed, ran out of
+// memory, or failed to finish its output. Its text is for people; cause decides how the scan reports it.
 type childCrashError struct {
 	status    string // how the process ended: "exit status 2", "signal: killed"
+	cause     crashCause
 	panicLine string // the first "panic:" line of its stderr, if any
 	tail      string // the end of its stderr
 }
 
-// summary is the one line that is published: the status and the panic line.
+// summary is the one line that is published: the cause, the status and the panic line.
 func (e *childCrashError) summary() string {
-	s := "govulncheck child process crashed (" + e.status + ")"
+	s := "govulncheck child process " + crashCauses[e.cause].what + " (" + e.status + ")"
 	if e.panicLine != "" {
 		s += ": " + e.panicLine
 	}
@@ -267,21 +288,55 @@ func runGovulncheckChild(ctx context.Context, env []string, dir, level string, s
 			return errors.New(text)
 		}
 	}
-	return &childCrashError{status: waitErr.Error(), panicLine: stderr.panicText(), tail: strings.TrimSpace(stderr.tailText())}
+	// A child that printed a panic is the panic, whatever ended it after: a retry would panic again. Otherwise the
+	// runtime's own out-of-memory error names the cause. SIGKILL is what the out-of-memory killer, memory pressure and
+	// `kill -9` send; the child catches the other signals a parent or a terminal sends, and a context that ended was
+	// handled above, so nothing of ours kills it this way.
+	panicLine := stderr.panicText()
+	cause := causeCrash
+	if panicLine == "" {
+		if stderr.ranOutOfMemory() {
+			cause = causeOutOfMemory
+		} else if ws, ok := waitStatusOf(exitErr); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+			cause = causeKilled
+		}
+	}
+	tail := strings.TrimSpace(stderr.tailText())
+	return &childCrashError{status: waitErr.Error(), cause: cause, panicLine: panicLine, tail: tail}
+}
+
+// waitStatusOf is the wait status of a child that exited, which says how it ended; ok is false when there is none.
+func waitStatusOf(exitErr *exec.ExitError) (ws syscall.WaitStatus, ok bool) {
+	if exitErr == nil {
+		return ws, false
+	}
+	ws, ok = exitErr.Sys().(syscall.WaitStatus)
+	return ws, ok
 }
 
 // childStderr splits the child's stderr into lines as they come. Network-log lines go to net; error lines (childErrPrefix)
-// are the error text, without the prefix; the rest is kept for a crash, bounded: the first "panic:" line, and the end
-// (childTailMax bytes) of what follows, so that a goroutine dump of any size never reaches the failure rules.
+// are the error text, without the prefix; the rest is kept for a crash, bounded: the first "panic:" line, whether the
+// runtime ran out of memory, and the end (childTailMax bytes) of what follows, so that a goroutine dump of any size never
+// reaches the failure rules.
 type childStderr struct {
 	net func(string)
 
-	mu        sync.Mutex
-	partial   []byte // the line being read
-	dropping  bool   // the line being read is over childLineMax: the rest of it is dropped
-	panicLine string
-	tail      []byte
-	errText   []byte // the error lines, without the prefix, up to childErrMax
+	mu          sync.Mutex
+	partial     []byte // the line being read
+	dropping    bool   // the line being read is over childLineMax: the rest of it is dropped
+	panicLine   string
+	outOfMemory bool // a line is the runtime's out-of-memory fatal error (outOfMemoryLine)
+	tail        []byte
+	errText     []byte // the error lines, without the prefix, up to childErrMax
+}
+
+// outOfMemoryLine says whether line is the Go runtime's fatal error for memory it could not get, which it prints before
+// it exits with status 2: "fatal error: " and a text that says so, such as "runtime: out of memory" (the operating
+// system refused it: an address-space limit, vm.overcommit_memory=2), "out of memory allocating heap arena metadata",
+// "pageAlloc: out of memory" or "runtime: cannot allocate memory". Every runtime fatal error with those words is one.
+func outOfMemoryLine(line string) bool {
+	text, ok := strings.CutPrefix(line, "fatal error: ")
+	return ok && (strings.Contains(text, "out of memory") || strings.Contains(text, "cannot allocate memory"))
 }
 
 func (s *childStderr) Write(p []byte) (int, error) {
@@ -330,6 +385,9 @@ func (s *childStderr) endLine() {
 	if s.panicLine == "" && strings.HasPrefix(line, "panic:") {
 		s.panicLine = line
 	}
+	if outOfMemoryLine(line) {
+		s.outOfMemory = true
+	}
 	s.tail = append(s.tail, line...)
 	s.tail = append(s.tail, '\n')
 	if len(s.tail) > 2*childTailMax {
@@ -372,6 +430,13 @@ func (s *childStderr) tailText() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return string(cutTail(s.tail))
+}
+
+// ranOutOfMemory says whether the child's Go runtime printed that it ran out of memory.
+func (s *childStderr) ranOutOfMemory() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.outOfMemory
 }
 
 // panicText is the first "panic:" line, cut to childPanicMax bytes at a character boundary.

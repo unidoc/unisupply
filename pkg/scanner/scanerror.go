@@ -21,7 +21,7 @@ type FailKind int
 
 const (
 	FailPermanent FailKind = iota // examples layout, cgo-only or excluded deps, no go.mod, needs newer Go
-	FailTransient                 // network, timeout, rate limit
+	FailTransient                 // network, timeout, rate limit, a child killed or out of memory (more memory, fewer scans)
 	FailTooLarge                  // exceeded limits
 )
 
@@ -54,6 +54,8 @@ const (
 	ReasonVulnDBUnreachable = "vulndb_unreachable" // the vulnerability database could not be fetched
 	ReasonScanDeadline      = "scan_deadline"      // the scan's context deadline passed before it finished; FailTooLarge
 	ReasonInternalPanic     = "internal_panic"     // a scanner panicked
+	ReasonScanKilled        = "scan_killed"        // the govulncheck child was killed with SIGKILL, as the out-of-memory killer does; FailTransient
+	ReasonOutOfMemory       = "out_of_memory"      // the govulncheck child's Go runtime could not get memory ("fatal error: out of memory"); FailTransient
 	ReasonUnknown           = "unknown"            // nothing matched; FailPermanent (a caller may still retry it a bounded number of times)
 )
 

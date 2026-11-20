@@ -22,6 +22,8 @@ func TestScanStatusOf(t *testing.T) {
 			VulnErr: &ScanError{Kind: FailPermanent, Reason: ReasonMissingGoSum, Err: errors.New("missing go.sum entry")}}, StatusFailed, ReasonMissingGoSum, "permanent"},
 		{"transient failure", StatusInput{Graded: true, PendingCheck: "vulnerability_scan",
 			VulnErr: &ScanError{Kind: FailTransient, Reason: ReasonModuleFetch, Err: errors.New("dial tcp")}}, StatusFailed, ReasonModuleFetch, "transient"},
+		{"killed child", StatusInput{Graded: true, PendingCheck: "vulnerability_scan",
+			VulnErr: &ScanError{Kind: FailTransient, Reason: ReasonScanKilled, Err: errors.New("govulncheck child process was killed (signal: killed)")}}, StatusFailed, ReasonScanKilled, "transient"},
 		{"untyped failure", StatusInput{Graded: true, PendingCheck: "vulnerability_scan", VulnErr: errors.New("boom")}, StatusFailed, ReasonUnknown, ""},
 		{"failure the letter does not need (untyped)", StatusInput{Graded: true, VulnErr: errors.New("boom")}, StatusFailed, ReasonUnknown, ""},
 		{"failure with a letter", StatusInput{Graded: true, VulnErr: &ScanError{Kind: FailPermanent, Reason: ReasonNoPackages, Err: errors.New("no packages matched")}}, StatusFailed, ReasonNoPackages, "permanent"},
