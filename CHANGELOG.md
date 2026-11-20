@@ -38,8 +38,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **A row counts per upgrade.** Among a row's called high or critical advisories, all that have a fix are one problem and each
   one without a fix is its own; each further problem adds 5. Three called highs in one module that one upgrade fixes
-  are 70 (D), where they were 80 (F). The whole-tree rule for three called high or critical findings now needs them in two
-  or more modules (#181).
+  are 70 (D), where they were 80 (F). The two whole-tree count rules (three called high or critical findings: F; five called or imported ones: at least D)
+  now need the findings in two or more modules (#181).
 - **A fix under 14 days old does not count yet.** The finding is listed with `counted: false` (a graph-only finding was the only
   one before), `response.status` `within_window` and a note with the day it starts to count, and `grade.notes` says how many
   there are. It is left out of the row score, the overdue check and every whole-tree rule, a called critical included. A

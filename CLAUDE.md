@@ -46,7 +46,7 @@ letter    = band of the worst row                       // A 0-10, B 11-25, C 26
   A called finding on the CISA KEV list is at least F. Graph-only findings are shown, not graded.
 - **Per upgrade**: on a row, the called high or critical advisories that have a fix are one problem; each without a fix is its
   own. `further = problems - 1`, +5 each. Three called highs one upgrade fixes are 70 (D). The tree rule `called_findings`
-  (3+ called high or critical) needs them in 2 or more modules.
+  (3+ called high or critical) and `imported_and_called_findings` (5+ called or imported) need them in 2 or more modules.
 - **Grace**: a finding that is not known-exploited (nor `KEVUnknown`: it has a CVE and the KEV catalog was not consulted), has a fix date and a fix under 14 days old (`ResponseWindowDays`) is not
   counted (row, overdue check, every tree rule). Listed with `counted: false`, a note and one `grade.notes` entry. Unknown
   fix date counts. One predicate, `graced`, serves the score, the tree rules, `Counted` and the response label.

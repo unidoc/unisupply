@@ -327,3 +327,31 @@ func TestV21_UnknownKEVStatusGetsNoGrace(t *testing.T) {
 		t.Errorf("%+v", merged)
 	}
 }
+
+// The at-least-D whole-tree rule counts per upgrade too: five imported highs in ONE module that one upgrade fixes are that row's
+// business (C 49 until the fix has waited 60 days); across two or more modules they are D 51.
+func TestV21_AtLeastDTreeRuleNeedsTwoModules(t *testing.T) {
+	m := "example.com/a"
+	var fs []Finding
+	for _, id := range []string{"I1", "I2", "I3", "I4", "I5"} {
+		fs = append(fs, aged(id, m, "HIGH", "imported", "v0.35.0", days(30)))
+	}
+	r := gradeDeps(dep(m, fs...))
+	wantRow(t, "one module", r, m, 49, LetterC)
+	if len(r.TreeRows) != 0 {
+		t.Errorf("five imported highs in one module are not a tree rule: %+v", r.TreeRows)
+	}
+	// the same findings in two modules
+	b := "example.com/b"
+	r = gradeDeps(dep(m, fs[:3]...), dep(b, aged("J1", b, "HIGH", "imported", "v0.35.0", days(30)), aged("J2", b, "HIGH", "imported", "v0.35.0", days(30))))
+	if r.Letter != LetterD || r.Score != 51 || len(r.TreeRows) != 1 || r.TreeRows[0].Rule != "imported_and_called_findings" ||
+		r.TreeRows[0].Reason != "5 called or imported high or critical findings across 2 modules" {
+		t.Errorf("%s %d %+v", r.Letter, r.Score, r.TreeRows)
+	}
+	// called and imported findings together count, in two modules
+	r = gradeDeps(dep(m, aged("C1", m, "HIGH", "called", "v0.35.0", days(30)), fs[0], fs[1]), dep(b, aged("J1", b, "HIGH", "imported", "v0.35.0", days(30)), aged("J2", b, "HIGH", "imported", "v0.35.0", days(30))))
+	if r.Score != 70 || len(r.TreeRows) != 0 {
+		// the called high alone makes the row D 70, above the tree rule's 51
+		t.Errorf("%d %+v", r.Score, r.TreeRows)
+	}
+}

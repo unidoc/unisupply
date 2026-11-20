@@ -114,7 +114,11 @@ These only raise the letter:
 - three or more *called* high or critical findings in **two or more modules**, any called critical, a called KEV finding, or a
   checksum mismatch (`go mod verify`): **F** (76). Three called highs in one module are that row's business: the row counts
   per upgrade (above);
-- five or more called or imported high or critical findings: at least **D** (51).
+- five or more called or imported high or critical findings, also in **two or more modules**: at least **D** (51).
+
+Both count rules need two modules for the same reason: a row counts per upgrade, and the findings of one module are that row's
+business. Five imported highs in one module that one upgrade fixes are the row's C 49 (a D once a fix has waited 60 days), not a D
+by a tree rule that would count the same advisories again, one by one.
 
 A finding whose fix is under 14 days old counts in no rule (a called critical with a fix 5 days old is not an F), and
 neither does a graph-only one. Test-only dependencies are left out of the counts. A checksum mismatch applies in full everywhere. The rule that decided

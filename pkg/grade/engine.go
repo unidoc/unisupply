@@ -31,9 +31,9 @@ const (
 	treeFScore = 76 // the score of a whole-tree rule that makes the letter F
 	treeDScore = 51 // ... and of the "at least D" rule
 
-	treeCalledFindings   = 3 // called high or critical findings across the tree, in at least treeCalledModules modules: F
-	treeCalledModules    = 2
-	treeImportedOrCalled = 5 // called-or-imported high or critical findings across the tree: at least D
+	treeCalledFindings   = 3 // called high or critical findings across the tree, in at least treeMinModules modules: F
+	treeImportedOrCalled = 5 // called-or-imported high or critical findings across the tree, in at least treeMinModules modules: at least D
+	treeMinModules       = 2 // a row counts per upgrade, so a count rule needs more than one module: one module's findings are its row's business
 
 	activeSelfMonths = 12 // the module itself is active if it released or committed within this many months
 	activeDepMonths  = 24 // a dependency is active if it released within this many months
