@@ -82,7 +82,10 @@ type Finding struct {
 	// FixRequiresGo is the `go` directive of the fixed version's go.mod ("1.26"); empty when unknown.
 	FixRequiresGo string
 
-	Exploited    bool // on CISA's Known Exploited Vulnerabilities list
+	Exploited bool // on CISA's Known Exploited Vulnerabilities list
+	// KEVUnknown: its known-exploited status could not be checked (it has a CVE alias and CISA's catalog was not consulted): it
+	// gets no grace.
+	KEVUnknown   bool
 	FixedVersion string
 	// FixReleasedAt is when the first fixed version was released, and FixDateSource where that date came from.
 	FixReleasedAt *time.Time
@@ -229,7 +232,8 @@ type VEXStatus struct {
 // yet, past_window one that counts (and weighs 5 on its row once the fix is 60 days old or more); the other fields, the history
 // and the Go version the fix needs, are context only.
 type Response struct {
-	// Status: within_window (the fix is under ResponseWindowDays old: the finding does not count yet), past_window, no_fix,
+	// Status: within_window (the fix is under ResponseWindowDays old: the finding does not count yet, unless it is known-exploited
+	// or its known-exploited status could not be checked, which the text says), past_window, no_fix,
 	// date_unknown, or exploited (a known-exploited finding counts at once and has no response label).
 	Status        string     `json:"status"`
 	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`

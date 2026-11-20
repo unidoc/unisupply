@@ -32,6 +32,9 @@ func findingResult(f *scored, r Row, in *Input) FindingResult {
 		notes = append(notes, "Severity is unknown and is scored as medium.")
 	}
 	fr.Response = responseFor(&f.Finding, r, in)
+	if f.KEVUnknown && !f.Exploited && f.tier != TierGraphOnly && withinWindow(&f.Finding, in.Now) {
+		notes = append(notes, "Its known-exploited status could not be checked, so it counts without the grace period.")
+	}
 	if f.graced && fr.Response.WindowEnds != nil {
 		notes = append(notes, fmt.Sprintf("Fix is %d days old: it counts toward the letter from %s.", fr.Response.DaysSinceFix, dayMonth(*fr.Response.WindowEnds, in.Now)))
 	}
@@ -42,14 +45,20 @@ func findingResult(f *scored, r Row, in *Input) FindingResult {
 // hasFix is true when the advisory names a fixed version.
 func hasFix(f *Finding) bool { return strings.TrimSpace(f.FixedVersion) != "" }
 
-// graced is the one answer to "does this finding's fix give the project time yet": the fix is under ResponseWindowDays old at
-// now. Such a finding is shown and does not count toward the letter (not in its row, not in a whole-tree rule). A known-exploited
-// finding is never graced, and neither is one whose fix date is unknown or that has no fix.
-func graced(f *Finding, now time.Time) bool {
-	if f.Exploited || !hasFix(f) || f.FixReleasedAt == nil {
+// withinWindow is true when the finding has a fix whose release date is known and under ResponseWindowDays old at now.
+func withinWindow(f *Finding, now time.Time) bool {
+	if !hasFix(f) || f.FixReleasedAt == nil {
 		return false
 	}
 	return now.Before(f.FixReleasedAt.Add(ResponseWindowDays * 24 * time.Hour))
+}
+
+// graced is the one answer to "does this finding's fix give the project time yet": the fix is under ResponseWindowDays old at
+// now. Such a finding is shown and does not count toward the letter (not in its row, not in a whole-tree rule). A known-exploited
+// finding is never graced, nor one whose known-exploited status could not be checked (it might be on the list: it counts, the
+// safe direction), nor one whose fix date is unknown or that has no fix.
+func graced(f *Finding, now time.Time) bool {
+	return !f.Exploited && !f.KEVUnknown && withinWindow(f, now)
 }
 
 // overdueDays is how many whole days the fix of a finding has been available when that is overdueFixDays or more, else 0.
@@ -114,9 +123,13 @@ func responseBase(f *Finding, r Row, in *Input) Response {
 	if in.SelfReleasedAt != nil && t.Before(*in.SelfReleasedAt) {
 		resp.FixAgeAtReleaseDays = int(in.SelfReleasedAt.Sub(t).Hours() / 24)
 	}
-	if graced(f, in.Now) {
+	if withinWindow(f, in.Now) {
 		resp.Status = "within_window"
 		resp.Text = fmt.Sprintf("Fix released %s · response window ends %s.", dayMonth(t, in.Now), dayMonth(ends, in.Now))
+		if f.KEVUnknown {
+			// inside the window, but it does not wait: its known-exploited status could not be checked
+			resp.Text += " It counts at once: its known-exploited status could not be checked."
+		}
 		if resp.FixAgeAtReleaseDays > 0 {
 			resp.Text += fmt.Sprintf(" The fix was available for %d days before this version was released.", resp.FixAgeAtReleaseDays)
 		}

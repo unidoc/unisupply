@@ -105,6 +105,9 @@ func mergeGroup(all []Finding, idx []int) Finding {
 		if f.Exploited {
 			m.Exploited = true
 		}
+		if f.KEVUnknown {
+			m.KEVUnknown = true
+		}
 		if m.FixedVersion == "" && f.FixedVersion != "" {
 			m.FixedVersion = f.FixedVersion
 			m.FixReleasedAt, m.FixDateSource = f.FixReleasedAt, f.FixDateSource

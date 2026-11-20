@@ -273,6 +273,10 @@ findings are in the window and the earliest day one starts to count. A row whose
 - The window runs from the fix release date (the later of the advisory's fix date and the module proxy's time for the fixed
   version). A finding counts from exactly 14 days after that moment: 13 days 16 hours after it is graced, 14 days after it is not.
 - A known-exploited finding (CISA KEV) gets no grace: it counts on the day the fix is out.
+- A finding whose known-exploited status could not be checked gets no grace either: it has a CVE and CISA's catalog could not be
+  read, so it might be on the list, and it counts (the safe direction). Its note says so ("Its known-exploited status could not be
+  checked, so it counts without the grace period.") and its response label says it counts at once. A Go advisory without a CVE cannot be
+  on the list and keeps the grace. A called finding in this state also makes the grade Pending (`known_exploited`, see [Pending](#pending)).
 - A finding with no fix has nothing to wait for, and one whose fix date is unknown counts, with no grace. Neither is ever overdue.
 - A finding in a package that is not imported (graph-only) is not counted anyway and has no grace note.
 - A fix that is under 14 days old is never "overdue": the two states do not overlap.

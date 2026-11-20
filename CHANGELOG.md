@@ -43,7 +43,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **A fix under 14 days old does not count yet.** The finding is listed with `counted: false` (a graph-only finding was the only
   one before), `response.status` `within_window` and a note with the day it starts to count, and `grade.notes` says how many
   there are. It is left out of the row score, the overdue check and every whole-tree rule, a called critical included. A
-  known-exploited finding gets no grace, and one with an unknown fix date counts (#181).
+  known-exploited finding gets no grace, nor one with a CVE whose KEV status could not be checked (the catalog could not
+  be loaded), and one with an unknown fix date counts (#181).
 - **A fix that has been available for 60 days or more weighs 5.** A row with a counted finding whose fix is that old adds 5, once,
   after the imported cap. An imported high with an overdue fix is therefore 54, a D, where it was 49, a C: a D can now rest
   on a finding whose VEX status is `not_affected` (`vulnerable_code_not_in_execute_path`). The reason names the fix

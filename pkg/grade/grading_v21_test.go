@@ -293,3 +293,37 @@ func TestV21_RuleVersion(t *testing.T) {
 		t.Errorf("rule_version = %d, want 3", r.RuleVersion)
 	}
 }
+
+// A finding whose known-exploited status could not be checked gets no grace: it could be on the list, and then it would count at once.
+func TestV21_UnknownKEVStatusGetsNoGrace(t *testing.T) {
+	m := "golang.org/x/net"
+	f := aged("GO-2026-8010", m, "HIGH", "imported", "v0.60.0", 5*day)
+	f.KEVUnknown = true
+	r := gradeDeps(dep(m, f))
+	wantRow(t, "unknown KEV status", r, m, 49, LetterC)
+	got := row(t, r, m).Findings[0]
+	if !got.Counted || !strings.Contains(got.Note, "Its known-exploited status could not be checked, so it counts without the grace period.") {
+		t.Errorf("%+v", got)
+	}
+	if got.Response.Status != "within_window" || !strings.Contains(got.Response.Text, "It counts at once: its known-exploited status could not be checked.") || strings.Contains(got.Response.Text, "Fix available for") {
+		t.Errorf("the response label says the fix is new and that it counts at once: %+v", got.Response)
+	}
+	if strings.Contains(strings.Join(r.Notes, "\n"), "under 14 days") {
+		t.Errorf("nothing is in the window: %v", r.Notes)
+	}
+	// a fix older than 14 days has no grace to lose: no note
+	old := aged("GO-2026-8011", m, "HIGH", "imported", "v0.60.0", 20*day)
+	old.KEVUnknown = true
+	if n := row(t, gradeDeps(dep(m, old)), m).Findings[0].Note; strings.Contains(n, "known-exploited") {
+		t.Errorf("%q", n)
+	}
+	// the flag is carried through a merge of two ids of one vulnerability
+	a := aged("GO-2026-8012", m, "HIGH", "imported", "v0.60.0", 5*day)
+	b := aged("GHSA-aaaa-bbbb-cccc", m, "HIGH", "imported", "v0.60.0", 5*day)
+	b.Aliases = []string{"GO-2026-8012"}
+	b.KEVUnknown = true
+	merged := mergeAdvisories([]Finding{a, b})
+	if len(merged) != 1 || !merged[0].KEVUnknown {
+		t.Errorf("%+v", merged)
+	}
+}
