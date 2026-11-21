@@ -5,6 +5,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -16,9 +17,14 @@ import (
 // The called pass can only move a finding from "imported" to "called" (a module that is not imported stays graph-only, and
 // a finding that is already called stays so). So the question is whether any imported finding scores in a different band
 // as called than as imported, in the module's row or in a whole-tree rule. With the rules as they stand that is true for
-// any high or critical finding (called 70 and 90 are D and F, imported at most 50 is C), for a known-exploited one (called
+// any high or critical finding (called 70 and 90 are D and F, imported 49 and 50 are C), for a known-exploited one (called
 // is at least F) and for one with no severity yet (it is scored as a medium estimate that a lookup could settle, and the
 // letter would be marked as estimated); medium and low findings land in the same band either way.
+//
+// The findings it builds have no fix date, so the grace for a fresh fix and the overdue 5 never apply to them. That is the
+// safe side: a date can move a medium or low finding by 5 only within its band (imported 32 and called 45 become 37 and 50,
+// both C; halved for test-only, 18 and 25, both B). A high or critical finding is "needed" already; with an overdue fix an
+// imported high is 54, a D like the called one, so true is then the cautious side: it costs a scan, never a wrong letter.
 //
 // The test is deliberately one-sided: it ignores upkeep, which is added by max() to the same row either way and so cannot
 // make two scores that share a band differ; and it checks both with and without the test-only halving, so that an unknown
@@ -102,7 +108,7 @@ func boolPtr(b bool) *bool { return &b }
 func rowVulnBand(r Row) Letter {
 	fs := make([]scored, 0, len(r.Findings))
 	for i := range r.Findings {
-		fs = append(fs, scoreFinding(&r.Findings[i], &r))
+		fs = append(fs, scoreFinding(&r.Findings[i], &r, time.Time{}))
 	}
 	score, _, _, _ := vulnScore(r, fs)
 	return bandOf(score)

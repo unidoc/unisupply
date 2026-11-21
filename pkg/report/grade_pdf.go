@@ -61,6 +61,9 @@ func writeGradeCoverBlock(c *creator.Creator, g *grade.Result, regular, bold *mo
 	if g.Deciding != nil && g.Pending == nil {
 		lines = append(lines, fmt.Sprintf("Decided by: %s (score %d): %s", gradeDecidingText(g.Deciding), g.Deciding.Score, g.Deciding.Reason))
 	}
+	if g.NextStep != nil && g.Pending == nil {
+		lines = append(lines, "Next step: "+gradeNextStepText(g.NextStep))
+	}
 	for _, l := range lines {
 		_ = c.Draw(pdfPara(c, l, regular, 11, grey, true, [4]float64{0, 0, 0, 4}))
 	}
@@ -85,6 +88,10 @@ func writeGradeSection(c *creator.Creator, g *grade.Result, regular, bold *model
 		subheading(c, "Decided by", bold)
 		_ = c.Draw(pdfPara(c, fmt.Sprintf("%s (score %d)", gradeDecidingText(d), d.Score), bold, 11, creator.ColorBlack, false, [4]float64{0, 0, 0, 2}))
 		_ = c.Draw(pdfPara(c, d.Reason, regular, 10, creator.ColorBlack, false, [4]float64{0, 0, 0, 8}))
+		if n := g.NextStep; n != nil {
+			subheading(c, "Next step", bold)
+			_ = c.Draw(pdfPara(c, gradeNextStepText(n), regular, 10, creator.ColorBlack, false, [4]float64{0, 0, 0, 8}))
+		}
 	}
 	if p := g.Pending; p != nil {
 		subheading(c, "Pending", bold)

@@ -5,11 +5,14 @@ import (
 )
 
 // treeRule is the whole-tree rules: F only for confirmed problems, counted across the tree with confirmed test-only
-// dependencies left out (the checksum rule applies to them in full). A finding counts once per module and advisory.
+// dependencies left out (the checksum rule applies to them in full). A finding counts once per module and advisory, and
+// a finding whose fix is under 14 days old (graced) does not count.
 //
-//   - 3 or more called high or critical findings, any called critical finding, a called known-exploited finding or a
-//     checksum mismatch: F (score 76);
-//   - 5 or more called-or-imported high or critical findings: at least D (score 51).
+//   - 3 or more called high or critical findings in at least 2 modules, any called critical finding, a called
+//     known-exploited finding or a checksum mismatch: F (score 76). Three in one module are that row's business: a row
+//     counts per upgrade;
+//   - 5 or more called-or-imported high or critical findings in at least 2 modules: at least D (score 51). Like the F rule it
+//     needs two modules: five findings in one module that one upgrade fixes are that row's business.
 //
 // It returns the highest rule that applies; the caller uses it only when it raises the letter (its score is above the
 // worst row's), and then it appears as a row of its own. Without a tree-wide count, splitting one risky dependency into
@@ -28,7 +31,10 @@ func treeRule(in *Input, rows []RowResult) *TreeRow {
 		}
 		for i := range r.Findings {
 			f := &r.Findings[i]
-			sf := scoreFinding(f, &r)
+			sf := scoreFinding(f, &r, in.Now)
+			if sf.graced {
+				continue // a fix under 14 days old does not count yet, in no rule
+			}
 			k := key{r.Module, f.ID}
 			if sf.tier == TierCalled && highOrCritical(sf.sev) {
 				calledHC[k] = true
@@ -58,10 +64,10 @@ func treeRule(in *Input, rows []RowResult) *TreeRow {
 		return &TreeRow{Rule: "called_exploited", Score: treeFScore, Letter: LetterF, Reason: fmt.Sprintf("a called known-exploited finding: %s", calledExploited)}
 	case calledCritical != "":
 		return &TreeRow{Rule: "called_critical", Score: treeFScore, Letter: LetterF, Reason: fmt.Sprintf("a called critical finding: %s", calledCritical)}
-	case len(calledHC) >= treeCalledFindings:
+	case len(calledHC) >= treeCalledFindings && len(modules) >= treeMinModules:
 		return &TreeRow{Rule: "called_findings", Score: treeFScore, Letter: LetterF,
 			Reason: fmt.Sprintf("%d called high or critical findings across %d module%s", len(calledHC), len(modules), plural(len(modules), "", "s"))}
-	case len(anyHC) >= treeImportedOrCalled:
+	case len(anyHC) >= treeImportedOrCalled && len(modulesAny) >= treeMinModules:
 		return &TreeRow{Rule: "imported_and_called_findings", Score: treeDScore, Letter: LetterD,
 			Reason: fmt.Sprintf("%d called or imported high or critical findings across %d module%s", len(anyHC), len(modulesAny), plural(len(modulesAny), "", "s"))}
 	}

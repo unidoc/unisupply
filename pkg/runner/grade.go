@@ -141,6 +141,8 @@ func FindingFromVuln(module string, v *scanner.Vulnerability) grade.Finding {
 		Reachability:    v.Reachability,
 		CallPathChecked: v.CallPathChecked,
 		Exploited:       v.InKEV,
+		// a CVE whose catalog check did not run could be on the list: no grace for it. A Go advisory without a CVE cannot be.
+		KEVUnknown: !v.KEVChecked && hasCVEAlias(v),
 		// a lookup that failed is a check that did not run (Pending), not an unpublished severity (an estimate)
 		SeverityLookupFailed: v.EnrichmentFailed && (strings.TrimSpace(v.Severity) == "" || strings.EqualFold(v.Severity, "UNKNOWN")),
 		FixedVersion:         v.FixedVersion,
@@ -459,6 +461,17 @@ func selfStatusFailureReason(modulePath string) string {
 	return "the module proxy did not answer for " + modulePath
 }
 
+// hasCVEAlias is true when the advisory's ID or one of its aliases is a CVE: CISA's catalog lists CVEs only, so an advisory
+// without one cannot be on it.
+func hasCVEAlias(v *scanner.Vulnerability) bool {
+	for _, a := range append([]string{v.ID}, v.Aliases...) {
+		if strings.HasPrefix(a, "CVE-") {
+			return true
+		}
+	}
+	return false
+}
+
 // kevUnchecked counts the findings that could be a known-exploited F (reached, with a CVE) whose catalog check did not run.
 // A finding of a confirmed test-only dependency is left out: such a row can never reach F. A check against a stale
 // catalog counts as run (KEVChecked is true).
@@ -470,11 +483,8 @@ func kevUnchecked(vulns map[string][]scanner.Vulnerability, stdlib []scanner.Vul
 			if v.KEVChecked || (v.Reachability != "called" && v.Reachability != "") {
 				continue
 			}
-			for _, a := range append([]string{v.ID}, v.Aliases...) {
-				if strings.HasPrefix(a, "CVE-") {
-					n++
-					break
-				}
+			if hasCVEAlias(v) {
+				n++
 			}
 		}
 	}

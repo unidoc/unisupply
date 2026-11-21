@@ -96,7 +96,8 @@ func TestGrade_EndToEndThroughTheEngine(t *testing.T) {
 		Self:        grade.Row{Module: "example.com/app", Self: true},
 	})
 	r := grade.Grade(&in)
-	if r.Letter != grade.LetterF || r.Score != 80 {
+	// three called highs that one upgrade (v9) fixes are one problem: D 70
+	if r.Letter != grade.LetterD || r.Score != 70 {
 		t.Fatalf("%s %d", r.Letter, r.Score)
 	}
 }
@@ -572,5 +573,54 @@ func TestSelfAdvisory_KEVGrade(t *testing.T) {
 	listed.InKEV = true
 	if res := run(listed); res.Letter != grade.LetterF {
 		t.Errorf("catalog lists it: want F, got %+v %s", res.Pending, res.Letter)
+	}
+}
+
+// A fix under 14 days old does not count yet, except for a finding that could be on CISA's KEV list: with a CVE and no catalog
+// check, nobody knows it is not, so it counts at once. A Go advisory with no CVE cannot be on the list and keeps the grace.
+func TestGrade_FreshFixGraceAndTheKEVCheck(t *testing.T) {
+	pinned := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	fix := pinned.Add(-5 * 24 * time.Hour)
+	mk := func(v scanner.Vulnerability) (grade.Result, grade.FindingResult) {
+		v.Severity, v.Reachability, v.FixedVersion, v.FixReleasedAt = "HIGH", "imported", "v1.1.0", &fix
+		g := &resolver.Graph{Dependencies: map[string]*resolver.Dependency{
+			"example.com/dep": {Module: parser.Module{Path: "example.com/dep", Version: "v1.0.0"}, Direct: true, InBuild: tp(true)},
+		}}
+		in := buildGradeInput(&gradeInputs{
+			Graph:       g,
+			Vulns:       map[string][]scanner.Vulnerability{"example.com/dep": {v}},
+			Maintenance: map[string]*scanner.MaintenanceInfo{"example.com/dep": {LastRelease: pinned.AddDate(0, -1, 0)}},
+			Now:         pinned,
+			Self:        grade.Row{Module: "example.com/app", Self: true},
+		})
+		r := grade.Grade(&in)
+		for _, row := range r.Rows {
+			if row.Module == "example.com/dep" {
+				return r, row.Findings[0]
+			}
+		}
+		t.Fatalf("no row: %+v", r.Rows)
+		return r, grade.FindingResult{}
+	}
+
+	// a CVE alias and no catalog check: counts at once (imported high, 49)
+	r, f := mk(scanner.Vulnerability{ID: "GO-2026-1", Aliases: []string{"CVE-2026-1234"}})
+	if r.Letter != grade.LetterC || r.Score != 49 || !f.Counted {
+		t.Errorf("unchecked KEV status: %s %d counted=%v", r.Letter, r.Score, f.Counted)
+	}
+	// the same, with the CVE as the ID
+	if r, f = mk(scanner.Vulnerability{ID: "CVE-2026-1234"}); !f.Counted || r.Score != 49 {
+		t.Errorf("a CVE id: %s %d counted=%v", r.Letter, r.Score, f.Counted)
+	}
+	// the catalog was consulted and does not list it: the grace holds
+	if r, f = mk(scanner.Vulnerability{ID: "GO-2026-1", Aliases: []string{"CVE-2026-1234"}, KEVChecked: true}); r.Letter != grade.LetterA || f.Counted {
+		t.Errorf("checked, not listed: %s %d counted=%v", r.Letter, r.Score, f.Counted)
+	}
+	// no CVE at all: it cannot be on the list, so nothing was left unchecked
+	if r, f = mk(scanner.Vulnerability{ID: "GO-2026-1", Aliases: []string{"GHSA-xxxx-yyyy-zzzz"}}); r.Letter != grade.LetterA || f.Counted {
+		t.Errorf("no CVE: %s %d counted=%v", r.Letter, r.Score, f.Counted)
+	}
+	if got := FindingFromVuln("m", &scanner.Vulnerability{ID: "GO-1", Aliases: []string{"CVE-2026-1"}}); !got.KEVUnknown {
+		t.Errorf("KEVUnknown not set: %+v", got)
 	}
 }

@@ -165,6 +165,23 @@ func gradeLetterColor(letter string) string {
 	return colorDim
 }
 
+// gradeNextStepText is the one line of the next step: the command, what it clears and the letter after it.
+func gradeNextStepText(n *grade.NextStep) string {
+	cmd := n.Command
+	if cmd == "" {
+		cmd = fmt.Sprintf("go get %s@%s", n.Module, n.Version)
+	}
+	after := "the letter would be " + string(n.LetterAfter)
+	if n.LetterAfter == "" {
+		after = "the letter after it depends on " + n.PendingAfter
+	}
+	advisories := "advisories"
+	if len(n.Clears) == 1 {
+		advisories = "advisory"
+	}
+	return fmt.Sprintf("%s (clears %d %s; %s)", cmd, len(n.Clears), advisories, after)
+}
+
 // gradeDecidingText names what set the letter: a module, "this module", or the whole-tree rule.
 func gradeDecidingText(d *grade.Deciding) string {
 	switch {
@@ -233,6 +250,9 @@ func writeGradeText(w io.Writer, c func(string, string) string, g *grade.Result,
 	}
 	if g.Deciding != nil && g.Pending == nil {
 		fmt.Fprintf(w, "  Decided by: %s (score %d) — %s\n", gradeDecidingText(g.Deciding), g.Deciding.Score, g.Deciding.Reason)
+	}
+	if g.NextStep != nil && g.Pending == nil {
+		fmt.Fprintf(w, "  Next step: %s\n", gradeNextStepText(g.NextStep))
 	}
 	fmt.Fprintf(w, "%s\n\n", bar)
 
