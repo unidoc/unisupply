@@ -23,15 +23,19 @@ import (
 
 // errRateLimited is returned by githubGet when GitHub reports a rate limit:
 // any 429 response, a 403 with X-RateLimit-Remaining: 0 (the primary limit),
-// or a 403 whose Retry-After names a wait above zero (a secondary limit,
-// which can arrive with requests still remaining). githubGet returns it
-// wrapped in a *rateLimitError.
+// a 403 whose Retry-After names a wait above zero (a secondary limit, which
+// can arrive with requests still remaining), or any other 403 whose body names
+// a secondary limit (githubSecondaryLimitBody). githubGet returns it wrapped
+// in a *rateLimitError.
 var errRateLimited = errors.New("github rate limit exceeded")
 
 // rateLimitError is errRateLimited with what the response said about it.
 type rateLimitError struct {
 	wait      string // "resets at <time> (<duration> from now)", or empty when the response named no wait
 	quotaLeft bool   // X-RateLimit-Remaining was above 0: a secondary limit, which a token does not lift
+	// namedSecondary: a 403 the headers did not classify, whose body named a
+	// secondary limit (which a token does not lift either).
+	namedSecondary bool
 }
 
 func (e *rateLimitError) Error() string {
@@ -384,8 +388,8 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 				hint = "the GitHub token was rejected (401), so requests ran unauthenticated"
 			case ms.token != "":
 				// Authenticated requests still hit the token's quota or a
-				// secondary limit (a 429, or a 403 with Retry-After); asking for a
-				// token would not help.
+				// secondary limit (a 429, a 403 with Retry-After, or a 403 whose
+				// body names one); asking for a token would not help.
 				hint = "requests were authenticated, so the token's quota or a secondary rate limit was reached; wait and re-run"
 			case errors.As(err, &rl) && rl.quotaLeft:
 				// Requests were left in the hourly quota, so this is a secondary
@@ -393,6 +397,12 @@ func (ms *MaintainerScanner) analyzeRepo(ctx context.Context, owner, repo string
 				// secondary limit seen first must not hide the token hint when
 				// the hourly quota runs out later in the same scan.
 				hint = "requests remained in the hourly quota, so a secondary rate limit was reached; wait and re-run"
+				once = &ms.secondaryLimitWarnOnce
+			case errors.As(err, &rl) && rl.namedSecondary:
+				// GitHub's body named a secondary limit and the remaining count
+				// was not given, so "requests remained" would be unobserved. The
+				// same once as above: it is the same kind of limit.
+				hint = "GitHub's response said a secondary rate limit was reached; wait and re-run"
 				once = &ms.secondaryLimitWarnOnce
 			}
 			once.Do(func() {
@@ -744,22 +754,32 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 		// X-RateLimit-Remaining (a secondary limit). A 403 is one when the
 		// remaining count is 0 (the primary limit) or when it carries a
 		// usable Retry-After (a secondary limit, possibly with requests
-		// still remaining); any other 403 is a permission error.
+		// still remaining). GitHub can also send a secondary limit with
+		// neither header, naming it only in the body, so a 403 the headers
+		// leave unclassified is one when its body names a secondary limit;
+		// any other 403 is a permission error.
 		n, remainingErr := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining"))
 		quotaSpent := remainingErr == nil && n == 0 // the primary (hourly) limit
 		quotaLeft := remainingErr == nil && n > 0   // any limit now is a secondary one
 		retryAfter, hasRetryAfter := parseRetryAfterUncapped(resp.Header.Get("Retry-After"), time.Now())
 		// A Retry-After of zero or in the past names no wait, and is no sign of a limit on a 403.
 		hasRetryAfter = hasRetryAfter && retryAfter > 0
+		// Read only when the headers decide nothing, so a 403 they classify
+		// keeps its hint and wait whatever the body says.
+		namedSecondary := resp.StatusCode == http.StatusForbidden && !quotaSpent && !hasRetryAfter &&
+			githubSecondaryLimitBody(body)
 		if resp.StatusCode == http.StatusTooManyRequests ||
-			(resp.StatusCode == http.StatusForbidden && (quotaSpent || hasRetryAfter)) {
+			(resp.StatusCode == http.StatusForbidden && (quotaSpent || hasRetryAfter || namedSecondary)) {
 			// GitHub sends the X-RateLimit-* headers on every response, so the
 			// reset time is the hourly window's. It is the wait when the quota
 			// is spent; otherwise Retry-After names the wait, as GitHub's
 			// guidance says. With requests left and no usable Retry-After the
 			// response names no wait, and the reset time would overstate it.
-			// It stays the last resort when the remaining count is not given.
-			rl := &rateLimitError{quotaLeft: quotaLeft}
+			// It stays the last resort when the remaining count is not given,
+			// except for a limit the body named: the reset time is still the
+			// hourly window's, and GitHub's guidance for it is only "at least
+			// one minute", so no wait is named.
+			rl := &rateLimitError{quotaLeft: quotaLeft, namedSecondary: namedSecondary}
 			var reset time.Time
 			if resetUnix, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 				reset = time.Unix(resetUnix, 0).UTC()
@@ -770,7 +790,7 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 				resetAt = reset
 			case hasRetryAfter:
 				resetAt = time.Now().Add(retryAfter.Round(time.Second)).UTC()
-			case !quotaLeft:
+			case !quotaLeft && !namedSecondary:
 				resetAt = reset // zero when the header is absent: no wait named
 			}
 			if !resetAt.IsZero() {
@@ -794,6 +814,24 @@ func (ms *MaintainerScanner) githubGet(ctx context.Context, url, purpose string)
 	}
 
 	return body, nil
+}
+
+// githubSecondaryLimitBody reports whether a GitHub error body names a
+// secondary rate limit. GitHub's docs say only that the error message
+// "indicates that you exceeded a secondary rate limit", and quote no body, so
+// either sign counts: a message containing "secondary rate limit" (any case),
+// or a documentation_url ending in "secondary-rate-limits" (the anchor
+// go-github matches). A body that is not JSON names nothing.
+func githubSecondaryLimitBody(body []byte) bool {
+	var e struct {
+		Message          string `json:"message"`
+		DocumentationURL string `json:"documentation_url"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(e.Message), "secondary rate limit") ||
+		strings.HasSuffix(e.DocumentationURL, "secondary-rate-limits")
 }
 
 // githubAPIHost is the only host the maintainer scanner talks to, and the only

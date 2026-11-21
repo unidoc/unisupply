@@ -56,6 +56,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   scan without a token is told to wait and re-run instead of to set `GITHUB_TOKEN`, since a token does not lift a
   secondary limit; that warning and the `GITHUB_TOKEN` one are each shown once, so a scan that meets both sees both
   (#145).
+- **A GitHub secondary rate limit named only in the response body is now reported as rate-limited.** GitHub can send a
+  secondary limit as a 403 with requests remaining and no `Retry-After`; the maintainer lookup read it as a plain API
+  error. A 403 that the headers do not classify now counts as a rate limit when its body names a secondary limit (the
+  message says "secondary rate limit", or `documentation_url` ends in `secondary-rate-limits`), so its `unavailable_reason`
+  is `rate_limited` where it was `github_api_error`, and the warning says to wait and re-run. No wait is named: GitHub's
+  guidance for this case is only "at least one minute". A 403 for missing permissions stays `github_api_error`, and a 403
+  the headers already classify is unchanged (#184).
 - **A scan that used a GitHub token and was rate-limited no longer says it was unauthenticated.** The warning now reads
   "GitHub API rate-limited — maintainer data unavailable for N module(s)" when GitHub rate-limited at least one module,
   instead of telling a user who set a token to set one. A scan without a token, or with one GitHub rejected (401), keeps
