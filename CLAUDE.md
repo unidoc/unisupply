@@ -137,7 +137,7 @@ This calls `POST /api/v1/lookup` with all discovered modules and enriches the re
 - `github.com/unidoc/unipdf/v5` — PDF report generation (dogfooding)
 - `github.com/unidoc/unichart` — Charts in PDF reports
 - `golang.org/x/vuln` — Go vulnerability database
-- `gopkg.in/yaml.v3` — GitHub Actions workflow parsing
+- `go.yaml.in/yaml/v3` — GitHub Actions workflow parsing
 
 ## Key files
 

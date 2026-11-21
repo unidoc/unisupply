@@ -56,6 +56,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   need a newer Go" now counts only counted findings. Letters now change on day 14 and day 60 after a fix with no advisory
   change: a service that grades a stored analysis again must do it on a date, not only when an advisory changes (#181).
 
+#### Dependencies
+
+- **The workflow parser uses `go.yaml.in/yaml/v3` `v3.0.5` instead of `gopkg.in/yaml.v3` `v3.0.1`**, whose repository is
+  archived. `go.yaml.in/yaml/v3` is its maintained continuation with the same API, and it was already in the binary
+  through UniPDF. `gopkg.in/yaml.v3` is no longer compiled in: it stays in the module graph through logrus and unichart,
+  so unisupply's own grade moves from B (archived dependency, 20) to A (archived, not compiled in, 10). Its NOTICE text is
+  removed from `NOTICE`.
+
 ### Bug Fixes
 
 - **A cancelled vulnerability scan no longer takes the host process down.** When the context ended while govulncheck built
@@ -105,6 +113,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   or newer, and so does a module that requires the next unisupply release (`go get`, or a library caller of
   `pkg/runner`), since `go.mod` says `go 1.26.11`. CI tests against Go 1.26.11 and 1.27.4 (1.27.4 is the first 1.27
   release with the fix).
+- Upgraded `golang.org/x/crypto` `v0.58.0` → `v0.59.0`, clearing GO-2026-5932 (the unmaintained `x/crypto/openpgp`
+  packages), noted in v0.6.0 as having no upstream fix. unisupply does not import openpgp (it uses `x/crypto/ocsp`
+  through UniPDF), so the finding was in the module graph only and did not affect the grade. It also moves
+  `golang.org/x/sync` to `v0.25.0` and `golang.org/x/text` to `v0.44.0`.
 
 ## [0.9.0] - 2026-10-29
 

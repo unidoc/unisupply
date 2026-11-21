@@ -137,7 +137,7 @@ follow the `GITHUB_TOKEN` pattern: env var first, flag second.
 Some dependencies ship their own `NOTICE` file (required by Apache 2.0 §4(d)).
 When they do, their attribution must appear in the repo-root `NOTICE` file with
 both the module path **and** the resolved version string (e.g.
-`gopkg.in/yaml.v3 v3.0.1`). CI enforces this automatically via the
+`go.yaml.in/yaml/v3 v3.0.5`). CI enforces this automatically via the
 `license-check` job.
 
 **If CI fails with `UNCOVERED NOTICE`:** open the `NOTICE` file of the flagged
