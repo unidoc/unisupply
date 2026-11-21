@@ -8,17 +8,19 @@ import (
 	"time"
 )
 
-// Vulnerability score by severity and tier (rules version 2). A graph-only finding is shown, not graded: it has no
-// entry. The numbers are set so outcomes land in the intended band (one called high is D, three are F, an imported
-// high stays below D); they are policy values, not measured risk.
+// Vulnerability score by severity and tier (rules version 3). A graph-only finding is shown, not graded: it has no
+// entry. The numbers are set so outcomes land in the intended band (one called high is D, an imported high is C until its
+// fix has waited 60 days); they are policy values, not measured risk.
 var (
 	calledScore   = map[string]int{"CRITICAL": 90, "HIGH": 70, "MEDIUM": 45, "LOW": 15}
 	importedScore = map[string]int{"CRITICAL": 50, "HIGH": 49, "MEDIUM": 32, "LOW": 11}
 )
 
 const (
-	importedCap        = 50 // an imported finding alone can never reach D
-	furtherAdvisoryAdd = 5  // for each further distinct called high or critical advisory on a row
+	importedCap        = 50 // an imported finding's score is at most 50 (C); only the overdue add below can lift it to D
+	furtherAdvisoryAdd = 5  // for each further problem (see vulnScore) among the called high or critical advisories of a row
+	overdueFixDays     = 60 // a counted finding whose fix has been available this long or longer is overdue
+	overdueAdd         = 5  // added once to a row with an overdue finding, after the imported cap
 	exploitedFloor     = 76 // a called known-exploited finding is F
 	testOnlyCap        = 50 // a test-only dependency's vulnerability score, after halving, is at most C
 
@@ -29,8 +31,9 @@ const (
 	treeFScore = 76 // the score of a whole-tree rule that makes the letter F
 	treeDScore = 51 // ... and of the "at least D" rule
 
-	treeCalledFindings   = 3 // called high or critical findings across the tree: F
-	treeImportedOrCalled = 5 // called-or-imported high or critical findings across the tree: at least D
+	treeCalledFindings   = 3 // called high or critical findings across the tree, in at least treeMinModules modules: F
+	treeImportedOrCalled = 5 // called-or-imported high or critical findings across the tree, in at least treeMinModules modules: at least D
+	treeMinModules       = 2 // a row counts per upgrade, so a count rule needs more than one module: one module's findings are its row's business
 
 	activeSelfMonths = 12 // the module itself is active if it released or committed within this many months
 	activeDepMonths  = 24 // a dependency is active if it released within this many months
@@ -101,9 +104,15 @@ type scored struct {
 	tier      string
 	assumed   bool
 	score     int // table value (0 for graph-only)
+	// graced: the fix is under ResponseWindowDays old, so the finding is shown and does not count (see graced).
+	graced bool
+	// overdueDays is how many days the fix has been available when it is overdue (overdueFixDays or more), else 0.
+	overdueDays int
 }
 
-func scoreFinding(f *Finding, r *Row) scored {
+// scoreFinding scores a finding against its row at the time now. now is read only for the fix age: a finding without a fix
+// date is never graced and never overdue.
+func scoreFinding(f *Finding, r *Row, now time.Time) scored {
 	sev, est := severityOf(f.Severity)
 	tier, assumed := tierOf(f.Reachability, r.Self)
 	if !r.Self && isRefuted(r.InBuild) {
@@ -116,6 +125,11 @@ func scoreFinding(f *Finding, r *Row) scored {
 		s.score = calledScore[sev]
 	case TierImported:
 		s.score = importedScore[sev]
+	}
+	// a graph-only finding is not counted whatever the age of its fix: no grace, no overdue
+	if tier != TierGraphOnly {
+		s.graced = graced(f, now)
+		s.overdueDays = overdueDays(f, now)
 	}
 	return s
 }
@@ -182,22 +196,36 @@ func upkeepScore(r Row, state string) int {
 	return upkeepDependency
 }
 
-// vulnScore applies the order of operations to one row's findings:
+// vulnScore applies the order of operations to one row's findings. A finding that is graced (its fix is under 14 days old) is
+// not among them:
 //
-//  1. called findings: the worst one's table value, plus 5 for each further distinct called high or critical advisory;
-//  2. imported findings: the same with the imported column, capped at 50 (C): only called findings push a row to D or F;
+//  1. called findings: the worst one's table value, plus 5 for each further problem among the called high or critical
+//     advisories. The advisories that have a fix are ONE problem (one upgrade clears them); each advisory without a fix is
+//     a problem of its own;
+//  2. imported findings: the worst one's table value from the imported column, capped at 50 (C);
 //  3. the row's vulnerability score is the higher of the two;
-//  4. a called known-exploited finding: at least 76 (F);
-//  5. a confirmed test-only dependency: halve it and cap it at 50, so a test-only known-exploited finding lands at C.
+//  4. a counted finding whose fix has been available 60 days or more: +5, once (after the imported cap, so an overdue
+//     imported high is 54, a D), then at most 100;
+//  5. a called known-exploited finding: at least 76 (F);
+//  6. a confirmed test-only dependency: halve it and cap it at 50, so a test-only known-exploited finding lands at C.
 func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason string) {
 	type tierSet struct{ list []*scored }
 	var called, imported tierSet
+	var overdue *scored // the counted finding with the oldest fix of 60 days or more, then the smallest ID
 	for i := range fs {
+		if fs[i].graced {
+			continue
+		}
 		switch fs[i].tier {
 		case TierCalled:
 			called.list = append(called.list, &fs[i])
 		case TierImported:
 			imported.list = append(imported.list, &fs[i])
+		default:
+			continue
+		}
+		if o := &fs[i]; o.overdueDays > 0 && (overdue == nil || o.overdueDays > overdue.overdueDays || (o.overdueDays == overdue.overdueDays && o.ID < overdue.ID)) {
+			overdue = o
 		}
 	}
 	best := func(ts tierSet, cap int, bonus bool) (int, *scored, int) {
@@ -223,12 +251,21 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 			return a.ID < b.ID
 		})
 		top := byID[ids[0]]
-		further := 0
-		for _, id := range ids[1:] {
-			if bonus && highOrCritical(byID[id].sev) {
-				further++
+		// problems: the high or critical advisories with a fix are one (one upgrade), each one without a fix is its own
+		problems, withFix := 0, false
+		for _, id := range ids {
+			if f := byID[id]; bonus && highOrCritical(f.sev) {
+				if hasFix(&f.Finding) {
+					withFix = true
+				} else {
+					problems++
+				}
 			}
 		}
+		if withFix {
+			problems++
+		}
+		further := max(problems-1, 0)
 		s := top.score + further*furtherAdvisoryAdd
 		if cap > 0 && s > cap {
 			s = cap
@@ -244,6 +281,13 @@ func vulnScore(r Row, fs []scored) (score int, est bool, top *scored, reason str
 	case itop != nil:
 		score, top = is, itop
 		reason = describeVuln(itop, "imported", ifurther)
+	}
+	if top != nil && top.overdueDays > 0 {
+		overdue = top // the finding that sets the score names the +5 when it is overdue itself
+	}
+	if overdue != nil {
+		score += overdueAdd
+		reason += fmt.Sprintf("; +%d: fix for %s available %d days", overdueAdd, overdue.ID, overdue.overdueDays)
 	}
 	if score > 100 {
 		score = 100
@@ -285,9 +329,18 @@ func describeVuln(top *scored, tier string, further int) string {
 	}
 	s := fmt.Sprintf("%s %s %s%s (%d)", tier, strings.ToLower(top.sev), who, est, top.score)
 	if further > 0 {
-		s += fmt.Sprintf(", +%d for %d more %s high or critical advisor%s", further*furtherAdvisoryAdd, further, tier, plural(further, "y", "ies"))
+		s += fmt.Sprintf(", +%d for %d more %s high or critical problem%s (advisories with a fix count as one; each without a fix counts alone)", further*furtherAdvisoryAdd, further, tier, plural(further, "", "s"))
 	}
 	return s
+}
+
+func anyGraced(fs []scored) bool {
+	for i := range fs {
+		if fs[i].graced {
+			return true
+		}
+	}
+	return false
 }
 
 func plural(n int, one, many string) string {
@@ -322,7 +375,7 @@ func gradeRow(r Row, in *Input) RowResult {
 	state := upkeepState(r, in.Now)
 	fs := make([]scored, 0, len(r.Findings))
 	for i := range r.Findings {
-		fs = append(fs, scoreFinding(&r.Findings[i], &r))
+		fs = append(fs, scoreFinding(&r.Findings[i], &r, in.Now))
 	}
 	vs, est, _, vreason := vulnScore(r, fs)
 	us := upkeepScore(r, state)
@@ -359,6 +412,8 @@ func gradeRow(r Row, in *Input) RowResult {
 		rr.Estimated = est
 	case us > 0:
 		rr.Reason = upkeepReason(r, state, us)
+	case len(fs) > 0 && anyGraced(fs):
+		rr.Reason = fmt.Sprintf("findings with a fix under %d days old are shown, not graded yet", ResponseWindowDays)
 	case len(fs) > 0:
 		rr.Reason = "findings are shown, not graded"
 	case state == StateUnknown:
@@ -476,6 +531,23 @@ func gradeOnce(input *Input) Result {
 	if n := res.FixesNeedNewerGo; n > 0 {
 		res.Notes = append(res.Notes, fmt.Sprintf("%d reached finding%s fixed only in versions that need a newer Go than this module supports (go %s): taking the fix raises the module's minimum Go version. The grade does not change for that.", n, plural(n, " is", "s are"), strings.TrimSpace(in.ProjectGo)))
 	}
+	// findings whose fix is under 14 days old are listed and do not count yet: said once, with the day the first one starts to
+	// (a graph-only finding is not counted either way and is left out)
+	graceCount, graceFrom := 0, time.Time{}
+	for i := range rows {
+		for j := range rows[i].Findings {
+			if f := &rows[i].Findings[j]; !f.Counted && f.Tier != TierGraphOnly && f.Response.WindowEnds != nil {
+				graceCount++
+				if graceFrom.IsZero() || f.Response.WindowEnds.Before(graceFrom) {
+					graceFrom = *f.Response.WindowEnds
+				}
+			}
+		}
+	}
+	if graceCount > 0 {
+		res.Notes = append(res.Notes, fmt.Sprintf("%d finding%s fix under %d days old and %s not counted toward the letter yet; the earliest counts from %s.",
+			graceCount, plural(graceCount, " has a", "s have a"), ResponseWindowDays, plural(graceCount, "is", "are"), dayMonth(graceFrom, in.Now)))
+	}
 	if res.Pending == nil {
 		res.ArchivedUnread = archivedUnreadThatMatters(&in, letterScore)
 	}
@@ -576,19 +648,29 @@ func Grade(input *Input) Result {
 	// Merge the advisories first: a Go advisory with no severity whose GitHub alias is rated HIGH has a published severity
 	// once they are one finding, and only what is still estimated after the merge is substituted below.
 	merged := mergedInput(input)
-	res := gradeOnce(&merged)
+	res := gradeDecided(&merged)
+	// the next step is worked out once, on the final result: its re-grades are gradeOnce runs and never come back here
+	if res.Pending == nil {
+		res.NextStep = nextStep(&merged, &res)
+	}
+	return res
+}
+
+// gradeDecided is the grade with the estimate and severity-lookup checks, for an input whose advisories are merged.
+func gradeDecided(merged *Input) Result {
+	res := gradeOnce(merged)
 	if res.Pending != nil {
 		return res
 	}
-	if p := severityLookupPending(&merged, &res); p != nil {
+	if p := severityLookupPending(merged, &res); p != nil {
 		res.Pending, res.Letter, res.Deciding, res.Score, res.Estimated = p, "", nil, 0, false
 		return res
 	}
-	if !hasEstimatedSeverity(&merged) {
+	if !hasEstimatedSeverity(merged) {
 		return res
 	}
 	for _, sev := range []string{"LOW", "CRITICAL"} {
-		alt := withEstimatedSeverity(&merged, sev)
+		alt := withEstimatedSeverity(merged, sev)
 		if r := gradeOnce(&alt); r.Letter != res.Letter {
 			res.Estimated = true
 			break

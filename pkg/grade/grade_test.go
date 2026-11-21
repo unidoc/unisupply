@@ -56,25 +56,33 @@ func TestBands(t *testing.T) {
 
 // ---- the worked examples of the proposal ----
 
-// unidoc/unipdf/v5 was F (85) with no row above 51. Now: x/image has three called highs: 70 + 5 + 5 = 80, the deciding row.
-// Together with x/text there are four called highs across two modules, so the tree rule agrees but does not decide.
+// unidoc/unipdf/v5 was F (85) with no row above 51. x/image has three called highs and x/text one. All three of x/image's have
+// a fix: one upgrade clears them, so the row is 70 (D). Four called highs across two modules are still F, by the whole-tree rule.
 func TestWorkedExample_Unipdf(t *testing.T) {
 	r := run(Input{Self: self(), Deps: []Row{
 		dep("golang.org/x/image", called("GO-2026-0101", "golang.org/x/image", "HIGH"), called("GO-2026-0102", "golang.org/x/image", "HIGH"), called("GO-2026-0103", "golang.org/x/image", "HIGH")),
 		dep("golang.org/x/text", called("GO-2026-0201", "golang.org/x/text", "HIGH")),
 		dep("github.com/quiet/lib"),
 	}})
-	if r.Letter != LetterF || r.Score != 80 || r.Pending != nil {
+	if r.Letter != LetterF || r.Score != 76 || r.Pending != nil {
 		t.Fatalf("%+v", r)
 	}
-	if r.Deciding == nil || r.Deciding.Module != "golang.org/x/image" || r.Deciding.Score != 80 || len(r.TreeRows) != 0 {
-		t.Fatalf("deciding = %+v, tree = %+v (the row decides; the tree rule agrees without being needed)", r.Deciding, r.TreeRows)
+	if r.Deciding == nil || r.Deciding.Tree != "called_findings" || r.Deciding.Score != 76 || len(r.TreeRows) != 1 ||
+		r.TreeRows[0].Reason != "4 called high or critical findings across 2 modules" {
+		t.Fatalf("deciding = %+v, tree = %+v (the tree rule decides: no row is above D)", r.Deciding, r.TreeRows)
 	}
-	if !strings.Contains(r.Deciding.Reason, "called high GO-2026-0101 (70)") || !strings.Contains(r.Deciding.Reason, "+10 for 2 more called high or critical advisories") {
+	if x := row(t, r, "golang.org/x/image"); x.VulnScore != 70 || x.UpkeepScore != 0 || x.Letter != LetterD {
+		t.Errorf("three advisories with a fix are one upgrade: %+v", x)
+	}
+	// the same three without a fix are three problems: 70 + 5 + 5 = 80, the deciding row, with the arithmetic in the reason
+	m := "golang.org/x/image"
+	noFix := func(id string) Finding { return Finding{ID: id, Module: m, Severity: "HIGH", Reachability: "called"} }
+	r = run(Input{Self: self(), Deps: []Row{dep(m, noFix("GO-2026-0101"), noFix("GO-2026-0102"), noFix("GO-2026-0103"))}})
+	if r.Letter != LetterF || r.Score != 80 || r.Deciding == nil || r.Deciding.Module != m || len(r.TreeRows) != 0 {
+		t.Fatalf("%+v / %+v", r.Letter, r.Deciding)
+	}
+	if !strings.Contains(r.Deciding.Reason, "called high GO-2026-0101 (70)") || !strings.Contains(r.Deciding.Reason, "+10 for 2 more called high or critical problems") {
 		t.Errorf("the reason must show the arithmetic: %q", r.Deciding.Reason)
-	}
-	if x := row(t, r, "golang.org/x/image"); x.VulnScore != 80 || x.UpkeepScore != 0 || x.Letter != LetterF {
-		t.Errorf("%+v", x)
 	}
 }
 
@@ -187,11 +195,18 @@ func TestCalledFindingsScore(t *testing.T) {
 			t.Errorf("called %s: %d %s, want %d %s", c.sev, r.Score, r.Letter, c.score, c.l)
 		}
 	}
-	// one called high is D, two sit at the top of D, three are F
+	// one called high is D; advisories with a fix are one upgrade, so two or three of them are still 70; without a fix each is
+	// its own problem: two sit at the top of D (75), three are F
 	d2 := run(Input{Self: self(), Deps: []Row{dep("example.com/x", called("1", "example.com/x", "HIGH"), called("2", "example.com/x", "HIGH"))}})
 	d3 := run(Input{Self: self(), Deps: []Row{dep("example.com/x", called("1", "example.com/x", "HIGH"), called("2", "example.com/x", "HIGH"), called("3", "example.com/x", "HIGH"))}})
-	if d2.Score != 75 || d2.Letter != LetterD || d3.Score != 80 || d3.Letter != LetterF {
-		t.Errorf("two called highs %d %s, three %d %s", d2.Score, d2.Letter, d3.Score, d3.Letter)
+	if d2.Score != 70 || d2.Letter != LetterD || d3.Score != 70 || d3.Letter != LetterD {
+		t.Errorf("with a fix: two called highs %d %s, three %d %s", d2.Score, d2.Letter, d3.Score, d3.Letter)
+	}
+	nofix := func(id string) Finding { f := called(id, "example.com/x", "HIGH"); f.FixedVersion = ""; return f }
+	n2 := run(Input{Self: self(), Deps: []Row{dep("example.com/x", nofix("1"), nofix("2"))}})
+	n3 := run(Input{Self: self(), Deps: []Row{dep("example.com/x", nofix("1"), nofix("2"), nofix("3"))}})
+	if n2.Score != 75 || n2.Letter != LetterD || n3.Score != 80 || n3.Letter != LetterF {
+		t.Errorf("without a fix: two called highs %d %s, three %d %s", n2.Score, n2.Letter, n3.Score, n3.Letter)
 	}
 	// thirty called mediums grade like one: only high and critical advisories add
 	var many []Finding
@@ -250,10 +265,15 @@ func TestWholeTreeRules(t *testing.T) {
 		r.TreeRows[0].Reason != "3 called high or critical findings across 3 modules" {
 		t.Fatalf("%+v %+v", r.TreeRows, r.Deciding)
 	}
-	// splitting one risky dependency into small modules must not lower the letter: one module with 3 -> F (80); three modules -> F (76)
+	// three called highs with a fix in ONE module are one upgrade (D 70, no tree row); in three modules they are F (76)
 	one := run(Input{Self: self(), Deps: []Row{dep("example.com/a", called("1", "example.com/a", "HIGH"), called("2", "example.com/a", "HIGH"), called("3", "example.com/a", "HIGH"))}})
-	if one.Letter != LetterF {
-		t.Fatal(one.Letter)
+	if one.Letter != LetterD || one.Score != 70 || len(one.TreeRows) != 0 {
+		t.Fatalf("%s %d %v", one.Letter, one.Score, one.TreeRows)
+	}
+	// splitting a risky dependency without fixes into small modules must not lower the letter: one module with 3 -> F (80); three modules -> F (76)
+	nofix := func(id, m string) Finding { f := called(id, m, "HIGH"); f.FixedVersion = ""; return f }
+	if x := run(Input{Self: self(), Deps: []Row{dep("example.com/a", nofix("1", "example.com/a"), nofix("2", "example.com/a"), nofix("3", "example.com/a"))}}); x.Letter != LetterF || x.Score != 80 {
+		t.Fatalf("%s %d", x.Letter, x.Score)
 	}
 	// five imported highs on five modules: each C (49), together at least D (51)
 	var imp []Row
@@ -530,12 +550,16 @@ func TestResponseContext(t *testing.T) {
 		resp.History != "Historically adopted comparable fixes in about 30 days (3 fixes, Jan 2025 to Sep 2026)." {
 		t.Errorf("%+v", resp)
 	}
-	// the response label never changes the letter: F while the window is open, F after
-	if r.Letter != LetterD {
-		t.Errorf("one called high is D: %s", r.Letter)
+	// while the window is open the finding does not count (A); after it, one called high is D
+	if r.Letter != LetterA || row(t, r, "golang.org/x/net").Findings[0].Counted {
+		t.Errorf("a fix 2 days old is not counted yet: %s", r.Letter)
 	}
-	if resp := get(mk(&twenty, "v0.60.0", false)); resp.Status != "past_window" || resp.Text != "Fix available for 20 days; the graded version still requires the affected golang.org/x/net version." {
+	past := mk(&twenty, "v0.60.0", false)
+	if resp := get(past); resp.Status != "past_window" || resp.Text != "Fix available for 20 days; the graded version still requires the affected golang.org/x/net version." {
 		t.Errorf("%+v", resp)
+	}
+	if past.Letter != LetterD || !row(t, past, "golang.org/x/net").Findings[0].Counted {
+		t.Errorf("a fix 20 days old counts: one called high is D: %s", past.Letter)
 	}
 	if resp := get(mk(nil, "v0.60.0", false)); resp.Status != "date_unknown" || resp.Text != "Fix release date unavailable." || resp.WindowEnds != nil {
 		t.Errorf("no deadline when the date is unknown: %+v", resp)

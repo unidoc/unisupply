@@ -1,8 +1,10 @@
-// Package grade turns what the scanners found into the letter (rules version 2, "Grading v2").
+// Package grade turns what the scanners found into the letter (rules version 3, "Grading v2.1").
 //
 // One rule you can trace: every row (the module itself, and each dependency) gets ONE score; the letter comes from the
 // worst row, and the result names that row and why. D and F mean a confirmed problem: a known vulnerability in code
-// that is actually reached, or a checksum that does not match. Vulnerable code that is never compiled is shown, not
+// that is actually reached, a vulnerable package that is imported and whose fix has waited 60 days or more, or a checksum
+// that does not match. A row counts per upgrade (the advisories one upgrade clears are one problem), a fix under 14 days
+// old does not count yet, and a fix that has waited 60 days weighs 5. Vulnerable code that is never compiled is shown, not
 // graded. Upkeep counts, but only up to C. A missing check is Pending, never a letter.
 //
 //	row score    = max(vulnerability score, upkeep score)                         (0-100)
@@ -20,10 +22,11 @@ import (
 )
 
 // RuleVersion is the version of these rules. A result is never re-labelled: new rules produce new results.
-const RuleVersion = 2
+const RuleVersion = 3
 
-// ResponseWindowDays is how long after a fix is released a project is "within the response window". It is a label next to
-// the letter; it never changes it.
+// ResponseWindowDays is how long after a fix is released a project is "within the response window". A finding whose fix is
+// inside it is shown and does not count toward the letter yet (a known-exploited finding has no window); after it, the finding
+// counts. It is the grace period of the grade.
 const ResponseWindowDays = 14
 
 // Letter is A to F; "" when the grade is Pending.
@@ -79,7 +82,10 @@ type Finding struct {
 	// FixRequiresGo is the `go` directive of the fixed version's go.mod ("1.26"); empty when unknown.
 	FixRequiresGo string
 
-	Exploited    bool // on CISA's Known Exploited Vulnerabilities list
+	Exploited bool // on CISA's Known Exploited Vulnerabilities list
+	// KEVUnknown: its known-exploited status could not be checked (it has a CVE alias and CISA's catalog was not consulted): it
+	// gets no grace.
+	KEVUnknown   bool
 	FixedVersion string
 	// FixReleasedAt is when the first fixed version was released, and FixDateSource where that date came from.
 	FixReleasedAt *time.Time
@@ -222,10 +228,13 @@ type VEXStatus struct {
 	Justification string `json:"justification,omitempty"` // vulnerable_code_not_present | vulnerable_code_not_in_execute_path
 }
 
-// Response is the context around a finding's fix: a label next to the letter, never part of it.
+// Response is the context around a finding's fix. Its status follows the grade: within_window is a finding that does not count
+// yet, past_window one that counts (and weighs 5 on its row once the fix is 60 days old or more); the other fields, the history
+// and the Go version the fix needs, are context only.
 type Response struct {
-	// Status: within_window, past_window, no_fix, date_unknown, or exploited (a known-exploited finding counts at once and
-	// has no response label).
+	// Status: within_window (the fix is under ResponseWindowDays old: the finding does not count yet, unless it is known-exploited
+	// or its known-exploited status could not be checked, which the text says), past_window, no_fix,
+	// date_unknown, or exploited (a known-exploited finding counts at once and has no response label).
 	Status        string     `json:"status"`
 	FixReleasedAt *time.Time `json:"fix_released_at,omitempty"`
 	DateSource    string     `json:"fix_date_source,omitempty"`
@@ -256,7 +265,7 @@ type FindingResult struct {
 	TierAssumed      bool      `json:"tier_assumed,omitempty"` // reachability was not determined and is scored as called
 	CallPathChecked  bool      `json:"call_path_checked"`      // govulncheck's called pass covered it (Finding.CallPathChecked)
 	Score            int       `json:"score"`                  // the table value; 0 for a graph-only finding
-	Counted          bool      `json:"counted"`                // false = shown, not graded
+	Counted          bool      `json:"counted"`                // false = shown, not graded (graph-only, or its fix is under 14 days old)
 	Exploited        bool      `json:"exploited,omitempty"`
 	FixedVersion     string    `json:"fixed_version,omitempty"`
 	AffectedPackages []string  `json:"affected_packages,omitempty"`
@@ -320,7 +329,10 @@ type Result struct {
 	// Score is the worst row's score: a policy value that picks the band, not a measurement. It is not a published number.
 	Score int `json:"score"`
 	// Deciding is the row (or whole-tree rule) that set the letter; nil when nothing crossed the A threshold.
-	Deciding *Deciding   `json:"deciding,omitempty"`
+	Deciding *Deciding `json:"deciding,omitempty"`
+	// NextStep is the one upgrade that would improve the letter most; nil when the grade is Pending, when nothing decides it,
+	// when no counted finding that decides has a fix, or when a whole-tree rule decides and no upgrade improves the letter.
+	NextStep *NextStep   `json:"next_step,omitempty"`
 	Rows     []RowResult `json:"rows"`
 	TreeRows []TreeRow   `json:"tree_rows,omitempty"`
 	Pending  *Pending    `json:"pending,omitempty"`
@@ -339,6 +351,36 @@ type Result struct {
 	ChecksumDetail   string `json:"checksum_detail,omitempty"`
 }
 
+// NextStep is the one upgrade that would improve the letter most, and the letter after it. The letter after is graded again
+// without the advisories the upgrade fixes, so it is honest: when another row is nearly as bad it says D, not A. When a
+// whole-tree rule decides, a step is given only if it improves the letter (none for a checksum mismatch).
+type NextStep struct {
+	Module  string `json:"module"`
+	Version string `json:"version"` // the fixed version to move to
+	// Command is "go get <module>@<version>"; for the standard library "go get toolchain@go<version without v>".
+	Command string `json:"command"`
+	// Clears lists, sorted, the advisories of that row (any tier, also one whose fix is too new to count) that the upgrade fixes.
+	Clears []string `json:"clears"`
+	// LetterAfter is the letter once those advisories are gone; empty when the grade would then be Pending, and PendingAfter
+	// names the check that would not have run.
+	LetterAfter  Letter `json:"letter_after,omitempty"`
+	ScoreAfter   int    `json:"score_after"`
+	PendingAfter string `json:"pending_after,omitempty"`
+}
+
+// MarshalJSON leaves out the score after a Pending upgrade: there is no grade then to take it from, so a published 0 would read
+// as a clean result. With a letter it is always there, 0 included.
+func (n NextStep) MarshalJSON() ([]byte, error) {
+	type plain NextStep // no methods: avoids recursion
+	if n.PendingAfter != "" {
+		return json.Marshal(struct {
+			plain
+			ScoreAfter *int `json:"score_after,omitempty"`
+		}{plain: plain(n)})
+	}
+	return json.Marshal(plain(n))
+}
+
 // Deciding names what set the letter: a row, or a whole-tree rule.
 type Deciding struct {
 	Module string `json:"module,omitempty"`
@@ -350,6 +392,8 @@ type Deciding struct {
 
 // MarshalJSON leaves out the score of a Pending result: there is no worst row to take it from, so a published 0 would read
 // as a clean result.
+//
+//nolint:gocritic // a value receiver: json.Marshal of a Result value (not a pointer) must reach it
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result // no methods: avoids recursion
 	if r.Pending != nil {
