@@ -62,7 +62,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   archived. `go.yaml.in/yaml/v3` is its maintained continuation with the same API, and it was already in the binary
   through UniPDF. `gopkg.in/yaml.v3` is no longer compiled in: it stays in the module graph through logrus and unichart,
   so unisupply's own grade moves from B (archived dependency, 20) to A (archived, not compiled in, 10). Its NOTICE text is
-  removed from `NOTICE`.
+  removed from `NOTICE` (#192).
 
 ### Bug Fixes
 
@@ -116,7 +116,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Upgraded `golang.org/x/crypto` `v0.58.0` → `v0.59.0`, clearing GO-2026-5932 (the unmaintained `x/crypto/openpgp`
   packages), noted in v0.6.0 as having no upstream fix. unisupply does not import openpgp (it uses `x/crypto/ocsp`
   through UniPDF), so the finding was in the module graph only and did not affect the grade. It also moves
-  `golang.org/x/sync` to `v0.25.0` and `golang.org/x/text` to `v0.44.0`.
+  `golang.org/x/sync` to `v0.25.0` and `golang.org/x/text` to `v0.44.0` (#192).
 
 ## [0.9.0] - 2026-10-29
 
