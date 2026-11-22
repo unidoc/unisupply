@@ -11,6 +11,7 @@ import (
 	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -433,5 +434,44 @@ func TestStdlibSectionParagraphs(t *testing.T) {
 				t.Errorf("imported entry wrong:\n%s", imported)
 			}
 		})
+	}
+}
+
+// TestAddVulnBullets_DependencyFinding covers, without a licence, the call a dependency block makes: a called finding
+// with a grade finding and withSummary false.
+func TestAddVulnBullets_DependencyFinding(t *testing.T) {
+	c := creator.New()
+	p := c.NewStyledParagraph()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	v := issue134Vuln()
+	v.Summary = "keyring.Add retains keys"
+	v.FixedVersion = "v0.49.0"
+	v.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+	row := &grade.RowResult{Module: "golang.org/x/crypto", Findings: []grade.FindingResult{
+		{ID: v.ID, Module: "golang.org/x/crypto", Severity: "CRITICAL", Tier: grade.TierCalled, VEX: grade.VEXStatus{Status: "affected"}},
+	}}
+	f := gradeFindingByID(row, v.ID)
+	if f == nil {
+		t.Fatal("the fixture finding was not found by ID")
+	}
+	addVulnBullets(p, &v, f, false, regular)
+
+	got := chunkText(p)
+	for _, want := range []string{
+		"Vulnerability: GO-2026-5005 (called; VEX affected; severity CRITICAL)",
+		"Fix available: v0.49.0",
+		"Reached via: example.com/u1repro.main (main.go:13) > golang.org/x/crypto/ssh/agent.keyring.Add",
+		"Vulnerable symbols called: golang.org/x/crypto/ssh/agent.keyring.Add, golang.org/x/crypto/ssh/agent.keyring.Lock",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bullets missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Summary:") {
+		t.Errorf("a dependency block prints no summary bullet:\n%s", got)
+	}
+	if strings.Contains(got, "keyring.go:149") {
+		t.Errorf("dependency position must not be shown in the PDF:\n%s", got)
 	}
 }
