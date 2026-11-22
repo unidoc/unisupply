@@ -232,3 +232,108 @@ func TestParseCalledPassMode(t *testing.T) {
 		t.Error("want an error")
 	}
 }
+
+// govulncheckEnvOf runs ScanVulnsWithOptions with a fake go that reports projectGo, and returns the environment that reached
+// govulncheck (the last one, when it ran twice) and the warnings. inherited is the GOVERSION of unisupply's own environment;
+// setInherited false leaves it unset.
+func govulncheckEnvOf(t *testing.T, projectGo, inherited string, setInherited bool) (env, warnings []string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho '{\"GOVERSION\":%q,\"GOROOT\":\"/nonexistent\"}'\n", projectGo)
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// t.Setenv records the old value and restores it at the end; the Unsetenv that follows leaves it absent meanwhile.
+	t.Setenv("GOVERSION", inherited)
+	if !setInherited {
+		if err := os.Unsetenv("GOVERSION"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prevBuilt := builtWithGo
+	t.Cleanup(func() { builtWithGo = prevBuilt })
+	builtWithGo = func() string { return "go1.26.9" }
+	prevRun := runGovulncheck
+	t.Cleanup(func() { runGovulncheck = prevRun })
+	runGovulncheck = func(_ context.Context, e []string, _, _ string, _, _ io.Writer) error {
+		env = e
+		return nil
+	}
+
+	// The stub prints nothing, so the scan ends with "govulncheck produced no output"; the env and the warnings are what count.
+	_, warnings, _, _ = ScanVulnsWithOptions(context.Background(), t.TempDir(), VulnScanOptions{})
+	if env == nil {
+		t.Fatal("govulncheck was not run")
+	}
+	return env, warnings
+}
+
+// goVersionEntries are the GOVERSION= entries of env, in order.
+func goVersionEntries(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if strings.HasPrefix(e, "GOVERSION=") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func hasGoVersionWarning(warnings []string) string {
+	for _, w := range warnings {
+		if strings.HasPrefix(w, "GOVERSION=") {
+			return w
+		}
+	}
+	return ""
+}
+
+// The project's Go reaches govulncheck as its GOVERSION, so standard-library matching does not follow the directory
+// unisupply was launched from.
+func TestScanVulns_PassesProjectGOVERSION(t *testing.T) {
+	env, warnings := govulncheckEnvOf(t, "go1.26.5", "", false)
+	if got := goVersionEntries(env); len(got) != 1 || got[0] != "GOVERSION=go1.26.5" {
+		t.Errorf("GOVERSION entries = %v, want exactly [GOVERSION=go1.26.5]", got)
+	}
+	if w := hasGoVersionWarning(warnings); w != "" {
+		t.Errorf("unexpected warning %q", w)
+	}
+}
+
+// A GOVERSION in the environment that differs from the project's is kept (the user's setting wins) and said aloud.
+func TestScanVulns_InheritedGOVERSIONDiffers(t *testing.T) {
+	env, warnings := govulncheckEnvOf(t, "go1.26.5", "go1.20.0", true)
+	got := goVersionEntries(env)
+	if len(got) == 0 || got[len(got)-1] != "GOVERSION=go1.20.0" {
+		t.Errorf("GOVERSION entries = %v, want the last to be GOVERSION=go1.20.0", got)
+	}
+	want := "GOVERSION=go1.20.0 is set in the environment and differs from the project's Go (go1.26.5); " +
+		"standard-library vulnerabilities are matched against go1.20.0. Unset GOVERSION to match the project's Go."
+	if w := hasGoVersionWarning(warnings); w != want {
+		t.Errorf("warning = %q, want %q (warnings: %v)", w, want, warnings)
+	}
+}
+
+// An empty GOVERSION= would send govulncheck to `go env` in the launch directory: it counts as unset.
+func TestScanVulns_InheritedEmptyGOVERSION(t *testing.T) {
+	env, warnings := govulncheckEnvOf(t, "go1.26.5", "", true)
+	got := goVersionEntries(env)
+	if len(got) != 1 || got[0] != "GOVERSION=go1.26.5" {
+		t.Errorf("GOVERSION entries = %v, want exactly [GOVERSION=go1.26.5]", got)
+	}
+	if w := hasGoVersionWarning(warnings); w != "" {
+		t.Errorf("unexpected warning %q", w)
+	}
+}
+
+// The same value as the project's is kept and is no news.
+func TestScanVulns_InheritedGOVERSIONEqual(t *testing.T) {
+	env, warnings := govulncheckEnvOf(t, "go1.26.5", "go1.26.5", true)
+	if got := goVersionEntries(env); len(got) != 1 || got[0] != "GOVERSION=go1.26.5" {
+		t.Errorf("GOVERSION entries = %v, want exactly [GOVERSION=go1.26.5]", got)
+	}
+	if w := hasGoVersionWarning(warnings); w != "" {
+		t.Errorf("unexpected warning %q", w)
+	}
+}
