@@ -763,9 +763,8 @@ func stdlibSectionParagraphs(c *creator.Creator, vulns []scanner.Vulnerability, 
 }
 
 // writeStdlibVulnSection lists the vulnerabilities in the Go standard library
-// of the project's toolchain, in the order given. They are not part of any
-// dependency's risk score, so they get their own section rather than a
-// dependency block.
+// of the project's toolchain, in the order given. They get their own section
+// rather than a dependency block, and are graded only with --grade-stdlib.
 func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, version string, graded bool, regular, bold *model.PdfFont) {
 	c.NewPage()
 	heading(c, "Standard Library Vulnerabilities", bold)
