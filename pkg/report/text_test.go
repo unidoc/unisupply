@@ -879,9 +879,9 @@ func TestWriteText_CalledSymbolsCut(t *testing.T) {
 }
 
 const (
-	stdlibIntroNotGraded = "These are in the Go standard library of the toolchain this project builds with (go1.26.11). " +
+	stdlibIntroNotGraded = "These are in the Go standard library, matched against go1.26.11. " +
 		"Upgrading Go fixes them. They are listed, not graded (use --grade-stdlib to grade them)."
-	stdlibIntroGraded = "These are in the Go standard library of the toolchain this project builds with (go1.26.11). " +
+	stdlibIntroGraded = "These are in the Go standard library, matched against go1.26.11. " +
 		"Upgrading Go fixes them. They are graded as the row stdlib."
 )
 
@@ -894,9 +894,9 @@ func TestStdlibIntro(t *testing.T) {
 	}{
 		{"not graded", "go1.26.11", false, stdlibIntroNotGraded},
 		{"graded", "go1.26.11", true, stdlibIntroGraded},
-		{"not graded, no version", "", false, "These are in the Go standard library of the toolchain this project builds with. " +
+		{"not graded, no version", "", false, "These are in the Go standard library. " +
 			"Upgrading Go fixes them. They are listed, not graded (use --grade-stdlib to grade them)."},
-		{"graded, no version", "", true, "These are in the Go standard library of the toolchain this project builds with. " +
+		{"graded, no version", "", true, "These are in the Go standard library. " +
 			"Upgrading Go fixes them. They are graded as the row stdlib."},
 	}
 	for _, tt := range tests {
@@ -945,7 +945,7 @@ func TestWriteText_StdlibIntro(t *testing.T) {
 	}{
 		{"not graded", "go1.26.11", nil, stdlibIntroNotGraded},
 		{"graded", "go1.26.11", stdlibRow, stdlibIntroGraded},
-		{"no version", "", nil, "of the toolchain this project builds with. Upgrading Go fixes them."},
+		{"no version", "", nil, "These are in the Go standard library. Upgrading Go fixes them."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

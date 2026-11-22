@@ -566,11 +566,11 @@ func stdlibGraded(g *grade.Result) bool {
 // stdlibIntro introduces the standard library section of the text and PDF reports: the entries are fixed by a Go upgrade,
 // and are graded or only listed. version is the Go release they were matched against, "" when not known.
 func stdlibIntro(version string, graded bool) string {
-	toolchain := ""
+	matched := ""
 	if version != "" {
-		toolchain = " (" + version + ")"
+		matched = ", matched against " + version
 	}
-	s := "These are in the Go standard library of the toolchain this project builds with" + toolchain + ". Upgrading Go fixes them. "
+	s := "These are in the Go standard library" + matched + ". Upgrading Go fixes them. "
 	if graded {
 		return s + "They are graded as the row stdlib."
 	}

@@ -39,9 +39,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **`called_symbols_total`** (int, on a called finding next to `called_symbols`) is the number of distinct called symbols
   before the list was cut to its first 20. The list is partial when the total is larger. The text and PDF reports then
-  print "Vulnerable symbols called (20 of 153):". A stored analysis made before this field has no total and reads as
-  complete. On traefik, 16 findings were cut, from 25 up to 108 symbols. In Go: `scanner.Vulnerability.CalledSymbolsTotal`
-  (#144).
+  print "Vulnerable symbols called (20 of N):". A stored analysis made before this field has no total and reads as
+  complete. In Go: `scanner.Vulnerability.CalledSymbolsTotal` (#144).
 
 ### Improvements
 
@@ -79,8 +78,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **An empty `GOVERSION=` in the environment no longer sends the standard library scan to the wrong Go.** govulncheck takes
   the last `GOVERSION` entry and, when it is empty, runs `go env` in the directory unisupply was started from; unisupply
-  counted the empty entry as set and did not add the project's Go. One scan matched the standard library against go1.24.1
-  and reported 67 findings that the project's go1.26.11 does not have. An empty `GOVERSION=` now counts as unset (#144).
+  counted the empty entry as set and did not add the project's Go, so the standard-library findings could belong to a
+  different Go than the project's. An empty `GOVERSION=` now counts as unset (#144).
 - **A cancelled vulnerability scan no longer takes the host process down.** When the context ended while govulncheck built
   its call graph, golang.org/x/vuln dereferenced nil in a goroutine of its own, which nothing in the scanning process can
   recover, and the process died. govulncheck now runs in a child process of the same executable, so the scan returns a

@@ -409,7 +409,7 @@ func TestStdlibSectionParagraphs(t *testing.T) {
 	}{
 		{"not graded", "go1.26.11", false, stdlibIntroNotGraded},
 		{"graded", "go1.26.11", true, stdlibIntroGraded},
-		{"no version", "", false, "of the toolchain this project builds with. Upgrading Go fixes them."},
+		{"no version", "", false, "These are in the Go standard library. Upgrading Go fixes them."},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ps := stdlibSectionParagraphs(c, stdlibTestVulns(), tt.version, tt.graded, regular)
