@@ -7,8 +7,8 @@ Thanks for your interest in `unisupply`. This document covers everything you
 need to land a change — local setup, day-to-day workflow, code style, and the
 PR process.
 
-For security issues, **do not** open a public issue or PR — see
-[SECURITY.md](SECURITY.md) for the private reporting channels.
+For security issues, **do not** open a public issue or PR — see our
+[security policy](https://github.com/unidoc/.github/blob/master/SECURITY.md) for the private reporting channels.
 
 ## Development setup
 
@@ -159,4 +159,4 @@ version fails the same way as a missing entry.
 
 Open a GitHub Discussion for design questions or "is this a good idea"
 threads. Open an issue for concrete bugs or feature requests. For anything
-security-sensitive, see [SECURITY.md](SECURITY.md).
+security-sensitive, see our [security policy](https://github.com/unidoc/.github/blob/master/SECURITY.md).
