@@ -365,3 +365,23 @@ func TestCollectVulnAliases_IncludesStdlib(t *testing.T) {
 		t.Errorf("collectVulnAliases() = %+v, want GO-2026-4001 -> CVE-2026-11111", entries)
 	}
 }
+
+// TestAddVulnBullets_CalledSymbolsCut reads the paragraph's chunks instead of a written PDF, so it needs no license and
+// runs in CI.
+func TestAddVulnBullets_CalledSymbolsCut(t *testing.T) {
+	c := creator.New()
+	p := c.NewStyledParagraph()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	v := cutSymbolsVuln()
+	addVulnBullets(p, &v, nil, false, regular)
+
+	var text strings.Builder
+	for _, ch := range p.GetChunks() {
+		text.WriteString(ch.Text)
+	}
+	want := "Vulnerable symbols called (20 of 153): example.com/lib.Sym00, "
+	if !strings.Contains(text.String(), want) {
+		t.Errorf("bullets missing %q:\n%s", want, text.String())
+	}
+}

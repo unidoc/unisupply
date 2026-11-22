@@ -1308,6 +1308,36 @@ func TestParseGovulncheckJSON_CalledSymbolsAreCapped(t *testing.T) {
 	if v.CalledSymbols[0] != "example.com/lib.Sym00" || v.CalledSymbols[19] != "example.com/lib.Sym19" {
 		t.Errorf("the cut must keep the first 20 in sorted order: %v", v.CalledSymbols)
 	}
+	if v.CalledSymbolsTotal != 25 {
+		t.Errorf("CalledSymbolsTotal = %d, want 25 (the distinct count before the cut)", v.CalledSymbolsTotal)
+	}
+}
+
+func TestCapCalledSymbols(t *testing.T) {
+	var sinks []string
+	for i := 24; i >= 0; i-- {
+		sinks = append(sinks, fmt.Sprintf("example.com/lib.Sym%02d", i))
+	}
+	sinks = append(sinks, "example.com/lib.Sym00", "example.com/lib.Sym24") // duplicates
+
+	kept, total := capCalledSymbols(sinks)
+	if total != 25 {
+		t.Errorf("total = %d, want 25", total)
+	}
+	if len(kept) != maxCalledSymbols || kept[0] != "example.com/lib.Sym00" || kept[19] != "example.com/lib.Sym19" {
+		t.Errorf("kept = %v, want the first 20 in sorted order", kept)
+	}
+
+	kept, total = capCalledSymbols([]string{"b", "a", "b"})
+	if !slices.Equal(kept, []string{"a", "b"}) || total != 2 {
+		t.Errorf("below the cap: kept = %v total = %d, want [a b] 2", kept, total)
+	}
+
+	for _, in := range [][]string{nil, {}} {
+		if kept, total := capCalledSymbols(in); kept != nil || total != 0 {
+			t.Errorf("capCalledSymbols(%v) = %v, %d; want nil, 0", in, kept, total)
+		}
+	}
 }
 
 // gvcStrongSBOM is the scan root shared by the call-path strength

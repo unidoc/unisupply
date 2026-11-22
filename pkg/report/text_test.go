@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -847,5 +848,31 @@ func TestWriteText_StdlibReachedVia(t *testing.T) {
 	}
 	if strings.Contains(rest, "Reached via") || strings.Contains(rest, "Vulnerable symbols") {
 		t.Errorf("imported stdlib advisory must not print call evidence:\n%s", rest)
+	}
+}
+
+func cutSymbolsVuln() scanner.Vulnerability {
+	v := issue134Vuln()
+	v.CalledSymbols = make([]string, 20)
+	for i := range v.CalledSymbols {
+		v.CalledSymbols[i] = fmt.Sprintf("example.com/lib.Sym%02d", i)
+	}
+	v.CalledSymbolsTotal = 153
+	return v
+}
+
+// TestWriteText_CalledSymbolsCut verifies the dependency block and the stdlib section both say the symbols list was cut.
+func TestWriteText_CalledSymbolsCut(t *testing.T) {
+	v := cutSymbolsVuln()
+	want := "Vulnerable symbols called (20 of 153): example.com/lib.Sym00, "
+
+	if out := renderDetailed(v); !strings.Contains(out, want) {
+		t.Errorf("dependency block missing %q:\n%s", want, out)
+	}
+
+	out := renderAliasReport(t, aliasReport(), []scanner.Vulnerability{v})
+	section := out[strings.Index(out, "STDLIB VULNERABILITIES"):]
+	if !strings.Contains(section, want) {
+		t.Errorf("stdlib section missing %q:\n%s", want, section)
 	}
 }

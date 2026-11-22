@@ -733,7 +733,7 @@ func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *gra
 		addBullet(p, "  Reached via: "+via, font)
 	}
 	if syms := calledSymbolsLine(v); syms != "" {
-		addBullet(p, "  Vulnerable symbols called: "+syms, font)
+		addBullet(p, "  "+calledSymbolsLabel(v)+" "+syms, font)
 	}
 }
 
