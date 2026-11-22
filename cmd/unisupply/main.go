@@ -644,6 +644,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 			IntegrityReport: integrityReport,
 			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
+			StdlibGoVersion: scanGoVersion(scanResult.ScanInfo),
 		})
 	case "json":
 		err = report.WriteJSON(graph, projectScore, report.JSONOptions{
@@ -663,6 +664,7 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 			IntegrityReport: integrityReport,
 			Grade:           gradeResult,
 			StdlibVulns:     stdlibVulns,
+			StdlibGoVersion: scanGoVersion(scanResult.ScanInfo),
 		})
 	case "sbom-cyclonedx":
 		err = report.WriteCycloneDX(graph, projectScore, sbomOpts, writer)
@@ -684,6 +686,14 @@ func writeReport(ctx context.Context, cfg *runConfig, rep progress.Reporter, sca
 	}
 
 	return nil
+}
+
+// scanGoVersion is the Go release the scan matched the standard library against, "" when no scan ran.
+func scanGoVersion(info *scanner.ScanInfo) string {
+	if info == nil {
+		return ""
+	}
+	return info.GoVersion
 }
 
 // evaluatePolicy checks the grade and the scan result against the policy; a violation is errPolicyViolation.

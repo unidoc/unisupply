@@ -286,7 +286,7 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 	regular, _ := model.NewStandard14Font(model.HelveticaName)
 	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
 
-	writeStdlibVulnSection(c, stdlibTestVulns(), regular, bold)
+	writeStdlibVulnSection(c, stdlibTestVulns(), "go1.26.11", false, regular, bold)
 
 	var buf bytes.Buffer
 	if err := c.Write(&buf); err != nil {
@@ -321,7 +321,7 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 
 	for _, want := range []string{
 		"Standard Library Vulnerabilities",
-		"These affect the Go standard library used to build dependencies.",
+		stdlibIntroNotGraded,
 		"Vulnerability: GO-2026-4001 (called; severity HIGH)",
 		"Summary: Unbounded allocation in net/http",
 		"Fix available: go1.26.3",
@@ -383,5 +383,55 @@ func TestAddVulnBullets_CalledSymbolsCut(t *testing.T) {
 	want := "Vulnerable symbols called (20 of 153): example.com/lib.Sym00, "
 	if !strings.Contains(text.String(), want) {
 		t.Errorf("bullets missing %q:\n%s", want, text.String())
+	}
+}
+
+// chunkText joins the text of a paragraph's chunks.
+func chunkText(p *creator.StyledParagraph) string {
+	var b strings.Builder
+	for _, ch := range p.GetChunks() {
+		b.WriteString(ch.Text)
+	}
+	return b.String()
+}
+
+// TestStdlibSectionParagraphs reads the paragraphs' chunks instead of a written PDF, so it needs no licence and runs in CI.
+func TestStdlibSectionParagraphs(t *testing.T) {
+	c := creator.New()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	for _, tt := range []struct {
+		name    string
+		version string
+		graded  bool
+		intro   string
+	}{
+		{"not graded", "go1.26.11", false, stdlibIntroNotGraded},
+		{"graded", "go1.26.11", true, stdlibIntroGraded},
+		{"no version", "", false, "of the toolchain this project builds with. Upgrading Go fixes them."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := stdlibSectionParagraphs(c, stdlibTestVulns(), tt.version, tt.graded, regular)
+			if len(ps) != 3 {
+				t.Fatalf("got %d paragraphs, want the intro and one per entry (3)", len(ps))
+			}
+			if got := chunkText(ps[0]); !strings.Contains(got, tt.intro) || strings.Contains(got, "These affect") {
+				t.Errorf("intro = %q, want it to contain %q", got, tt.intro)
+			}
+			called, imported := chunkText(ps[1]), chunkText(ps[2])
+			for _, want := range []string{
+				"Vulnerability: GO-2026-4001 (called; severity HIGH)",
+				"Reached via: example.com/app.main (main.go:21) > net/http.ListenAndServe",
+				"Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve",
+			} {
+				if !strings.Contains(called, want) {
+					t.Errorf("called entry missing %q:\n%s", want, called)
+				}
+			}
+			if !strings.Contains(imported, "Vulnerability: GO-2026-4002 (imported; severity MEDIUM)") ||
+				strings.Contains(imported, "Reached via") || strings.Contains(imported, "Vulnerable symbols") {
+				t.Errorf("imported entry wrong:\n%s", imported)
+			}
+		})
 	}
 }

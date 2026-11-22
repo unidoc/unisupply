@@ -36,6 +36,9 @@ type TextOptions struct {
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
 	StdlibVulns     []scanner.Vulnerability
+	// StdlibGoVersion is the Go release the standard library's advisories were matched against (the scan's Go version).
+	// Empty leaves it out of the section's introduction.
+	StdlibGoVersion string
 
 	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
 	Grade *grade.Result
@@ -132,10 +135,14 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	if len(opts.StdlibVulns) > 0 {
 		fmt.Fprintf(w, "\n%s\n", c(colorRed, fmt.Sprintf("STDLIB VULNERABILITIES (%d found)", len(opts.StdlibVulns))))
 		fmt.Fprintf(w, "%s\n", c(colorRed, strings.Repeat("─", 40)))
-		fmt.Fprintf(w, "%s\n", c(colorDim, "These affect the Go standard library used to build dependencies."))
+		fmt.Fprintf(w, "%s\n", c(colorDim, stdlibIntro(opts.StdlibGoVersion, stdlibGraded(opts.Grade))))
 		for i := range opts.StdlibVulns {
 			v := &opts.StdlibVulns[i]
-			fmt.Fprintf(w, "  %s %s\n", c(colorRed, v.ID), v.Summary)
+			displaySev := v.Severity
+			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+				displaySev = "UNKNOWN"
+			}
+			fmt.Fprintf(w, "  %s (%s)%s %s\n", c(colorRed, v.ID), displaySev, reachabilityTag(v.Reachability), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
@@ -541,6 +548,33 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 		}
 	}
 	return count
+}
+
+// stdlibGraded reports whether the grade has a row for the standard library, which --grade-stdlib adds.
+func stdlibGraded(g *grade.Result) bool {
+	if g == nil {
+		return false
+	}
+	for i := range g.Rows {
+		if g.Rows[i].Module == "stdlib" {
+			return true
+		}
+	}
+	return false
+}
+
+// stdlibIntro introduces the standard library section of the text and PDF reports: the entries are fixed by a Go upgrade,
+// and are graded or only listed. version is the Go release they were matched against, "" when not known.
+func stdlibIntro(version string, graded bool) string {
+	toolchain := ""
+	if version != "" {
+		toolchain = " (" + version + ")"
+	}
+	s := "These are in the Go standard library of the toolchain this project builds with" + toolchain + ". Upgrading Go fixes them. "
+	if graded {
+		return s + "They are graded as the row stdlib."
+	}
+	return s + "They are listed, not graded (use --grade-stdlib to grade them)."
 }
 
 // reachabilityTag returns the bracket tag to append after a CVE ID for
