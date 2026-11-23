@@ -104,3 +104,23 @@ FIXTURES="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)/fixtures"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no grade (grading was not run)"* ]]
 }
+
+@test "CI/CD and build-file findings render one row each, with a pipe in a cell escaped" {
+  jq '.ci_findings = [{"file":".github/workflows/x.yml","line":12,"severity":"HIGH","rule_id":"dangerous_command","message":"Step pipes curl output to shell (curl | bash pattern)"}]
+      | .build_file_findings = [{"file":"Dockerfile","severity":"MEDIUM","rule_id":"unpinned_image","message":"Base image not pinned"}]' \
+    "$FIXTURES/v2-f.json" > "$JSON"
+  run "$SCRIPT" "$JSON"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CI/CD and build-file findings (2)"* ]]
+  [[ "$output" == *'| HIGH | `dangerous_command` | `.github/workflows/x.yml` | 12 | Step pipes curl output to shell (curl \| bash pattern) |'* ]]
+  [[ "$output" == *'| MEDIUM | `unpinned_image` | `Dockerfile` | — | Base image not pinned |'* ]]
+}
+
+@test "the CI/CD section is left out when the scan has no such findings" {
+  for v in null '[]'; do
+    jq --argjson v "$v" '.ci_findings = $v | .build_file_findings = $v' "$FIXTURES/v2-f.json" > "$JSON"
+    run "$SCRIPT" "$JSON"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"CI/CD and build-file findings"* ]]
+  done
+}
