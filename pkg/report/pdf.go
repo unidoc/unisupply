@@ -202,6 +202,9 @@ func writeExecutiveSummary(c *creator.Creator, graph *resolver.Graph, ps *scorer
 		addTableRow(c, table, "Grade", gradeLetterLabel(opts.Grade), regular, bold)
 		if d := opts.Grade.Deciding; d != nil && opts.Grade.Pending == nil {
 			addTableRow(c, table, "Decided by", fmt.Sprintf("%s (score %d): %s", gradeDecidingText(d), d.Score, d.Reason), regular, bold)
+			if n := opts.Grade.NextStep; n != nil {
+				addTableRow(c, table, "Next step", gradeNextStepText(n), regular, bold)
+			}
 		}
 		if p := opts.Grade.Pending; p != nil {
 			addTableRow(c, table, "Pending because", p.Reason, regular, bold)

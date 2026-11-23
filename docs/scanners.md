@@ -1,6 +1,6 @@
 # Scanners
 
-> **Grading v2.** The published result is the letter described in [grading.md](grading.md); policy gates read the
+> **Grading (rules version 3).** The published result is the letter described in [grading.md](grading.md); policy gates read the
 > letter. This page describes the scanners, their data and their limits, and what each signal does to the grade. The
 > scorer's old 0-100 risk score and headline are not published in any output; what is left of them is kept short under
 > [Internal scorer (not published)](#internal-scorer-not-published) at the end.
@@ -130,7 +130,8 @@ from it would be a lower bound that reads like an exact count. Neither
 Reachability picks the column of the vulnerability table in [grading.md](grading.md#vulnerability-score):
 
 - `called` (or absent, or not determined): scored as called. The finding says when the tier was assumed.
-- `imported`: scored lower and capped at 50, so imported code alone can reach C but never D or F.
+- `imported`: scored lower and capped at 50 (C). Only the overdue weight, +5 for a fix that has been available for 60 days or more,
+  lifts an imported row to D (an imported high is then 54); imported code never reaches F on its own.
 - `required`: the module is in the graph but no package of it is built. The finding is shown and **not graded**.
 
 A confirmed test-only row halves the vulnerability score (capped at 50), and a module confirmed outside the build is

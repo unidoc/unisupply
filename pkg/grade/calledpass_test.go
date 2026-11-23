@@ -3,6 +3,7 @@ package grade
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
 )
@@ -60,33 +61,45 @@ func TestCalledPassPredicateMatchesGrade(t *testing.T) {
 	}
 	sets = append(sets, []string{"MEDIUM", "MEDIUM", "MEDIUM", "MEDIUM", "MEDIUM", "LOW", "LOW"})
 
+	// The predicate builds findings without a fix date, so the rules that read one (a fix under 14 days old is not counted, one
+	// 60 days old or more adds 5) are what this checks it against: the same findings with each fix age must still agree.
+	fixAges := map[string]*time.Duration{"no fix date": nil, "fix 5 days old": durPtr(5 * 24 * time.Hour), "fix 100 days old": durPtr(100 * 24 * time.Hour)}
+
 	skipped := 0
 	for _, set := range sets {
 		for _, kev := range []bool{false, true} {
 			for un, up := range upkeeps {
 				for tn, to := range testOnly {
-					var vulns []scanner.Vulnerability
-					var asImported, asCalled []Finding
-					for i, sev := range set {
-						id := "GO-" + string(rune('A'+i))
-						vulns = append(vulns, importedVuln(id, sev, kev && i == 0))
-						asImported = append(asImported, Finding{ID: id, Severity: sev, Reachability: "imported", Exploited: kev && i == 0})
-						asCalled = append(asCalled, Finding{ID: id, Severity: sev, Reachability: "called", Exploited: kev && i == 0})
-					}
-					needed, _ := CalledPassCanChangeLetter(map[string][]scanner.Vulnerability{"example.com/dep": vulns})
-					if needed {
-						continue
-					}
-					skipped++
-					mk := func(fs []Finding) Result {
-						d := dep("example.com/dep", fs...)
-						d.Upkeep, d.TestOnly = up, to
-						return run(Input{Self: self(), Deps: []Row{d}})
-					}
-					a, c := mk(asImported), mk(asCalled)
-					if a.Letter != c.Letter || a.Estimated != c.Estimated {
-						t.Errorf("severities %v kev=%v upkeep=%s test-only=%s: predicate says the called pass cannot matter, but imported grades %s%s and called %s%s",
-							set, kev, un, tn, a.Letter, star(a), c.Letter, star(c))
+					for an, age := range fixAges {
+						var vulns []scanner.Vulnerability
+						var asImported, asCalled []Finding
+						for i, sev := range set {
+							id := "GO-" + string(rune('A'+i))
+							vulns = append(vulns, importedVuln(id, sev, kev && i == 0))
+							fi := Finding{ID: id, Severity: sev, Reachability: "imported", Exploited: kev && i == 0}
+							if age != nil {
+								fi.FixedVersion, fi.FixReleasedAt = "v9.9.9", ptr(now.Add(-*age))
+							}
+							fc := fi
+							fc.Reachability = "called"
+							asImported = append(asImported, fi)
+							asCalled = append(asCalled, fc)
+						}
+						needed, _ := CalledPassCanChangeLetter(map[string][]scanner.Vulnerability{"example.com/dep": vulns})
+						if needed {
+							continue
+						}
+						skipped++
+						mk := func(fs []Finding) Result {
+							d := dep("example.com/dep", fs...)
+							d.Upkeep, d.TestOnly = up, to
+							return run(Input{Self: self(), Deps: []Row{d}})
+						}
+						a, c := mk(asImported), mk(asCalled)
+						if a.Letter != c.Letter || a.Estimated != c.Estimated {
+							t.Errorf("severities %v kev=%v upkeep=%s test-only=%s %s: predicate says the called pass cannot matter, but imported grades %s%s and called %s%s",
+								set, kev, un, tn, an, a.Letter, star(a), c.Letter, star(c))
+						}
 					}
 				}
 			}
@@ -96,6 +109,8 @@ func TestCalledPassPredicateMatchesGrade(t *testing.T) {
 		t.Fatal("the predicate never said the called pass can be skipped: the test checked nothing")
 	}
 }
+
+func durPtr(d time.Duration) *time.Duration { return &d }
 
 func star(r Result) string {
 	if r.Estimated {
