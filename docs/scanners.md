@@ -112,7 +112,7 @@ finding per vulnerable symbol while `call_path` keeps only one path, so this is
 where the other symbols remain visible. It holds at most 20 entries, the first
 20 in sorted order; `called_symbols_total` gives the count before the cut, and
 the list is partial when the total is larger (an analysis stored before this
-field existed has no total, and its list is complete).
+field existed has no total, and its list is shown as complete).
 
 The text and PDF reports show this under each called finding as
 `Reached via: example.com/u1repro.main (main.go:13) → golang.org/x/crypto/ssh/agent.keyring.Add`.

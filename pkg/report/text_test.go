@@ -963,8 +963,8 @@ func TestWriteText_StdlibIntro(t *testing.T) {
 	}
 }
 
-// TestWriteText_StdlibEntryTags verifies a stdlib entry line carries the severity and the reachability tag, as a
-// dependency line does.
+// TestWriteText_StdlibEntryTags verifies a stdlib entry line carries the severity, the reachability tag and the KEV
+// badge, as a dependency line does.
 func TestWriteText_StdlibEntryTags(t *testing.T) {
 	vulns := []scanner.Vulnerability{
 		{ID: "GO-2026-0001", Summary: "called one", Severity: "HIGH", Reachability: "called"},
@@ -972,6 +972,8 @@ func TestWriteText_StdlibEntryTags(t *testing.T) {
 		{ID: "GO-2026-0003", Summary: "required one", Severity: "LOW", Reachability: "required"},
 		{ID: "GO-2026-0004", Summary: "unscored one", Severity: "", Reachability: "imported"},
 		{ID: "GO-2026-0005", Summary: "unknown one", Severity: "UNKNOWN", Reachability: "called"},
+		{ID: "GO-2026-0006", Summary: "exploited one", Severity: "CRITICAL", Reachability: "called", InKEV: true},
+		{ID: "GO-2026-0007", Summary: "exploited imported", Severity: "HIGH", Reachability: "imported", InKEV: true},
 	}
 	out := renderStdlibText(t, "go1.26.11", nil, vulns)
 	for _, want := range []string{
@@ -980,12 +982,17 @@ func TestWriteText_StdlibEntryTags(t *testing.T) {
 		"  GO-2026-0003 (LOW) [required] required one\n",
 		"  GO-2026-0004 (UNKNOWN) [imported] unscored one\n",
 		"  GO-2026-0005 (UNKNOWN) unknown one\n",
+		"  GO-2026-0006 (CRITICAL) [KEV] exploited one\n",
+		"  GO-2026-0007 (HIGH) [imported] [KEV] exploited imported\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "treated as MEDIUM") || strings.Contains(out, "[KEV]") {
-		t.Errorf("the stdlib section must not carry the grading note or a KEV badge:\n%s", out)
+	if got := strings.Count(out, "[KEV]"); got != 2 {
+		t.Errorf("want [KEV] on the two KEV-listed entries only, got %d:\n%s", got, out)
+	}
+	if strings.Contains(out, "treated as MEDIUM") {
+		t.Errorf("the stdlib section must not carry the grading note:\n%s", out)
 	}
 }

@@ -71,8 +71,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `GOVERSION` is now pinned by a test (#144).
 - **The standard library section of the text and PDF reports names the Go release the advisories were matched against**
   and says whether they are graded (`--grade-stdlib`, as the row `stdlib`) or only listed. A text entry shows its severity
-  and reachability like a dependency line: `GO-2026-4002 (MEDIUM) [imported] ...`. The release is the scan's
-  `go_version`; `report.TextOptions` and `report.PDFOptions` gain `StdlibGoVersion` (#144).
+  and reachability like a dependency line, `GO-2026-4002 (MEDIUM) [imported] ...`, plus `[KEV]` when the advisory is on the
+  CISA KEV list. The release is the scan's `go_version`; `report.TextOptions` and `report.PDFOptions` gain
+  `StdlibGoVersion` (#144).
 
 ### Bug Fixes
 

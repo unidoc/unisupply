@@ -97,7 +97,7 @@ type Vulnerability struct {
 	// CalledSymbolsTotal is the number of distinct called symbols before the cut,
 	// set whenever CalledSymbols is. The list is partial when it is larger than
 	// len(CalledSymbols); zero (an analysis stored before this field existed)
-	// means the list is complete.
+	// is treated as complete.
 	CalledSymbolsTotal int `json:"called_symbols_total,omitempty"`
 
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.

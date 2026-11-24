@@ -138,11 +138,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 		fmt.Fprintf(w, "%s\n", c(colorDim, stdlibIntro(opts.StdlibGoVersion, stdlibGraded(opts.Grade))))
 		for i := range opts.StdlibVulns {
 			v := &opts.StdlibVulns[i]
-			displaySev := v.Severity
-			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
-				displaySev = "UNKNOWN"
-			}
-			fmt.Fprintf(w, "  %s (%s)%s %s\n", c(colorRed, v.ID), displaySev, reachabilityTag(v.Reachability), v.Summary)
+			fmt.Fprintf(w, "  %s (%s)%s%s %s\n", c(colorRed, v.ID), displaySeverity(v), reachabilityTag(v.Reachability), kevBadge(v, c), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
@@ -252,18 +248,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		for i := range ds.Vulns {
 			v := &ds.Vulns[i]
 			tag := reachabilityTag(v.Reachability)
-			displaySev := v.Severity
-			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
-				displaySev = "UNKNOWN"
-			}
-			// Threat-intel badges: EPSS exploitation probability and KEV
-			// status. KEV is colored like CRITICAL — confirmed exploitation
-			// in the wild.
-			ti := ""
-			if v.InKEV {
-				ti = " " + c(colorRed, "[KEV]")
-			}
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySev, tag, ti)
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySeverity(v), tag, kevBadge(v, c))
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
 			}
@@ -588,6 +573,24 @@ func reachabilityTag(r string) string {
 		// "" (legacy / non-govulncheck) and "called" are both untagged.
 		return ""
 	}
+}
+
+// displaySeverity returns the severity a text vulnerability line shows: an empty or unresolved severity reads UNKNOWN.
+// Shared by the dependency and standard library lines so they stay alike.
+func displaySeverity(v *scanner.Vulnerability) string {
+	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+		return "UNKNOWN"
+	}
+	return v.Severity
+}
+
+// kevBadge returns " [KEV]" for an advisory on the CISA KEV list, colored like CRITICAL (confirmed exploitation in the
+// wild), and "" otherwise. Shared by the dependency and standard library lines, so text matches the PDF and JSON.
+func kevBadge(v *scanner.Vulnerability, c func(string, string) string) string {
+	if !v.InKEV {
+		return ""
+	}
+	return " " + c(colorRed, "[KEV]")
 }
 
 // timeBombScopeNote says what makes a dependency a time bomb, so an archived
