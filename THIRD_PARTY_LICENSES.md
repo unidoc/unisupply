@@ -19,9 +19,9 @@ This file lists the direct dependencies of UniSupply and their licenses.
 | Module | License |
 |--------|---------|
 | github.com/spf13/pflag | BSD-3-Clause |
+| go.yaml.in/yaml/v3 | MIT and Apache-2.0 |
 | golang.org/x/term | BSD-3-Clause |
 | golang.org/x/vuln | BSD-3-Clause |
-| go.yaml.in/yaml/v3 | MIT and Apache-2.0 |
 
 All other indirect dependencies are permissively licensed, including
 github.com/unidoc/unichart (MIT), github.com/unidoc/pkcs7 (MIT),

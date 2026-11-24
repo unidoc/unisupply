@@ -117,6 +117,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   showed. The JSON and text self-scans now pass `--scan-ci`. The grade, the exit code and the conditions that file the
   weekly issue are unchanged. A `|` in a finding's file or message (the `curl | bash` finding has one) is escaped, so it no
   longer splits the table row (#150).
+- **A workflow file whose merge key holds a sequence key no longer fails the whole scan.** With `--scan-workflows` or
+  `--scan-ci`, a workflow such as `on: {1: x, <<: {? [a] : b}}` made `gopkg.in/yaml.v3` `v3.0.1` panic with "hash of
+  unhashable type", and the scan failed as `internal_panic` with no results, vulnerability findings included.
+  `go.yaml.in/yaml/v3` `v3.0.5` returns this as a parse error, so the file is skipped with a warning and the other
+  workflows are still audited (#192).
 
 ### Security Patches
 
