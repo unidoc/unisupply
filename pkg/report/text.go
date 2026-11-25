@@ -36,6 +36,9 @@ type TextOptions struct {
 	CIReport        *scanner.CIReport
 	IntegrityReport *scanner.IntegrityReport
 	StdlibVulns     []scanner.Vulnerability
+	// StdlibGoVersion is the Go release the standard library's advisories were matched against (the scan's Go version).
+	// Empty leaves it out of the section's introduction.
+	StdlibGoVersion string
 
 	// Grade is the published grade (Grading v2). nil prints "No grade: grading was not run" instead of a grade.
 	Grade *grade.Result
@@ -132,10 +135,10 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 	if len(opts.StdlibVulns) > 0 {
 		fmt.Fprintf(w, "\n%s\n", c(colorRed, fmt.Sprintf("STDLIB VULNERABILITIES (%d found)", len(opts.StdlibVulns))))
 		fmt.Fprintf(w, "%s\n", c(colorRed, strings.Repeat("─", 40)))
-		fmt.Fprintf(w, "%s\n", c(colorDim, "These affect the Go standard library used to build dependencies."))
+		fmt.Fprintf(w, "%s\n", c(colorDim, stdlibIntro(opts.StdlibGoVersion, stdlibGraded(opts.Grade))))
 		for i := range opts.StdlibVulns {
 			v := &opts.StdlibVulns[i]
-			fmt.Fprintf(w, "  %s %s\n", c(colorRed, v.ID), v.Summary)
+			fmt.Fprintf(w, "  %s (%s)%s%s %s\n", c(colorRed, v.ID), displaySeverity(v), reachabilityTag(v.Reachability), kevBadge(v, c), v.Summary)
 			if v.FixedVersion != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Fixed in:"), v.FixedVersion)
 			}
@@ -143,7 +146,7 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Reached via:"), via)
 			}
 			if syms := calledSymbolsLine(v); syms != "" {
-				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Vulnerable symbols called:"), syms)
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, calledSymbolsLabel(v)), syms)
 			}
 		}
 		fmt.Fprintln(w)
@@ -245,18 +248,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 		for i := range ds.Vulns {
 			v := &ds.Vulns[i]
 			tag := reachabilityTag(v.Reachability)
-			displaySev := v.Severity
-			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
-				displaySev = "UNKNOWN"
-			}
-			// Threat-intel badges: EPSS exploitation probability and KEV
-			// status. KEV is colored like CRITICAL — confirmed exploitation
-			// in the wild.
-			ti := ""
-			if v.InKEV {
-				ti = " " + c(colorRed, "[KEV]")
-			}
-			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySev, tag, ti)
+			fmt.Fprintf(w, "  ├─ ⚠ %s (%s)%s%s\n", v.ID, displaySeverity(v), tag, kevBadge(v, c))
 			if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
 				fmt.Fprintf(w, "  │  severity unresolved — treated as MEDIUM (HIGH if reachable)\n")
 			}
@@ -267,7 +259,7 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 				fmt.Fprintf(w, "  │  Reached via: %s\n", via)
 			}
 			if syms := calledSymbolsLine(v); syms != "" {
-				fmt.Fprintf(w, "  │  Vulnerable symbols called: %s\n", syms)
+				fmt.Fprintf(w, "  │  %s %s\n", calledSymbolsLabel(v), syms)
 			}
 		}
 	}
@@ -543,6 +535,33 @@ func countWithVulns(deps []*scorer.DependencyScore) int {
 	return count
 }
 
+// stdlibGraded reports whether the grade has a row for the standard library, which --grade-stdlib adds.
+func stdlibGraded(g *grade.Result) bool {
+	if g == nil {
+		return false
+	}
+	for i := range g.Rows {
+		if g.Rows[i].Module == "stdlib" {
+			return true
+		}
+	}
+	return false
+}
+
+// stdlibIntro introduces the standard library section of the text and PDF reports: the entries are fixed by a Go upgrade,
+// and are graded or only listed. version is the Go release they were matched against, "" when not known.
+func stdlibIntro(version string, graded bool) string {
+	matched := ""
+	if version != "" {
+		matched = ", matched against " + version
+	}
+	s := "These are in the Go standard library" + matched + ". Upgrading Go fixes them. "
+	if graded {
+		return s + "They are graded as the row stdlib."
+	}
+	return s + "They are listed, not graded (use --grade-stdlib to grade them)."
+}
+
 // reachabilityTag returns the bracket tag to append after a CVE ID for
 // non-called reachability levels.  Empty string or "called" both return ""
 // (backward-compat: suppress the tag on the common case).
@@ -554,6 +573,24 @@ func reachabilityTag(r string) string {
 		// "" (legacy / non-govulncheck) and "called" are both untagged.
 		return ""
 	}
+}
+
+// displaySeverity returns the severity a text vulnerability line shows: an empty or unresolved severity reads UNKNOWN.
+// Shared by the dependency and standard library lines so they stay alike.
+func displaySeverity(v *scanner.Vulnerability) string {
+	if strings.EqualFold(v.Severity, "UNKNOWN") || v.Severity == "" {
+		return "UNKNOWN"
+	}
+	return v.Severity
+}
+
+// kevBadge returns " [KEV]" for an advisory on the CISA KEV list, colored like CRITICAL (confirmed exploitation in the
+// wild), and "" otherwise. Shared by the dependency and standard library lines, so text matches the PDF and JSON.
+func kevBadge(v *scanner.Vulnerability, c func(string, string) string) string {
+	if !v.InKEV {
+		return ""
+	}
+	return " " + c(colorRed, "[KEV]")
 }
 
 // timeBombScopeNote says what makes a dependency a time bomb, so an archived

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -57,21 +58,35 @@ func resolveGoEnv(ctx context.Context, dir string) (goEnv, error) {
 // from this environment before it would exec `go env` in the process working
 // directory, so setting it makes standard-library matching follow the project's
 // toolchain. base is returned unchanged (as a copy) when goVersion is empty or
-// when base already sets GOVERSION: an explicit setting by the user wins, and
-// govulncheck takes the last match, so appending would silently override it.
-func govulncheckEnv(base []string, goVersion string) []string {
-	env := make([]string, len(base), len(base)+1)
+// when base already sets GOVERSION to a value: an explicit setting by the user
+// wins, and govulncheck takes the last match, so appending would silently
+// override it. The go command ignores GOVERSION in its environment, so such a
+// value is usually a leftover; when it differs from goVersion it is returned as
+// the second result so the caller can say so. An empty GOVERSION= counts as
+// unset: govulncheck would run `go env` in the wrong directory for it, so those
+// entries are dropped and goVersion is appended.
+func govulncheckEnv(base []string, goVersion string) (env []string, inherited string) {
+	env = make([]string, len(base), len(base)+1)
 	copy(env, base)
 
 	if goVersion == "" {
-		return env
+		return env, ""
 	}
+	// govulncheck takes the last GOVERSION= entry.
+	last := ""
 	for _, e := range base {
-		if strings.HasPrefix(e, goVersionEnvPrefix) {
-			return env
+		if v, ok := strings.CutPrefix(e, goVersionEnvPrefix); ok {
+			last = v
 		}
 	}
-	return append(env, goVersionEnvPrefix+goVersion)
+	if last != "" {
+		if last != goVersion {
+			return env, last
+		}
+		return env, ""
+	}
+	env = slices.DeleteFunc(env, func(e string) bool { return strings.HasPrefix(e, goVersionEnvPrefix) })
+	return append(env, goVersionEnvPrefix+goVersion), ""
 }
 
 // rebaseStdlibFile re-expresses a standard-library frame filename relative to

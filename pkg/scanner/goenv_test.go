@@ -12,22 +12,31 @@ import (
 
 func TestGovulncheckEnv(t *testing.T) {
 	tests := []struct {
-		name    string
-		base    []string
-		version string
-		want    []string
+		name          string
+		base          []string
+		version       string
+		want          []string
+		wantInherited string // the inherited GOVERSION that differs from version
 	}{
-		{"appends", []string{"A=1", "B=2"}, "go1.25.0", []string{"A=1", "B=2", "GOVERSION=go1.25.0"}},
-		{"empty base", nil, "go1.25.0", []string{"GOVERSION=go1.25.0"}},
-		{"empty version", []string{"A=1"}, "", []string{"A=1"}},
-		{"existing GOVERSION wins", []string{"A=1", "GOVERSION=go1.20.0"}, "go1.25.0", []string{"A=1", "GOVERSION=go1.20.0"}},
-		{"similar prefix is not GOVERSION", []string{"GOVERSIONX=1"}, "go1.25.0", []string{"GOVERSIONX=1", "GOVERSION=go1.25.0"}},
+		{"appends", []string{"A=1", "B=2"}, "go1.25.0", []string{"A=1", "B=2", "GOVERSION=go1.25.0"}, ""},
+		{"empty base", nil, "go1.25.0", []string{"GOVERSION=go1.25.0"}, ""},
+		{"empty version", []string{"A=1"}, "", []string{"A=1"}, ""},
+		{"empty version keeps an inherited value", []string{"GOVERSION=go1.20.0"}, "", []string{"GOVERSION=go1.20.0"}, ""},
+		{"existing GOVERSION wins and is reported", []string{"A=1", "GOVERSION=go1.20.0"}, "go1.25.0", []string{"A=1", "GOVERSION=go1.20.0"}, "go1.20.0"},
+		{"existing GOVERSION equal to the project's", []string{"A=1", "GOVERSION=go1.25.0"}, "go1.25.0", []string{"A=1", "GOVERSION=go1.25.0"}, ""},
+		{"empty GOVERSION counts as unset", []string{"A=1", "GOVERSION=", "B=2"}, "go1.25.0", []string{"A=1", "B=2", "GOVERSION=go1.25.0"}, ""},
+		{"the last GOVERSION entry decides: empty last", []string{"GOVERSION=go1.20.0", "GOVERSION="}, "go1.25.0", []string{"GOVERSION=go1.25.0"}, ""},
+		{"the last GOVERSION entry decides: value last", []string{"GOVERSION=", "GOVERSION=go1.20.0"}, "go1.25.0", []string{"GOVERSION=", "GOVERSION=go1.20.0"}, "go1.20.0"},
+		{"similar prefix is not GOVERSION", []string{"GOVERSIONX=1"}, "go1.25.0", []string{"GOVERSIONX=1", "GOVERSION=go1.25.0"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := govulncheckEnv(tt.base, tt.version)
+			got, inherited := govulncheckEnv(tt.base, tt.version)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("govulncheckEnv() = %v, want %v", got, tt.want)
+			}
+			if inherited != tt.wantInherited {
+				t.Errorf("govulncheckEnv() inherited = %q, want %q", inherited, tt.wantInherited)
 			}
 		})
 	}
@@ -39,7 +48,7 @@ func TestGovulncheckEnv_DoesNotAliasBase(t *testing.T) {
 	backing[0] = "A=1"
 	base := backing[:1]
 
-	got := govulncheckEnv(base, "go1.25.0")
+	got, _ := govulncheckEnv(base, "go1.25.0")
 	if len(base) != 1 || base[0] != "A=1" {
 		t.Errorf("base mutated: %v", base)
 	}
@@ -51,7 +60,7 @@ func TestGovulncheckEnv_DoesNotAliasBase(t *testing.T) {
 		t.Errorf("result shares memory with base: %v", base)
 	}
 
-	unchanged := govulncheckEnv(base, "")
+	unchanged, _ := govulncheckEnv(base, "")
 	unchanged[0] = "CHANGED=1"
 	if base[0] != "A=1" {
 		t.Errorf("unchanged copy shares memory with base: %v", base)

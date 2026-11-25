@@ -11,6 +11,7 @@ import (
 	"github.com/unidoc/unipdf/v5/model"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -286,7 +287,7 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 	regular, _ := model.NewStandard14Font(model.HelveticaName)
 	bold, _ := model.NewStandard14Font(model.HelveticaBoldName)
 
-	writeStdlibVulnSection(c, stdlibTestVulns(), regular, bold)
+	writeStdlibVulnSection(c, stdlibTestVulns(), "go1.26.11", false, regular, bold)
 
 	var buf bytes.Buffer
 	if err := c.Write(&buf); err != nil {
@@ -321,7 +322,7 @@ func TestWriteStdlibVulnSection_Extraction(t *testing.T) {
 
 	for _, want := range []string{
 		"Standard Library Vulnerabilities",
-		"These affect the Go standard library used to build dependencies.",
+		stdlibIntroNotGraded,
 		"Vulnerability: GO-2026-4001 (called; severity HIGH)",
 		"Summary: Unbounded allocation in net/http",
 		"Fix available: go1.26.3",
@@ -363,5 +364,114 @@ func TestCollectVulnAliases_IncludesStdlib(t *testing.T) {
 	if len(entries) != 1 || entries[0].ID != "GO-2026-4001" ||
 		len(entries[0].Aliases) != 1 || entries[0].Aliases[0] != "CVE-2026-11111" {
 		t.Errorf("collectVulnAliases() = %+v, want GO-2026-4001 -> CVE-2026-11111", entries)
+	}
+}
+
+// TestAddVulnBullets_CalledSymbolsCut reads the paragraph's chunks instead of a written PDF, so it needs no license and
+// runs in CI.
+func TestAddVulnBullets_CalledSymbolsCut(t *testing.T) {
+	c := creator.New()
+	p := c.NewStyledParagraph()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	v := cutSymbolsVuln()
+	addVulnBullets(p, &v, nil, false, regular)
+
+	var text strings.Builder
+	for _, ch := range p.GetChunks() {
+		text.WriteString(ch.Text)
+	}
+	want := "Vulnerable symbols called (20 of 153): example.com/lib.Sym00, "
+	if !strings.Contains(text.String(), want) {
+		t.Errorf("bullets missing %q:\n%s", want, text.String())
+	}
+}
+
+// chunkText joins the text of a paragraph's chunks.
+func chunkText(p *creator.StyledParagraph) string {
+	var b strings.Builder
+	for _, ch := range p.GetChunks() {
+		b.WriteString(ch.Text)
+	}
+	return b.String()
+}
+
+// TestStdlibSectionParagraphs reads the paragraphs' chunks instead of a written PDF, so it needs no licence and runs in CI.
+func TestStdlibSectionParagraphs(t *testing.T) {
+	c := creator.New()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	for _, tt := range []struct {
+		name    string
+		version string
+		graded  bool
+		intro   string
+	}{
+		{"not graded", "go1.26.11", false, stdlibIntroNotGraded},
+		{"graded", "go1.26.11", true, stdlibIntroGraded},
+		{"no version", "", false, "These are in the Go standard library. Upgrading Go fixes them."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := stdlibSectionParagraphs(c, stdlibTestVulns(), tt.version, tt.graded, regular)
+			if len(ps) != 3 {
+				t.Fatalf("got %d paragraphs, want the intro and one per entry (3)", len(ps))
+			}
+			if got := chunkText(ps[0]); !strings.Contains(got, tt.intro) || strings.Contains(got, "These affect") {
+				t.Errorf("intro = %q, want it to contain %q", got, tt.intro)
+			}
+			called, imported := chunkText(ps[1]), chunkText(ps[2])
+			for _, want := range []string{
+				"Vulnerability: GO-2026-4001 (called; severity HIGH)",
+				"Reached via: example.com/app.main (main.go:21) > net/http.ListenAndServe",
+				"Vulnerable symbols called: net/http.ListenAndServe, net/http.Serve",
+			} {
+				if !strings.Contains(called, want) {
+					t.Errorf("called entry missing %q:\n%s", want, called)
+				}
+			}
+			if !strings.Contains(imported, "Vulnerability: GO-2026-4002 (imported; severity MEDIUM)") ||
+				strings.Contains(imported, "Reached via") || strings.Contains(imported, "Vulnerable symbols") {
+				t.Errorf("imported entry wrong:\n%s", imported)
+			}
+		})
+	}
+}
+
+// TestAddVulnBullets_DependencyFinding covers, without a licence, the call a dependency block makes: a called finding
+// with a grade finding and withSummary false.
+func TestAddVulnBullets_DependencyFinding(t *testing.T) {
+	c := creator.New()
+	p := c.NewStyledParagraph()
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+
+	v := issue134Vuln()
+	v.Summary = "keyring.Add retains keys"
+	v.FixedVersion = "v0.49.0"
+	v.CalledSymbols = []string{"golang.org/x/crypto/ssh/agent.keyring.Add", "golang.org/x/crypto/ssh/agent.keyring.Lock"}
+	row := &grade.RowResult{Module: "golang.org/x/crypto", Findings: []grade.FindingResult{
+		{ID: v.ID, Module: "golang.org/x/crypto", Severity: "CRITICAL", Tier: grade.TierCalled, VEX: grade.VEXStatus{Status: "affected"}},
+	}}
+	f := gradeFindingByID(row, v.ID)
+	if f == nil {
+		t.Fatal("the fixture finding was not found by ID")
+	}
+	addVulnBullets(p, &v, f, false, regular)
+
+	got := chunkText(p)
+	for _, want := range []string{
+		"Vulnerability: GO-2026-5005 (called; VEX affected; severity CRITICAL)",
+		"Fix available: v0.49.0",
+		"Reached via: example.com/u1repro.main (main.go:13) > golang.org/x/crypto/ssh/agent.keyring.Add",
+		"Vulnerable symbols called: golang.org/x/crypto/ssh/agent.keyring.Add, golang.org/x/crypto/ssh/agent.keyring.Lock",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bullets missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Summary:") {
+		t.Errorf("a dependency block prints no summary bullet:\n%s", got)
+	}
+	if strings.Contains(got, "keyring.go:149") {
+		t.Errorf("dependency position must not be shown in the PDF:\n%s", got)
 	}
 }

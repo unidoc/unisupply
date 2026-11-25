@@ -53,3 +53,12 @@ func calledSymbolsLine(v *scanner.Vulnerability) string {
 	}
 	return strings.Join(v.CalledSymbols, ", ")
 }
+
+// calledSymbolsLabel is the label before calledSymbolsLine. It carries "(N of M)" when the list was cut: the total is
+// larger than the list. A zero total, as in an analysis stored before the field existed, counts as complete.
+func calledSymbolsLabel(v *scanner.Vulnerability) string {
+	if v.CalledSymbolsTotal > len(v.CalledSymbols) {
+		return fmt.Sprintf("Vulnerable symbols called (%d of %d):", len(v.CalledSymbols), v.CalledSymbolsTotal)
+	}
+	return "Vulnerable symbols called:"
+}

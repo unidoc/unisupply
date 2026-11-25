@@ -133,7 +133,7 @@ func TestWriteText_StdlibVulnUsesCanonicalID(t *testing.T) {
 
 	out := renderAliasReport(t, ps, stdlib)
 
-	if !strings.Contains(out, "GO-2026-4970 Root escape via symlink") {
+	if !strings.Contains(out, "GO-2026-4970 (HIGH) Root escape via symlink") {
 		t.Errorf("stdlib line missing or reformatted; output:\n%s", out)
 	}
 	if strings.Contains(out, "Root escape via symlink (CVE-2026-39822)") {

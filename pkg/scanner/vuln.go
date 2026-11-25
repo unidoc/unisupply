@@ -94,6 +94,11 @@ type Vulnerability struct {
 	// the cut keeps the first maxCalledSymbols in sorted order. Set only when
 	// Reachability is "called".
 	CalledSymbols []string `json:"called_symbols,omitempty"`
+	// CalledSymbolsTotal is the number of distinct called symbols before the cut,
+	// set whenever CalledSymbols is. The list is partial when it is larger than
+	// len(CalledSymbols); zero (an analysis stored before this field existed)
+	// is treated as complete.
+	CalledSymbolsTotal int `json:"called_symbols_total,omitempty"`
 
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
 
@@ -875,7 +880,7 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 	for modPath, vulns := range results {
 		for i := range vulns {
 			key := modPath + "@" + vulns[i].ID
-			vulns[i].CalledSymbols = capCalledSymbols(calledSinks[key])
+			vulns[i].CalledSymbols, vulns[i].CalledSymbolsTotal = capCalledSymbols(calledSinks[key])
 			if len(vulns[i].CallPath) > 0 {
 				vulns[i].Condition = callCondition(chosenTrace[key], roots)
 			}
@@ -897,17 +902,19 @@ func appendCalledSink(sinks []string, trace []traceEntry) []string {
 
 // capCalledSymbols sorts and deduplicates sinks and keeps the first
 // maxCalledSymbols. Sorting before the cut makes the kept set independent of
-// the order govulncheck emitted the findings in. It returns nil for no sinks.
-func capCalledSymbols(sinks []string) []string {
+// the order govulncheck emitted the findings in. total is the distinct count
+// before the cut. It returns nil and 0 for no sinks.
+func capCalledSymbols(sinks []string) (kept []string, total int) {
 	if len(sinks) == 0 {
-		return nil
+		return nil, 0
 	}
 	slices.Sort(sinks)
 	sinks = slices.Compact(sinks)
+	total = len(sinks)
 	if len(sinks) > maxCalledSymbols {
 		sinks = sinks[:maxCalledSymbols]
 	}
-	return sinks
+	return sinks, total
 }
 
 func severityFromOSV(osv *gvcOSV, modPath string) string {
