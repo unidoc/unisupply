@@ -717,7 +717,7 @@ func vulnLine(v *scanner.Vulnerability, f *grade.FindingResult) string {
 
 // addVulnBullets appends the bullet lines describing one vulnerability: its
 // ID, tier, VEX status, severity as scored and threat-intel badges, the fix,
-// the call path and the vulnerable symbols called. f is the grade's finding
+// the call path or the import chain, and the vulnerable symbols called. f is the grade's finding
 // for it (nil when there is none). withSummary adds the advisory summary after
 // the first line; dependency blocks omit it.
 func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *grade.FindingResult, withSummary bool, font *model.PdfFont) {
@@ -735,6 +735,9 @@ func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *gra
 	// The ASCII separator is deliberate: see callPathSepPDF.
 	if via := reachedVia(v, callPathSepPDF); via != "" {
 		addBullet(p, "  Reached via: "+via, font)
+	}
+	if via := importedVia(v, callPathSepPDF); via != "" {
+		addBullet(p, "  Imported via: "+via, font)
 	}
 	if syms := calledSymbolsLine(v); syms != "" {
 		addBullet(p, "  "+calledSymbolsLabel(v)+" "+syms, font)

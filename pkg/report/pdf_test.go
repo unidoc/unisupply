@@ -475,3 +475,38 @@ func TestAddVulnBullets_DependencyFinding(t *testing.T) {
 		t.Errorf("dependency position must not be shown in the PDF:\n%s", got)
 	}
 }
+
+// TestAddVulnBullets_ImportedVia reads the paragraph's chunks, so it needs no licence: an imported finding with a chain
+// gets an ASCII "Imported via" bullet, and a called finding gets none.
+func TestAddVulnBullets_ImportedVia(t *testing.T) {
+	regular, _ := model.NewStandard14Font(model.HelveticaName)
+	bullets := func(v *scanner.Vulnerability) string {
+		p := creator.New().NewStyledParagraph()
+		addVulnBullets(p, v, nil, false, regular)
+		return chunkText(p)
+	}
+
+	imported := scanner.Vulnerability{
+		ID: "GO-2026-5025", Severity: "MEDIUM", Reachability: "imported", FixedVersion: "v0.55.0",
+		ImportPath: []string{"example.com/app/cmd/app", "github.com/some/dep", "golang.org/x/net/html"},
+	}
+	got := bullets(&imported)
+	if want := "Imported via: example.com/app/cmd/app > github.com/some/dep > golang.org/x/net/html"; !strings.Contains(got, want) {
+		t.Errorf("bullets missing %q:\n%s", want, got)
+	}
+	if strings.Contains(got, "Reached via") {
+		t.Errorf("an imported finding must not have Reached via:\n%s", got)
+	}
+
+	noChain := imported
+	noChain.ImportPath = nil
+	if got := bullets(&noChain); strings.Contains(got, "Imported via") {
+		t.Errorf("bullets have Imported via without a chain:\n%s", got)
+	}
+
+	called := issue134Vuln()
+	called.ImportPath = imported.ImportPath
+	if got := bullets(&called); strings.Contains(got, "Imported via") {
+		t.Errorf("a called finding has Imported via:\n%s", got)
+	}
+}
