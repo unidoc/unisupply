@@ -100,6 +100,20 @@ type Vulnerability struct {
 	// is treated as complete.
 	CalledSymbolsTotal int `json:"called_symbols_total,omitempty"`
 
+	// ImportPath is the shortest chain of imports from one of the project's
+	// packages to a vulnerable package of this advisory: the first entry is the
+	// project's own package, the last is the vulnerable package. Set only when
+	// Reachability is "imported", and by the runner from the resolver's package
+	// graph, not by the parser. Like CallPath it is static-analysis evidence for
+	// ScanInfo.Platform, not proof that the vulnerability is exploitable.
+	ImportPath []string `json:"import_path,omitempty"`
+	// ImportedPackages lists the vulnerable packages govulncheck found imported
+	// for this advisory in this module (trace[0].Package of every imported
+	// finding), sorted and without duplicates. It is not serialized, because
+	// ImportPath is the published form; it is what the runner searches the import
+	// graph for.
+	ImportedPackages []string `json:"-"`
+
 	// Enrichment metadata — populated by the OSV/GHSA enrichment pass.
 
 	// EnrichmentAttempted is true when the enricher ran for this vuln (i.e.
@@ -785,6 +799,11 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 	// formats a message. Condition is read from the trace after the loop.
 	chosenTrace := make(map[string][]traceEntry)
 	chosenFormats := make(map[string]bool)
+	// importedPkgs holds, per vulnerability key, the vulnerable package of every
+	// imported finding. govulncheck emits one finding per package, so an advisory
+	// that names several packages arrives as several findings that fold into one
+	// entry.
+	importedPkgs := make(map[string][]string)
 
 	for _, f := range findings {
 		osv, ok := osvs[f.OSV]
@@ -821,6 +840,9 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 
 		reach := classifyReachability(f.Trace)
 		key := modPath + "@" + osv.ID
+		if reach == "imported" {
+			importedPkgs[key] = append(importedPkgs[key], f.Trace[0].Package)
+		}
 
 		if idx, exists := seenIdx[key]; exists {
 			// Duplicate finding: upgrade reachability if this occurrence ranks higher.
@@ -881,6 +903,10 @@ func parseGovulncheckJSONWithOptions(buf *bytes.Buffer, opts gvcParseOptions) (m
 		for i := range vulns {
 			key := modPath + "@" + vulns[i].ID
 			vulns[i].CalledSymbols, vulns[i].CalledSymbolsTotal = capCalledSymbols(calledSinks[key])
+			if pkgs := importedPkgs[key]; len(pkgs) > 0 {
+				slices.Sort(pkgs)
+				vulns[i].ImportedPackages = slices.Compact(pkgs)
+			}
 			if len(vulns[i].CallPath) > 0 {
 				vulns[i].Condition = callCondition(chosenTrace[key], roots)
 			}

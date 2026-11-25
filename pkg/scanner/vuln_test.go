@@ -1506,3 +1506,125 @@ func TestCallPath_NoConditionWithoutSBOM(t *testing.T) {
 		t.Errorf("Condition = %q, CallPath = %v; want empty Condition with a path", v.Condition, v.CallPath)
 	}
 }
+
+// importedFinding is a govulncheck finding line for a vulnerable package that is
+// imported but has no called symbol: a trace with a package and no function.
+func importedFinding(osvID, modPath, pkg string) map[string]json.RawMessage {
+	return map[string]json.RawMessage{
+		"finding": json.RawMessage(fmt.Sprintf(
+			`{"osv": %q, "trace": [{"module": %q, "version": "v1.0.0", "package": %q}]}`, osvID, modPath, pkg)),
+	}
+}
+
+func TestFixture_ImportedPackages(t *testing.T) {
+	results, err := parseGovulncheckJSON(loadGovulncheckFixture(t, "govulncheck_imported.json"))
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+	vulns := results["golang.org/x/net"]
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1", len(vulns))
+	}
+	if want := []string{"golang.org/x/net/html"}; !slices.Equal(vulns[0].ImportedPackages, want) {
+		t.Errorf("ImportedPackages = %v, want %v", vulns[0].ImportedPackages, want)
+	}
+	if vulns[0].ImportPath != nil {
+		t.Errorf("ImportPath = %v, want nil: the runner fills it, not the parser", vulns[0].ImportPath)
+	}
+}
+
+// TestParseGovulncheckJSON_ImportedPackagesFolded checks that one advisory that
+// govulncheck reports once per vulnerable package keeps every package, sorted
+// and without duplicates, on the single entry the findings fold into.
+func TestParseGovulncheckJSON_ImportedPackagesFolded(t *testing.T) {
+	const (
+		osvID   = "GO-2024-0010"
+		modPath = "golang.org/x/net"
+	)
+	buf := buildGovulncheckBuf(t,
+		minimalOSV(osvID, modPath, "HIGH"),
+		importedFinding(osvID, modPath, "golang.org/x/net/http2"),
+		importedFinding(osvID, modPath, "golang.org/x/net/html"),
+		importedFinding(osvID, modPath, "golang.org/x/net/http2"),
+	)
+	results, err := parseGovulncheckJSON(buf)
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+	vulns := results[modPath]
+	if len(vulns) != 1 {
+		t.Fatalf("len(vulns) = %d, want 1 (findings of one advisory fold into one entry)", len(vulns))
+	}
+	if vulns[0].Reachability != "imported" {
+		t.Errorf("Reachability = %q, want imported", vulns[0].Reachability)
+	}
+	want := []string{"golang.org/x/net/html", "golang.org/x/net/http2"}
+	if !slices.Equal(vulns[0].ImportedPackages, want) {
+		t.Errorf("ImportedPackages = %v, want %v", vulns[0].ImportedPackages, want)
+	}
+}
+
+// TestParseGovulncheckJSON_NoImportedPackagesForOtherTiers checks that only an
+// imported finding records a vulnerable package.
+func TestParseGovulncheckJSON_NoImportedPackagesForOtherTiers(t *testing.T) {
+	const modPath = "github.com/example/mixed"
+	called := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{"osv": "GO-2024-0011", "trace": [
+			{"module": "github.com/example/mixed", "version": "v1.0.0", "package": "github.com/example/mixed", "function": "Bad"}]}`),
+	}
+	required := map[string]json.RawMessage{
+		"finding": json.RawMessage(`{"osv": "GO-2024-0012", "trace": [
+			{"module": "github.com/example/mixed", "version": "v1.0.0"}]}`),
+	}
+	buf := buildGovulncheckBuf(t,
+		minimalOSV("GO-2024-0011", modPath, "HIGH"), called,
+		minimalOSV("GO-2024-0012", modPath, "HIGH"), required,
+	)
+	results, err := parseGovulncheckJSON(buf)
+	if err != nil {
+		t.Fatalf("parseGovulncheckJSON: %v", err)
+	}
+	vulns := results[modPath]
+	if len(vulns) != 2 {
+		t.Fatalf("len(vulns) = %d, want 2", len(vulns))
+	}
+	for _, v := range vulns {
+		if len(v.ImportedPackages) != 0 {
+			t.Errorf("%s (%s): ImportedPackages = %v, want none", v.ID, v.Reachability, v.ImportedPackages)
+		}
+	}
+}
+
+// TestVulnerabilityImportPathJSON checks the published form: import_path is
+// there when set, and ImportedPackages is never serialized.
+func TestVulnerabilityImportPathJSON(t *testing.T) {
+	v := Vulnerability{ID: "GO-2024-0010", Reachability: "imported", ImportedPackages: []string{"golang.org/x/net/html"}}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"imported_packages", "import_path", "ImportedPackages"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("JSON %s contains %q, want it absent", b, key)
+		}
+	}
+
+	v.ImportPath = []string{"example.com/app/cmd/app", "golang.org/x/net/html"}
+	b, err = json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"import_path":["example.com/app/cmd/app","golang.org/x/net/html"]`) {
+		t.Errorf("JSON %s has no import_path", b)
+	}
+	if strings.Contains(string(b), "imported_packages") {
+		t.Errorf("JSON %s contains imported_packages, want it absent", b)
+	}
+	var back Vulnerability
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(back.ImportPath, v.ImportPath) || back.ImportedPackages != nil {
+		t.Errorf("round trip: ImportPath = %v, ImportedPackages = %v", back.ImportPath, back.ImportedPackages)
+	}
+}
