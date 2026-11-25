@@ -244,6 +244,10 @@ are shown as data, and a called finding on the KEV list grades F — see
       "fixed_version": "v0.36.0",
       "reachability": "imported",
       "call_path_checked": true,
+      "import_path": [
+        "example.com/app/cmd/app",
+        "golang.org/x/net/websocket"
+      ],
       "epss_score": 0.004,
       "epss_percentile": 0.31,
       "epss_date": "2026-07-10",
@@ -263,12 +267,14 @@ Vulnerabilities in the Go standard library of the project's toolchain are not
 attached to a dependency. They appear in a top-level `stdlib_vulnerabilities`
 array after `dependencies`, sorted by advisory ID and omitted when there are
 none. Each entry has the same fields as a dependency vulnerability above
-(including `reachability`, `call_path_checked`, `call_path`, `call_trace` and `called_symbols`).
+(including `reachability`, `call_path_checked`, `call_path`, `call_trace`, `called_symbols` and `import_path`).
 They are graded as a row named `stdlib` and are not counted in `summary`.
 
 `call_path` is present only when `reachability` is `"called"`: one example of how the project reaches the vulnerable function, outermost frame first, condensed to the entry frame, the frame where each package hands over to the next, and the vulnerable function (at most 8 entries; `"..."` marks a cut). Consecutive entries are not necessarily direct callers. It is evidence that the code is on an execution path, not proof that the vulnerability is exploitable.
 
 `call_trace` has one object per `call_path` entry, in the same order, with the frame's module, version and source position (`file`, `line`, `column`); `project` is true for the project's own code, and the `"..."` slot is `{"elided": true}`. A frame's position is the call it makes; the last entry's is the vulnerable function's declaration. `file` is relative to that frame's module, and is omitted when govulncheck reports an absolute path or one outside the module; `line` and `column` are kept. `called_symbols` lists the vulnerable symbols found called for the advisory (sorted, at most 20), since `call_path` shows only one; `called_symbols_total` is the count before the cut, and the list is partial when the total is larger (the text and PDF reports then say "20 of N"). Neither field affects scoring or policy.
+
+`import_path` is present only when `reachability` is `"imported"`: the shortest chain of imports from one of the project's own packages (first entry) to the vulnerable package (last entry), taken from the production package graph of `scan.platform` that the build-membership listing already reads. It is absent with `--direct-only`, when that listing is unavailable, when the scan's platform is not one of the six listed targets (linux, darwin or windows on amd64 or arm64), and for called and required findings. Like `reachability` it is static analysis: imports behind custom build tags and plugins are not seen. The text and PDF reports print it as `Imported via:`, cut to the first entry, `...` and the last six when it has more than 8 entries; the JSON keeps the whole chain. It does not affect scoring or policy.
 
 Absent `epss_score` means EPSS has no score for that CVE (expected — EPSS does
 not score every CVE), the lookup failed, or the vuln has no CVE alias;

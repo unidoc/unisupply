@@ -127,6 +127,39 @@ places that call the vulnerable code is not in its output; any number derived
 from it would be a lower bound that reads like an exact count. Neither
 `call_trace` nor `called_symbols` affects scoring or policy.
 
+For `imported` findings the JSON report carries `import_path` instead: the
+shortest chain of imports from one of the project's own packages (the first
+entry) to a vulnerable package of the advisory (the last entry), for example
+`example.com/app/cmd/app`, `github.com/some/dep`, `golang.org/x/net/html`. It is
+on `dependencies[].vulnerabilities[]`, `stdlib_vulnerabilities[]` and the stored
+analysis (`--analysis-out`), and only when `reachability` is `"imported"`.
+
+- **Where the graph comes from.** The production package graph (no test files)
+  of the scan's platform, `scan.platform`, taken from the `go list -deps` runs
+  that classify build membership (see "How it is classified" below), as the union
+  of the `CGO_ENABLED=0` and `CGO_ENABLED=1` listings. That is the graph
+  govulncheck analysed. No extra `go list` run is made for it.
+- **Which chain.** The shortest. Equally short chains are ordered by package
+  path (the roots first, then each package's imports, both sorted), so the same
+  tree always gives the same chain. When an advisory names several vulnerable
+  packages, the chain leads to the nearest one, and its last entry says which.
+- **When it is absent.** With `--direct-only`; when the package listing is
+  unavailable or failed for the scan's platform (for example `--offline` with a
+  cold module cache; a listing that only partly succeeded can also leave a
+  finding without a chain); when the scan's platform is not one of the six
+  targets that are listed (darwin, linux or windows on amd64 or arm64, so not
+  `GOOS=freebsd` or `linux/386`); and on a finding that is `called` or
+  `required`.
+- **A static-analysis limit.** Like `reachability`, the chain comes from the
+  packages `go list` sees for that platform. An import behind a custom build tag
+  and a plugin loaded at run time are not seen.
+
+The text and PDF reports show it where a called finding shows `Reached via:`, as
+`Imported via: example.com/app/cmd/app → github.com/some/dep → golang.org/x/net/html`.
+A chain of more than 8 entries is cut to its first entry, `...` and its last six;
+the JSON report keeps the whole chain. The PDF separates entries with ` > `, as
+it does for `Reached via:`. `import_path` does not affect scoring or policy.
+
 #### Grade effect
 
 Reachability picks the column of the vulnerability table in [grading.md](grading.md#vulnerability-score):
@@ -179,13 +212,13 @@ dependency, so each report lists them separately, in the same order (sorted by
 advisory ID) and with the same evidence as a dependency vulnerability:
 
 - **Text report:** the `STDLIB VULNERABILITIES` section, with `Fixed in:`,
-  `Reached via:` and, when more than one symbol is called,
-  `Vulnerable symbols called:` lines.
+  `Reached via:` (or, for an imported finding, `Imported via:`) and, when more
+  than one symbol is called, `Vulnerable symbols called:` lines.
 - **JSON report:** a top-level `stdlib_vulnerabilities` array after
   `dependencies`, omitted when there are none. Entries have the shape of a
   dependency's `vulnerabilities` entries, including `reachability`,
-  `call_path`, `call_trace`, `called_symbols` and the EPSS and KEV fields, but
-  never `severity_scored`.
+  `call_path`, `call_trace`, `called_symbols`, `import_path` and the EPSS and
+  KEV fields, but never `severity_scored`.
 - **PDF report:** a "Standard Library Vulnerabilities" section on its own page,
   before the vulnerability ID alias appendix, with the same per-vulnerability
   lines as a dependency block.
