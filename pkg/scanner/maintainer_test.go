@@ -3,7 +3,9 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -1679,6 +1681,16 @@ func (r *warnRecorder) all() []string {
 
 var fromNowRe = regexp.MustCompile(`\(([0-9hms.]+) from now\)`)
 
+// Error bodies for the secondary-limit tests. Neither is a captured GitHub
+// response: GitHub's docs quote no body. githubSecondaryLimitFixture has the
+// shape goreleaser's tests use (v2.20.2, internal/client/github_test.go), with
+// the documentation_url anchor go-github matches (v93, github.go CheckResponse).
+// githubPermissionFixture stands for any other 403 body.
+const (
+	githubSecondaryLimitFixture = `{"message":"You have exceeded a secondary rate limit","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`
+	githubPermissionFixture     = `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com/rest/repos/repos#get-a-repository","status":"403"}`
+)
+
 // TestGitHubRateLimit_RetryAfterAndReset pins how Retry-After and
 // X-RateLimit-Reset decide whether a response is a rate limit and what wait
 // the warning names. A secondary limit can arrive as a 429 or a 403 with
@@ -1687,7 +1699,9 @@ var fromNowRe = regexp.MustCompile(`\(([0-9hms.]+) from now\)`)
 // with requests remaining and no usable Retry-After no wait is named, and
 // X-RateLimit-Reset is the last resort only when the remaining count is
 // absent. An unusable Retry-After (unparseable, zero, too large) names no wait;
-// it still counts as a limit on a 429, but not on a 403.
+// it still counts as a limit on a 429, but not on a 403. A 403 the headers do
+// not classify is a limit when its body names a secondary one, and names no
+// wait; a 403 the headers classify is unchanged by its body.
 func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1695,6 +1709,7 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 		remaining  string
 		retryAfter string
 		resetIn    time.Duration // X-RateLimit-Reset = now + resetIn; 0 = header absent
+		body       string        // response body; empty = none
 		wantReason string
 		wantHints  int64
 		waitHint   bool          // the hint says to wait (a secondary limit with quota left), not to set a token
@@ -1800,6 +1815,47 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
 			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
 		},
+		{
+			// #184: neither header classifies it; the body does. No wait is named: the reset is the hourly window's.
+			name: "403 with remaining left, no Retry-After, secondary-limit body", status: http.StatusForbidden,
+			remaining: "4800", resetIn: 50 * time.Minute, body: githubSecondaryLimitFixture,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			name: "403 with remaining left, no Retry-After, secondary limit named only in the message", status: http.StatusForbidden,
+			remaining: "4800", resetIn: 50 * time.Minute, body: `{"message":"You have exceeded a secondary rate limit"}`,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			name: "403 with remaining left, no Retry-After, secondary limit named only in documentation_url", status: http.StatusForbidden,
+			remaining: "4800", resetIn: 50 * time.Minute,
+			body:       `{"message":"Forbidden","documentation_url":"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28#about-secondary-rate-limits"}`,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			name: "403 with remaining left and a permissions body is not a rate limit", status: http.StatusForbidden,
+			remaining: "4800", resetIn: 50 * time.Minute, body: githubPermissionFixture,
+			wantReason: UnavailableAPIError,
+		},
+		{
+			// The remaining count is not given, so the hint must not say requests remained, nor name the reset.
+			name: "403 with no remaining header and a secondary-limit body: no token hint, no wait", status: http.StatusForbidden,
+			resetIn: 50 * time.Minute, body: githubSecondaryLimitFixture,
+			wantReason: UnavailableRateLimited, waitHint: true,
+		},
+		{
+			// Classified by the headers: the body changes neither the hint nor the wait.
+			name: "403 with remaining 0 and a secondary-limit body: primary limit as before", status: http.StatusForbidden,
+			remaining: "0", resetIn: 10 * time.Minute, body: githubSecondaryLimitFixture,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 9*time.Minute + 55*time.Second, maxWait: 10 * time.Minute,
+		},
+		{
+			name: "403 with Retry-After, no remaining header and a secondary-limit body: as without the body", status: http.StatusForbidden,
+			retryAfter: "30", body: githubSecondaryLimitFixture,
+			wantReason: UnavailableRateLimited, wantHints: 1, wantWait: true,
+			minWait: 25 * time.Second, maxWait: 30 * time.Second,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1814,6 +1870,7 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 					w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(tc.resetIn).Unix(), 10))
 				}
 				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer srv.Close()
 
@@ -1854,6 +1911,9 @@ func TestGitHubRateLimit_RetryAfterAndReset(t *testing.T) {
 			warn := limitWarns[0]
 			if got := strings.Contains(warn, "secondary rate limit was reached; wait and re-run"); got != tc.waitHint {
 				t.Errorf("wait-and-re-run hint = %v, want %v: %q", got, tc.waitHint, warn)
+			}
+			if tc.remaining == "" && strings.Contains(warn, "requests remained") {
+				t.Errorf("hint says requests remained, but the remaining count was not given: %q", warn)
 			}
 			if !tc.wantWait {
 				if strings.Contains(warn, "resets at") {
@@ -2237,5 +2297,76 @@ func TestTakeoverCandidates_Empty(t *testing.T) {
 	none := map[string]*MaintainerInfo{"example.com/a": {}}
 	if got := TakeoverCandidates(none); len(got) != 0 {
 		t.Errorf("TakeoverCandidates(no candidates) = %d entries, want 0", len(got))
+	}
+}
+
+// TestGitHubSecondaryLimitBody pins which error bodies name a secondary rate
+// limit (#184). Only the two fixtures above stand for GitHub's shapes; the
+// other bodies here are illustrative.
+func TestGitHubSecondaryLimitBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "message and documentation_url", body: githubSecondaryLimitFixture, want: true},
+		{name: "message only, other case", body: `{"message":"You have exceeded a Secondary Rate Limit"}`, want: true},
+		{name: "documentation_url only, with a query", body: `{"message":"Forbidden","documentation_url":"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api?apiVersion=2022-11-28#about-secondary-rate-limits"}`, want: true},
+		{name: "permissions", body: githubPermissionFixture},
+		{name: "primary limit", body: `{"message":"API rate limit exceeded for 203.0.113.1.","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}`},
+		{name: "older abuse anchor is not matched", body: `{"message":"You have triggered an abuse detection mechanism.","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#abuse-rate-limits"}`},
+		{name: "empty body"},
+		{name: "not JSON, though it names one", body: `secondary rate limit`},
+		{name: "JSON without message or documentation_url", body: `{"status":"403"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := githubSecondaryLimitBody([]byte(tc.body)); got != tc.want {
+				t.Errorf("githubSecondaryLimitBody(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitHubRateLimit_SecondaryLimitBodyWithToken: with a token, a secondary
+// limit named only in the body gets the authenticated hint, as any other limit.
+func TestGitHubRateLimit_SecondaryLimitBodyWithToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "4800")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, githubSecondaryLimitFixture)
+	}))
+	defer srv.Close()
+
+	var authenticated, tokenHint int64
+	ctx := progress.WithReporter(context.Background(), multiReporter{
+		&countingReporter{match: "requests were authenticated", count: &authenticated},
+		&countingReporter{match: "set GITHUB_TOKEN", count: &tokenHint},
+	})
+	ms := newTestMaintainerScanner(srv.URL)
+	ms.token = "t"
+	info := ms.analyzeRepo(ctx, "someowner", "somerepo")
+
+	if info.UnavailableReason != UnavailableRateLimited {
+		t.Errorf("UnavailableReason = %q, want %q", info.UnavailableReason, UnavailableRateLimited)
+	}
+	if authenticated != 1 || tokenHint != 0 {
+		t.Errorf("authenticated hints = %d, GITHUB_TOKEN hints = %d, want 1 and 0", authenticated, tokenHint)
+	}
+}
+
+// TestGitHubRateLimit_SecondaryLimitBodyOnCommits: the default-branch commit
+// lookup goes through githubGet too, so it sees the same rate limit.
+func TestGitHubRateLimit_SecondaryLimitBodyOnCommits(t *testing.T) {
+	ms := NewMaintainerScanner(5*time.Second, "tok") // the lookup runs only with a token
+	ms.diskCache = nil
+	ms.client.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		h := make(http.Header)
+		h.Set("X-RateLimit-Remaining", "4800")
+		return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(githubSecondaryLimitFixture)), Header: h, Request: req}, nil
+	})
+	_, err := ms.LatestCommit(context.Background(), "github.com/hashicorp/go-multierror")
+	if !errors.Is(err, errRateLimited) {
+		t.Errorf("LatestCommit error = %v, want a rate limit", err)
 	}
 }
