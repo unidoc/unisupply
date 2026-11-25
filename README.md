@@ -650,7 +650,7 @@ documented local-mirror workflow is not yet available — track it before relyin
 
 - [docs/grading.md](docs/grading.md) — how the letter is decided (rules version 3)
 - [docs/scanners.md](docs/scanners.md) — scanner reference
-- [SECURITY.md](SECURITY.md) — vulnerability reporting and supported versions
+- [Security policy](https://github.com/unidoc/.github/blob/master/SECURITY.md) — vulnerability reporting and supported versions
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development setup and PR process
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — community standards and enforcement
 - [CHANGELOG.md](CHANGELOG.md) — release notes (Keep a Changelog 1.1)

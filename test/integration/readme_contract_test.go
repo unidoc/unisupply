@@ -3,7 +3,6 @@ package integration_test
 import (
 	"os"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -12,19 +11,11 @@ import (
 // directory `go test` uses.
 const readmePath = "../../README.md"
 
-// securityPath is the prose mirror of the contract; TestNetworkContract_SecurityMDInSync
-// keeps the two from diverging.
-const securityPath = "../../SECURITY.md"
-
 // contractSection is the README heading that owns the network contract table.
 // The table under it is the single source of truth for which hosts unisupply
 // may contact; TestNetworkContract_NoUndocumentedHosts enforces it against
 // real behavior.
 const contractSection = "## Privacy and network access"
-
-// trustIndexPlaceholder is the contract row for the user-supplied Trust Index
-// endpoint. It is a placeholder, not a host, so host-set comparisons skip it.
-const trustIndexPlaceholder = "<trust-index-url>"
 
 // networkContract is the parsed README contract.
 type networkContract struct {
@@ -283,223 +274,6 @@ func TestParseNetworkContract_Synthetic(t *testing.T) {
 		t.Errorf("NeverContacted = %v, want %v (the toolchain caveat must not leak in)",
 			contract.NeverContacted, wantNever)
 	}
-}
-
-// securityBriefPrefix anchors the SECURITY.md paragraph that summarizes the
-// contract. Only that paragraph is parsed: a hostname elsewhere in the file
-// (a reporting address, a link, an example) must not be able to satisfy the
-// sync check on its own.
-const securityBriefPrefix = "In brief:"
-
-// notHostTokens are backticked tokens inside the summary paragraph that look
-// like hostnames to hostLike but are filenames. hostLike is shared with
-// neverContactedHosts, so exclude them here rather than tightening the regexp.
-var notHostTokens = map[string]bool{
-	"go.mod": true,
-	"go.sum": true,
-}
-
-// parseSecurityBriefHosts pulls the hostnames out of SECURITY.md's "In brief"
-// paragraph — from the line that opens it through the blank line that ends it.
-// The search is scoped to the same heading the README table lives under, so an
-// "In brief" paragraph elsewhere in the document (the disclosure-policy and
-// scope sections both precede it) cannot be mistaken for the contract summary.
-func parseSecurityBriefHosts(t *testing.T, path string) []string {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-
-	section, ok := sectionLines(strings.Split(string(data), "\n"), contractSection)
-	if !ok {
-		t.Fatalf("%s: section %q not found; the contract summary must live under the same heading "+
-			"the README table uses", path, contractSection)
-	}
-
-	var (
-		para  []string
-		found bool
-	)
-	for _, line := range section {
-		trimmed := strings.TrimSpace(line)
-		if !found {
-			if strings.HasPrefix(trimmed, securityBriefPrefix) {
-				found = true
-				para = append(para, trimmed)
-			}
-			continue
-		}
-		if trimmed == "" {
-			break
-		}
-		para = append(para, trimmed)
-	}
-	if !found {
-		t.Fatalf("%s: no paragraph starting with %q under %q; that paragraph is the prose mirror "+
-			"of the README contract table and the sync check has nothing to compare against without it",
-			path, securityBriefPrefix, contractSection)
-	}
-
-	var hosts []string
-	seen := map[string]bool{}
-	for _, m := range backtickCell.FindAllStringSubmatch(strings.Join(para, " "), -1) {
-		token := strings.TrimSpace(m[1])
-		if !hostLike.MatchString(token) || notHostTokens[token] || seen[token] {
-			continue
-		}
-		seen[token] = true
-		hosts = append(hosts, token)
-	}
-	if len(hosts) == 0 {
-		t.Fatalf("%s: no hostnames parsed from the %q paragraph", path, securityBriefPrefix)
-	}
-	return hosts
-}
-
-// TestNetworkContract_SecurityMDInSync keeps SECURITY.md's prose summary of
-// the contract from drifting away from the README table it summarizes. This
-// drift is not hypothetical: the EPSS and KEV hosts were added to the table
-// and not to the summary, and nothing caught it.
-//
-// The comparison runs in both directions and is scoped to the summary
-// paragraph. A one-way substring search over the whole file would miss the
-// reverse case — a host dropped from the README but left behind in
-// SECURITY.md, which is the more misleading of the two, since it promises
-// readers a contact that no longer happens.
-func TestNetworkContract_SecurityMDInSync(t *testing.T) {
-	contract := parseNetworkContract(t, readmePath)
-	summary := parseSecurityBriefHosts(t, securityPath)
-
-	inSummary := map[string]bool{}
-	for _, h := range summary {
-		inSummary[h] = true
-	}
-
-	documented := map[string]bool{}
-	for _, host := range contract.Hosts {
-		// The Trust Index row is a placeholder for a user-supplied URL;
-		// SECURITY.md describes it in words, not as a hostname.
-		if host == trustIndexPlaceholder {
-			continue
-		}
-		documented[host] = true
-
-		if !inSummary[host] {
-			t.Errorf("README documents %q but SECURITY.md's summary paragraph does not mention it; "+
-				"the two must describe the same contract", host)
-		}
-	}
-
-	for _, host := range summary {
-		if !documented[host] {
-			t.Errorf("SECURITY.md's summary paragraph mentions %q, which the README contract table "+
-				"no longer documents; remove it, or restore the row it summarizes", host)
-		}
-	}
-}
-
-// TestSecurityMDInSync_DetectsBothDirections proves the sync check has teeth in
-// each direction, on fixtures it fully controls.
-func TestSecurityMDInSync_DetectsBothDirections(t *testing.T) {
-	readme := strings.Join([]string{
-		contractSection,
-		"",
-		"| Host | What is sent |",
-		"| ---- | ------------ |",
-		"| `proxy.example.org` | Module path |",
-		"| `api.example.org` | Repo name |",
-		"",
-		"**Not contacted directly:** `sum.example.org` is never called.",
-	}, "\n")
-
-	tests := []struct {
-		name    string
-		brief   string
-		missing []string // hosts the comparison must flag
-	}{
-		{
-			name:  "in sync",
-			brief: "In brief: contacts `proxy.example.org` and `api.example.org` (reads `go.mod`).",
-		},
-		{
-			name:    "host missing from SECURITY.md",
-			brief:   "In brief: contacts `proxy.example.org` only.",
-			missing: []string{"api.example.org"},
-		},
-		{
-			name:    "stale host left in SECURITY.md",
-			brief:   "In brief: contacts `proxy.example.org`, `api.example.org` and `removed.example.org`.",
-			missing: []string{"removed.example.org"},
-		},
-		{
-			name:    "mention outside the paragraph does not count",
-			brief:   "In brief: contacts `proxy.example.org`.\n\nElsewhere we mention `api.example.org`.",
-			missing: []string{"api.example.org"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			readmeFile := dir + "/README.md"
-			securityFile := dir + "/SECURITY.md"
-			if err := os.WriteFile(readmeFile, []byte(readme), 0o600); err != nil {
-				t.Fatalf("writing README fixture: %v", err)
-			}
-			security := strings.Join([]string{
-				"## Reporting a vulnerability",
-				"",
-				// A decoy: same lead-in, wrong section. Scoping to the contract
-				// heading is what keeps this from being read as the summary.
-				"In brief: report privately; do not open a public issue about `decoy.example.org`.",
-				"",
-				contractSection,
-				"",
-				tt.brief,
-				"",
-			}, "\n")
-			if err := os.WriteFile(securityFile, []byte(security), 0o600); err != nil {
-				t.Fatalf("writing SECURITY fixture: %v", err)
-			}
-
-			contract := parseNetworkContract(t, readmeFile)
-			summary := parseSecurityBriefHosts(t, securityFile)
-
-			got := symmetricDifference(contract.Hosts, summary)
-			if strings.Join(got, ",") != strings.Join(tt.missing, ",") {
-				t.Errorf("drift = %v, want %v", got, tt.missing)
-			}
-		})
-	}
-}
-
-// symmetricDifference returns the hosts in exactly one of the two lists,
-// sorted — the set TestNetworkContract_SecurityMDInSync reports as drift.
-func symmetricDifference(readmeHosts, summaryHosts []string) []string {
-	inSummary := map[string]bool{}
-	for _, h := range summaryHosts {
-		inSummary[h] = true
-	}
-	inReadme := map[string]bool{}
-	for _, h := range readmeHosts {
-		inReadme[h] = true
-	}
-
-	var diff []string
-	for _, h := range readmeHosts {
-		if h != trustIndexPlaceholder && !inSummary[h] {
-			diff = append(diff, h)
-		}
-	}
-	for _, h := range summaryHosts {
-		if !inReadme[h] {
-			diff = append(diff, h)
-		}
-	}
-	sort.Strings(diff)
-	return diff
 }
 
 func containsString(haystack []string, needle string) bool {
