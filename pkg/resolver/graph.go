@@ -100,7 +100,9 @@ type Graph struct {
 	Notes []string `json:"notes,omitempty"`
 
 	// Packages is the production import graph of the scan target (see PackageGraph), kept so that a finding can name
-	// the chain of imports that leads to a vulnerable package. It is not serialized. It is nil with --direct-only,
+	// the chain of imports that leads to a vulnerable package. It is listed with the CGO_ENABLED setting the go command
+	// resolves, the one govulncheck scans with, or is the union of both listings when that cannot be used. It is not
+	// serialized. It is nil with --direct-only,
 	// when classification is unavailable (go list failed on every platform), and when the scan target is not one of
 	// the listed targets (for example GOOS=freebsd or linux/386): no extra go list run is made for it.
 	Packages *PackageGraph `json:"-"`
@@ -392,7 +394,8 @@ type listRun struct {
 	test   bool // include the main module's tests (-test)
 
 	// graph asks for the package import graph too (see PackageGraph). It is set only on the production runs of the
-	// scan target, so the other runs keep the smaller output.
+	// scan target, both CGO settings, so the other runs keep the smaller output. Which of the two graphs is kept is
+	// decided afterwards, from the CGO_ENABLED setting the go command resolves.
 	graph bool
 }
 
@@ -436,9 +439,8 @@ type platformList struct {
 	unresolved   []string
 	err          error
 
-	// pkgRoots and pkgEdges are the union of the package graphs of the runs that listed them (see addGraph).
-	pkgRoots map[string]struct{}
-	pkgEdges map[string]map[string]struct{}
+	// pkgRuns holds the package graph of each production run that asked for one, by its CGO setting (see addGraph).
+	pkgRuns map[bool]*runGraph
 
 	// needsModUpdate is true when any run of this target reported that go.mod
 	// or go.sum needs updating.
@@ -567,7 +569,13 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 	}
 	for _, p := range platforms {
 		if p.name() == scanTarget() {
-			graph.Packages = p.packageGraph()
+			// govulncheck scans with the setting the go command resolves in the project, so the graph is that
+			// listing's; when it cannot be read the merged graph is used (see packageGraph).
+			cgo, err := goEnvCgo(ctx, dir)
+			if err != nil {
+				cgo = ""
+			}
+			graph.Packages = p.packageGraph(cgo)
 		}
 	}
 	partial := len(failed) > 0
@@ -790,7 +798,7 @@ func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, 
 		}
 		maps.Copy(dst, res.mods)
 		if run.graph {
-			p.addGraph(res)
+			p.addGraph(run.cgo, res)
 		}
 		if res.err != nil && p.err == nil {
 			p.err = res.err

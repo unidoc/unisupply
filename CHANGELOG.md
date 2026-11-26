@@ -47,8 +47,11 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **`import_path`** (list of package import paths, on an `imported` finding) is the shortest chain of imports from one of the
   project's own packages (the first entry) to the vulnerable package (the last), for example `example.com/app/cmd/app`,
   `github.com/some/dep`, `golang.org/x/net/html`. It is in `dependencies[].vulnerabilities[]`, `stdlib_vulnerabilities[]` and
-  the stored analysis (`--analysis-out`). It comes from the production package graph (no test files) of `scan.platform`, the
-  union of the `CGO_ENABLED=0` and `=1` listings, taken from the `go list -deps` runs that already classify build membership.
+  the stored analysis (`--analysis-out`). It comes from the production package graph (no test files) of `scan.platform`, taken
+  from the `go list -deps` runs that already classify build membership. The listing is the one for the `CGO_ENABLED` setting
+  the go command resolves in the project (`go env CGO_ENABLED`), which is what govulncheck scans with, so the chain does not
+  run through a `//go:build cgo` file the scan did not compile; if that listing failed or the setting cannot be read, the union
+  of the `CGO_ENABLED=0` and `=1` listings is used.
   Equally short chains are ordered by package path, so the same tree gives the same chain, and when an advisory names several
   packages the chain leads to the nearest. It is absent with `--direct-only`, when the package listing is unavailable (for
   example `--offline` with a cold module cache), when the scan's platform is not one of the six listed targets (darwin, linux

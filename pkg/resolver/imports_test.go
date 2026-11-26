@@ -83,8 +83,8 @@ func TestResolvePackageGraphChain(t *testing.T) {
 	if g.Packages.Platform != host {
 		t.Errorf("Platform = %q, want %q", g.Packages.Platform, host)
 	}
-	if g.Packages.Partial {
-		t.Error("Partial = true, want false for a clean listing")
+	if g.Packages.CgoEnabled != "0" && g.Packages.CgoEnabled != "1" {
+		t.Errorf("CgoEnabled = %q, want the setting the go command resolves", g.Packages.CgoEnabled)
 	}
 	if want := []string{"example.com/main/cmd/x"}; !slices.Equal(g.Packages.Roots, want) {
 		t.Errorf("Roots = %v, want %v", g.Packages.Roots, want)
@@ -256,43 +256,205 @@ func TestShortestImportPathCycle(t *testing.T) {
 	}
 }
 
-// TestPlatformPackageGraph checks how a target's runs merge into one graph:
-// the union of the cgo runs, sorted and deduplicated, and Partial from the
-// target's cleanliness.
+// TestPlatformPackageGraph checks how a target's runs become one graph: the listing of the CGO setting asked for when
+// that run succeeded and listed packages, otherwise the union of both runs, sorted and deduplicated.
 func TestPlatformPackageGraph(t *testing.T) {
-	p := &platformList{goos: "linux", goarch: "amd64"}
-	p.addGraph(listResult{
+	cgoOff := listResult{
 		roots: []string{"app/z", "app/a"},
 		edges: map[string][]string{"app/a": {"x", "y"}, "app/z": {"y"}},
-	})
-	p.addGraph(listResult{
+	}
+	cgoOn := listResult{
 		roots: []string{"app/a", "app/cgo"},
 		edges: map[string][]string{"app/a": {"y", "w"}, "app/cgo": {"C"}},
+	}
+	build := func(off, on listResult) *platformList {
+		p := &platformList{goos: "linux", goarch: "amd64"}
+		p.addGraph(false, off)
+		p.addGraph(true, on)
+		return p
+	}
+
+	t.Run("each setting gets its own run", func(t *testing.T) {
+		p := build(cgoOff, cgoOn)
+		pg := p.packageGraph("0")
+		if pg == nil || pg.Platform != "linux/amd64" || pg.CgoEnabled != "0" {
+			t.Fatalf("packageGraph(0) = %+v, want the linux/amd64 graph of CGO 0", pg)
+		}
+		if want := []string{"app/a", "app/z"}; !slices.Equal(pg.Roots, want) {
+			t.Errorf("Roots = %v, want %v", pg.Roots, want)
+		}
+		if want := []string{"x", "y"}; !slices.Equal(pg.Imports["app/a"], want) {
+			t.Errorf("Imports[app/a] = %v, want %v", pg.Imports["app/a"], want)
+		}
+		pg = p.packageGraph("1")
+		if pg == nil || pg.CgoEnabled != "1" {
+			t.Fatalf("packageGraph(1) = %+v, want the graph of CGO 1", pg)
+		}
+		if want := []string{"app/a", "app/cgo"}; !slices.Equal(pg.Roots, want) {
+			t.Errorf("Roots = %v, want %v", pg.Roots, want)
+		}
+		if want := []string{"w", "y"}; !slices.Equal(pg.Imports["app/a"], want) {
+			t.Errorf("Imports[app/a] = %v, want %v", pg.Imports["app/a"], want)
+		}
 	})
-	pg := p.packageGraph()
-	if pg == nil {
-		t.Fatal("packageGraph() = nil")
-	}
-	if pg.Platform != "linux/amd64" {
-		t.Errorf("Platform = %q", pg.Platform)
-	}
-	if want := []string{"app/a", "app/cgo", "app/z"}; !slices.Equal(pg.Roots, want) {
-		t.Errorf("Roots = %v, want %v", pg.Roots, want)
-	}
-	if want := []string{"w", "x", "y"}; !slices.Equal(pg.Imports["app/a"], want) {
-		t.Errorf("Imports[app/a] = %v, want %v", pg.Imports["app/a"], want)
-	}
-	if pg.Partial {
-		t.Error("Partial = true for a clean target")
+
+	merged := func(t *testing.T, pg *PackageGraph) {
+		t.Helper()
+		if pg == nil {
+			t.Fatal("packageGraph() = nil, want the merged graph")
+		}
+		if pg.CgoEnabled != "" {
+			t.Errorf("CgoEnabled = %q, want empty for the merged graph", pg.CgoEnabled)
+		}
+		if want := []string{"app/a", "app/cgo", "app/z"}; !slices.Equal(pg.Roots, want) {
+			t.Errorf("Roots = %v, want %v", pg.Roots, want)
+		}
+		if want := []string{"w", "x", "y"}; !slices.Equal(pg.Imports["app/a"], want) {
+			t.Errorf("Imports[app/a] = %v, want %v", pg.Imports["app/a"], want)
+		}
 	}
 
-	p.err = errors.New("a run failed")
-	if pg := p.packageGraph(); pg == nil || !pg.Partial {
-		t.Errorf("packageGraph() of a failed target = %+v, want a Partial graph", pg)
+	t.Run("no setting resolved: merged", func(t *testing.T) {
+		merged(t, build(cgoOff, cgoOn).packageGraph(""))
+	})
+	t.Run("the matching run failed: merged", func(t *testing.T) {
+		failed := cgoOff
+		failed.err = errors.New("a run failed")
+		merged(t, build(failed, cgoOn).packageGraph("0"))
+	})
+	t.Run("the matching run listed nothing: merged", func(t *testing.T) {
+		pg := build(listResult{}, cgoOn).packageGraph("0")
+		if pg == nil || pg.CgoEnabled != "" || !slices.Equal(pg.Roots, cgoOn.roots) {
+			t.Errorf("packageGraph(0) = %+v, want the merged graph (here CGO 1's packages)", pg)
+		}
+	})
+	t.Run("the other run failed: the matching one is used", func(t *testing.T) {
+		failed := cgoOn
+		failed.err = errors.New("a run failed")
+		if pg := build(cgoOff, failed).packageGraph("0"); pg == nil || pg.CgoEnabled != "0" {
+			t.Errorf("packageGraph(0) = %+v, want the graph of CGO 0", pg)
+		}
+	})
+	t.Run("an unknown setting: merged", func(t *testing.T) {
+		merged(t, build(cgoOff, cgoOn).packageGraph("2"))
+	})
+	t.Run("no listed package: nil", func(t *testing.T) {
+		for _, cgo := range []string{"", "0", "1"} {
+			if pg := (&platformList{goos: "linux", goarch: "amd64"}).packageGraph(cgo); pg != nil {
+				t.Errorf("packageGraph(%q) with no listed package = %+v, want nil", cgo, pg)
+			}
+		}
+	})
+}
+
+// cgoFixture is a main module whose cmd/x imports stub dependency a (a long way to b/vuln) and internal/cg, whose
+// //go:build cgo file imports b/vuln directly. With cgo the shortest chain starts at internal/cg (every package of the
+// main module is a root); without it the chain runs from cmd/x through a.
+func cgoFixture() (fixture, map[string]stubOpts, map[string]string) {
+	return fixture{
+			direct:   []string{"a"},
+			indirect: []string{"b"},
+			files: map[string]string{
+				"cmd/x/main.go":         "package main\n\n" + imp("example.com/a", "example.com/main/internal/cg") + "\nfunc main() {}\n",
+				"internal/cg/cg.go":     "package cg\n",
+				"internal/cg/cg_cgo.go": "//go:build cgo\n\npackage cg\n\n" + imp("example.com/b/vuln"),
+			},
+		},
+		map[string]stubOpts{"a": {requires: []string{"b"}}, "b": {}},
+		map[string]string{
+			"a/a.go":         "package a\n\n" + imp("example.com/a/mid"),
+			"a/mid/mid.go":   "package mid\n\n" + imp("example.com/b/vuln"),
+			"b/vuln/vuln.go": "package vuln\n",
+		}
+}
+
+// TestResolvePackageGraphFollowsCgo checks that the chain comes from the listing of the CGO setting the go command
+// resolves, which is what govulncheck scans with, and not from the union of both listings.
+func TestResolvePackageGraphFollowsCgo(t *testing.T) {
+	hostTarget(t)
+	const vuln = "example.com/b/vuln"
+	viaA := []string{"example.com/main/cmd/x", "example.com/a", "example.com/a/mid", vuln}
+	viaCg := []string{"example.com/main/internal/cg", vuln} // a root itself: every package of the main module is one
+
+	for _, tt := range []struct {
+		cgo  string
+		want []string
+	}{
+		{"0", viaA},
+		{"1", viaCg},
+	} {
+		t.Run("CGO_ENABLED="+tt.cgo, func(t *testing.T) {
+			t.Setenv("CGO_ENABLED", tt.cgo)
+			fx, stubs, extra := cgoFixture()
+			g := resolveImports(t, fx, stubs, extra, false)
+			if g.Packages == nil {
+				t.Fatal("Graph.Packages is nil")
+			}
+			if g.Packages.CgoEnabled != tt.cgo {
+				t.Errorf("CgoEnabled = %q, want %q", g.Packages.CgoEnabled, tt.cgo)
+			}
+			if got := g.Packages.ShortestImportPath([]string{vuln}); !slices.Equal(got, tt.want) {
+				t.Errorf("ShortestImportPath = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolvePackageGraphGoEnvFails checks the fallback: when the CGO setting cannot be read, the merged graph is
+// used, so the shortest chain may run through the cgo-only file, and the graph says it is merged.
+func TestResolvePackageGraphGoEnvFails(t *testing.T) {
+	hostTarget(t)
+	t.Setenv("CGO_ENABLED", "0")
+	prev := goEnvCgo
+	t.Cleanup(func() { goEnvCgo = prev })
+	called := 0
+	goEnvCgo = func(context.Context, string) (string, error) {
+		called++
+		return "", errors.New("go env: no go command")
 	}
 
-	if pg := (&platformList{goos: "linux", goarch: "amd64"}).packageGraph(); pg != nil {
-		t.Errorf("packageGraph() with no listed package = %+v, want nil", pg)
+	fx, stubs, extra := cgoFixture()
+	g := resolveImports(t, fx, stubs, extra, false)
+	if called != 1 {
+		t.Errorf("go env was read %d times, want once per Resolve", called)
+	}
+	if g.Packages == nil {
+		t.Fatal("Graph.Packages is nil, want the merged graph")
+	}
+	if g.Packages.CgoEnabled != "" {
+		t.Errorf("CgoEnabled = %q, want empty for the merged graph", g.Packages.CgoEnabled)
+	}
+	want := []string{"example.com/main/internal/cg", "example.com/b/vuln"}
+	if got := g.Packages.ShortestImportPath([]string{"example.com/b/vuln"}); !slices.Equal(got, want) {
+		t.Errorf("ShortestImportPath = %v, want %v (the merged graph)", got, want)
+	}
+}
+
+// TestResolvePackageGraphGoEnvNotReadForUnlistedTarget checks that go env is not run when no graph is kept.
+func TestResolvePackageGraphGoEnvNotReadForUnlistedTarget(t *testing.T) {
+	setGoEnv(t)
+	t.Setenv("GOOS", "freebsd")
+	t.Setenv("GOARCH", "amd64")
+	prev := goEnvCgo
+	t.Cleanup(func() { goEnvCgo = prev })
+	goEnvCgo = func(context.Context, string) (string, error) {
+		t.Error("go env was read although the scan target is not listed")
+		return "", errors.New("unexpected")
+	}
+	fx, stubs, extra := cgoFixture()
+	if g := resolveImports(t, fx, stubs, extra, false); g.Packages != nil {
+		t.Errorf("Graph.Packages = %+v for an unlisted target, want nil", g.Packages)
+	}
+}
+
+func TestReadGoEnvCgo(t *testing.T) {
+	dir := t.TempDir()
+	for _, want := range []string{"0", "1"} {
+		t.Setenv("CGO_ENABLED", want)
+		got, err := readGoEnvCgo(context.Background(), dir)
+		if err != nil || got != want {
+			t.Errorf("readGoEnvCgo with CGO_ENABLED=%s = %q, %v", want, got, err)
+		}
 	}
 }
 

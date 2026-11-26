@@ -136,9 +136,15 @@ analysis (`--analysis-out`), and only when `reachability` is `"imported"`.
 
 - **Where the graph comes from.** The production package graph (no test files)
   of the scan's platform, `scan.platform`, taken from the `go list -deps` runs
-  that classify build membership (see "How it is classified" below), as the union
-  of the `CGO_ENABLED=0` and `CGO_ENABLED=1` listings. That is the graph
-  govulncheck analysed. No extra `go list` run is made for it.
+  that classify build membership (see "How it is classified" below). Those runs
+  list the platform with `CGO_ENABLED=0` and with `CGO_ENABLED=1`; the chain uses
+  the listing of the setting the go command resolves in the project (`go env
+  CGO_ENABLED`, which is 0 without a C compiler), the one govulncheck inherits,
+  so it is the graph govulncheck analysed and does not run through a
+  `//go:build cgo` file the scan did not compile. If that listing failed or
+  listed no package, or the setting could not be read, the union of both
+  listings is used instead. No extra `go list` run is made for the graph; reading
+  the setting is one `go env` call.
 - **Which chain.** The shortest. Equally short chains are ordered by package
   path (the roots first, then each package's imports, both sorted), so the same
   tree always gives the same chain. When an advisory names several vulnerable
@@ -146,7 +152,7 @@ analysis (`--analysis-out`), and only when `reachability` is `"imported"`.
 - **When it is absent.** With `--direct-only`; when the package listing is
   unavailable or failed for the scan's platform (for example `--offline` with a
   cold module cache; a listing that only partly succeeded can also leave a
-  finding without a chain); when the scan's platform is not one of the six
+  finding without a chain, or give one longer than the shortest); when the scan's platform is not one of the six
   targets that are listed (darwin, linux or windows on amd64 or arm64, so not
   `GOOS=freebsd` or `linux/386`); and on a finding that is `called` or
   `required`.

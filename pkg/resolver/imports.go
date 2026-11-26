@@ -1,21 +1,29 @@
 package resolver
 
 import (
+	"context"
+	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
+
+	"github.com/unidoc/unisupply/pkg/offline"
 )
 
 // PackageGraph is the production import graph of the main module's packages on one target, from go list.
 //
-// It is the graph govulncheck analyses: no test files, one GOOS/GOARCH, and the union of the CGO_ENABLED=0 and
-// CGO_ENABLED=1 listings. Nothing in it is stored with the analysis.
+// It is the graph govulncheck analyses: no test files, one GOOS/GOARCH, and one CGO_ENABLED setting, the one the go
+// command resolves in the project (go env CGO_ENABLED), which govulncheck inherits. When that listing failed, listed
+// nothing, or the setting could not be read, it is the union of the CGO_ENABLED=0 and CGO_ENABLED=1 listings instead,
+// and may then contain a chain through a file the scan did not compile. Nothing in it is stored with the analysis.
 type PackageGraph struct {
-	Platform string              // "goos/goarch"
-	Roots    []string            // the main module's packages (DepOnly false), sorted
-	Imports  map[string][]string // import path -> sorted, deduplicated imports
-	Partial  bool                // the target's listing was not clean (a failed run or unresolved packages)
+	Platform   string              // "goos/goarch"
+	CgoEnabled string              // "0" or "1": the CGO_ENABLED listing the graph comes from; "" when the two listings were merged
+	Roots      []string            // the main module's packages (DepOnly false), sorted
+	Imports    map[string][]string // import path -> sorted, deduplicated imports
 }
 
 // ShortestImportPath returns the shortest chain of imports from one of the main module's packages to the nearest of
@@ -81,39 +89,104 @@ func scanTarget() string {
 	return goos + "/" + goarch
 }
 
-// addGraph merges the package graph of one run into the target, a union over its runs.
-func (p *platformList) addGraph(res listResult) {
-	if p.pkgRoots == nil {
-		p.pkgRoots = make(map[string]struct{})
-		p.pkgEdges = make(map[string]map[string]struct{})
+// goEnvCgo reads the CGO_ENABLED setting the go command resolves in dir. It is a variable so that a test can make it fail.
+var goEnvCgo = readGoEnvCgo
+
+// readGoEnvCgo returns "0" or "1": what `go env CGO_ENABLED` prints in dir, so the default the go command applies (off
+// without a C compiler) counts. It runs in the environment of the listings without their per-run GOOS, GOARCH and
+// CGO_ENABLED, which is the environment govulncheck inherits. Like the other `go env` calls it is not logged: it reads
+// local configuration and makes no network request.
+func readGoEnvCgo(ctx context.Context, dir string) (string, error) {
+	env := offline.Env(os.Environ())
+	if env == nil {
+		env = os.Environ()
 	}
-	for _, r := range res.roots {
-		p.pkgRoots[r] = struct{}{}
+	cmd := exec.CommandContext(ctx, "go", "env", "CGO_ENABLED")
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("go env CGO_ENABLED: %w", err)
 	}
-	for pkg, imports := range res.edges {
-		set := p.pkgEdges[pkg]
-		if set == nil {
-			set = make(map[string]struct{}, len(imports))
-			p.pkgEdges[pkg] = set
-		}
-		for _, imp := range imports {
-			set[imp] = struct{}{}
-		}
+	switch v := strings.TrimSpace(string(out)); v {
+	case "0", "1":
+		return v, nil
+	default:
+		return "", fmt.Errorf("go env CGO_ENABLED printed %q, want 0 or 1", v)
 	}
 }
 
-// packageGraph returns the target's merged package graph, or nil when no run listed a package of the main module.
-func (p *platformList) packageGraph() *PackageGraph {
-	if len(p.pkgRoots) == 0 {
+// runGraph is the package graph of one listing run.
+type runGraph struct {
+	roots  map[string]struct{}
+	edges  map[string]map[string]struct{}
+	failed bool // the run did not complete (a toolchain-level failure)
+}
+
+// addGraph records the package graph of one production run of the target, by its CGO setting.
+func (p *platformList) addGraph(cgo bool, res listResult) {
+	if p.pkgRuns == nil {
+		p.pkgRuns = make(map[bool]*runGraph, 2)
+	}
+	rg := &runGraph{
+		roots:  make(map[string]struct{}, len(res.roots)),
+		edges:  make(map[string]map[string]struct{}, len(res.edges)),
+		failed: res.err != nil,
+	}
+	for _, r := range res.roots {
+		rg.roots[r] = struct{}{}
+	}
+	for pkg, imports := range res.edges {
+		set := make(map[string]struct{}, len(imports))
+		for _, imp := range imports {
+			set[imp] = struct{}{}
+		}
+		rg.edges[pkg] = set
+	}
+	p.pkgRuns[cgo] = rg
+}
+
+// packageGraph returns the target's package graph for the CGO_ENABLED setting cgo ("0" or "1", as the go command
+// resolves it): the listing of that setting when its run completed and listed a package of the main module. Otherwise,
+// including when cgo is "" because the setting could not be read, it is the union of both listings and CgoEnabled is
+// "". It returns nil when no run listed a package of the main module.
+func (p *platformList) packageGraph(cgo string) *PackageGraph {
+	var use []*runGraph
+	picked := ""
+	if cgo == "0" || cgo == "1" {
+		if rg := p.pkgRuns[cgo == "1"]; rg != nil && !rg.failed && len(rg.roots) > 0 {
+			use, picked = []*runGraph{rg}, cgo
+		}
+	}
+	if use == nil {
+		for _, rg := range p.pkgRuns {
+			use = append(use, rg)
+		}
+	}
+
+	roots := make(map[string]struct{})
+	edges := make(map[string]map[string]struct{})
+	for _, rg := range use {
+		maps.Copy(roots, rg.roots)
+		for pkg, imports := range rg.edges {
+			set := edges[pkg]
+			if set == nil {
+				set = make(map[string]struct{}, len(imports))
+				edges[pkg] = set
+			}
+			maps.Copy(set, imports)
+		}
+	}
+	if len(roots) == 0 {
 		return nil
 	}
 	pg := &PackageGraph{
-		Platform: p.name(),
-		Roots:    slices.Sorted(maps.Keys(p.pkgRoots)),
-		Imports:  make(map[string][]string, len(p.pkgEdges)),
-		Partial:  !p.clean(),
+		Platform:   p.name(),
+		CgoEnabled: picked,
+		Roots:      slices.Sorted(maps.Keys(roots)),
+		Imports:    make(map[string][]string, len(edges)),
 	}
-	for pkg, set := range p.pkgEdges {
+	for pkg, set := range edges {
 		pg.Imports[pkg] = slices.Sorted(maps.Keys(set))
 	}
 	return pg
