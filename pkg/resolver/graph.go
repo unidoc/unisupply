@@ -98,6 +98,12 @@ type Graph struct {
 	// degradation. Reports must show notes apart from warnings so a note is not
 	// read as a scan limitation.
 	Notes []string `json:"notes,omitempty"`
+
+	// Packages is the production import graph of the scan target (see PackageGraph), kept so that a finding can name
+	// the chain of imports that leads to a vulnerable package. It is not serialized. It is nil with --direct-only,
+	// when classification is unavailable (go list failed on every platform), and when the scan target is not one of
+	// the listed targets (for example GOOS=freebsd or linux/386): no extra go list run is made for it.
+	Packages *PackageGraph `json:"-"`
 }
 
 // Where Graph.Source's edges came from.
@@ -384,6 +390,10 @@ type listRun struct {
 	goarch string
 	cgo    bool // CGO_ENABLED=1; false lists with CGO_ENABLED=0
 	test   bool // include the main module's tests (-test)
+
+	// graph asks for the package import graph too (see PackageGraph). It is set only on the production runs of the
+	// scan target, so the other runs keep the smaller output.
+	graph bool
 }
 
 // listResult is the outcome of one listRun.
@@ -403,6 +413,11 @@ type listResult struct {
 	// module is still known, such as an unmatched //go:embed pattern.
 	tolerated []string
 
+	// roots and edges are the package import graph of the run: the main module's own packages (DepOnly false) and the
+	// imports of every listed package. They are filled only when the run asked for them (listRun.graph).
+	roots []string
+	edges map[string][]string
+
 	// err is a toolchain-level failure (the command did not run or exited
 	// non-zero); mods is empty in that case.
 	err error
@@ -420,6 +435,10 @@ type platformList struct {
 	prod, test   map[string]struct{}
 	unresolved   []string
 	err          error
+
+	// pkgRoots and pkgEdges are the union of the package graphs of the runs that listed them (see addGraph).
+	pkgRoots map[string]struct{}
+	pkgEdges map[string]map[string]struct{}
 
 	// needsModUpdate is true when any run of this target reported that go.mod
 	// or go.sum needs updating.
@@ -545,6 +564,11 @@ func classifyTestOnlyDeps(ctx context.Context, dir string, graph *Graph) (warnin
 	}
 	if len(okTargets) == 0 {
 		return unavailable(failed, needsModUpdate), ""
+	}
+	for _, p := range platforms {
+		if p.name() == scanTarget() {
+			graph.Packages = p.packageGraph()
+		}
 	}
 	partial := len(failed) > 0
 
@@ -706,22 +730,30 @@ func reachableFrom(graph *Graph, seeds []string) map[string]bool {
 	return seen
 }
 
+// listRuns returns the runs of listPlatforms. The production runs of scanTarget, if it is one of the listed targets,
+// also list the package import graph.
+func listRuns(scanTarget string) []listRun {
+	runs := make([]listRun, 0, len(listGOOS)*len(listGOARCH)*4)
+	for _, goos := range listGOOS {
+		for _, goarch := range listGOARCH {
+			for _, cgo := range []bool{false, true} {
+				for _, test := range []bool{false, true} {
+					graph := !test && goos+"/"+goarch == scanTarget
+					runs = append(runs, listRun{goos: goos, goarch: goarch, cgo: cgo, test: test, graph: graph})
+				}
+			}
+		}
+	}
+	return runs
+}
+
 // listPlatforms runs the production and test lists for every GOOS/GOARCH pair
 // of listGOOS and listGOARCH with CGO_ENABLED=0 and CGO_ENABLED=1 (24 `go list`
 // runs, at most maxParallelLists at once) and merges them per target, ordered
 // by GOOS then GOARCH. It also returns the deduplicated, sorted per-package
 // errors the runs tolerated.
 func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, tolerated []string) {
-	runs := make([]listRun, 0, len(listGOOS)*len(listGOARCH)*4)
-	for _, goos := range listGOOS {
-		for _, goarch := range listGOARCH {
-			for _, cgo := range []bool{false, true} {
-				for _, test := range []bool{false, true} {
-					runs = append(runs, listRun{goos: goos, goarch: goarch, cgo: cgo, test: test})
-				}
-			}
-		}
-	}
+	runs := listRuns(scanTarget())
 
 	results := make([]listResult, len(runs))
 	sem := make(chan struct{}, maxParallelLists)
@@ -757,6 +789,9 @@ func listPlatforms(ctx context.Context, dir string) (platforms []*platformList, 
 			dst = p.test
 		}
 		maps.Copy(dst, res.mods)
+		if run.graph {
+			p.addGraph(res)
+		}
 		if res.err != nil && p.err == nil {
 			p.err = res.err
 		}
@@ -783,6 +818,10 @@ type listedPackage struct {
 	Standard   bool
 	Module     *struct{ Path string }
 	Error      *struct{ Err string }
+
+	// Imports and DepOnly are listed only for the runs that feed the package graph (see listGraphFields).
+	Imports []string
+	DepOnly bool // false for the packages that ./... matched: the main module's own
 }
 
 // listFields selects the `go list -json` fields to emit; the full output is
@@ -792,6 +831,9 @@ type listedPackage struct {
 // embed field is asked for. Without it the error is silently dropped and the
 // warning could not name the package.
 const listFields = "ImportPath,Standard,Module,Error,EmbedFiles"
+
+// listGraphFields is added to listFields on the runs that feed the package graph (listRun.graph).
+const listGraphFields = ",Imports,DepOnly"
 
 // listArgs builds the `go list` arguments for run.
 //
@@ -809,7 +851,11 @@ func listArgs(run listRun, readOnly bool) []string {
 	if readOnly {
 		args = append(args, "-mod=readonly")
 	}
-	return append(args, "-json="+listFields, "./...")
+	fields := listFields
+	if run.graph {
+		fields += listGraphFields
+	}
+	return append(args, "-json="+fields, "./...")
 }
 
 // modUpdateMarkers are fragments of the go toolchain's messages that say go.mod
@@ -898,6 +944,17 @@ func listPackages(ctx context.Context, dir string, run listRun) listResult {
 		}
 		if pkg.Module != nil && pkg.Module.Path != "" {
 			res.mods[pkg.Module.Path] = struct{}{}
+		}
+		if run.graph {
+			if !pkg.DepOnly {
+				res.roots = append(res.roots, pkg.ImportPath)
+			}
+			if len(pkg.Imports) > 0 {
+				if res.edges == nil {
+					res.edges = make(map[string][]string)
+				}
+				res.edges[pkg.ImportPath] = pkg.Imports
+			}
 		}
 		if pkg.Error == nil {
 			continue

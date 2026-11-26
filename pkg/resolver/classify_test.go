@@ -85,6 +85,26 @@ func classify(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Graph, stri
 // classifyWithNote is classify that also returns the informational note.
 func classifyWithNote(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Graph, string, string) {
 	t.Helper()
+	mainDir := writeFixture(t, fx, stubs)
+
+	parsed, err := parser.ParseGoMod(filepath.Join(mainDir, "go.mod"))
+	if err != nil {
+		t.Fatalf("ParseGoMod: %v", err)
+	}
+	graph := &Graph{Root: parsed.ModulePath, Dependencies: make(map[string]*Dependency)}
+	for _, req := range parsed.Requirements {
+		graph.Dependencies[req.Path] = &Dependency{Module: req, Direct: !req.Indirect}
+	}
+
+	warn, note := classifyTestOnlyDeps(context.Background(), mainDir, graph)
+	return graph, warn, note
+}
+
+// writeFixture pins the go environment, writes the stub modules and the main
+// module of fx to a temporary directory and returns the main module's
+// directory.
+func writeFixture(t *testing.T, fx fixture, stubs map[string]stubOpts) string {
+	t.Helper()
 	setGoEnv(t)
 
 	root := t.TempDir()
@@ -114,18 +134,7 @@ func classifyWithNote(t *testing.T, fx fixture, stubs map[string]stubOpts) (*Gra
 	for name, content := range fx.files {
 		write(t, filepath.Join(mainDir, name), content)
 	}
-
-	parsed, err := parser.ParseGoMod(filepath.Join(mainDir, "go.mod"))
-	if err != nil {
-		t.Fatalf("ParseGoMod: %v", err)
-	}
-	graph := &Graph{Root: parsed.ModulePath, Dependencies: make(map[string]*Dependency)}
-	for _, req := range parsed.Requirements {
-		graph.Dependencies[req.Path] = &Dependency{Module: req, Direct: !req.Indirect}
-	}
-
-	warn, note := classifyTestOnlyDeps(context.Background(), mainDir, graph)
-	return graph, warn, note
+	return mainDir
 }
 
 func dep(t *testing.T, g *Graph, name string) *Dependency {

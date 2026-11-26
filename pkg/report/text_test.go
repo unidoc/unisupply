@@ -996,3 +996,54 @@ func TestWriteText_StdlibEntryTags(t *testing.T) {
 		t.Errorf("the stdlib section must not carry the grading note:\n%s", out)
 	}
 }
+
+// TestWriteText_ImportedVia verifies an imported finding names the chain that imports the vulnerable package, in the
+// dependency block and in the stdlib section, and prints nothing without a chain or for another tier.
+func TestWriteText_ImportedVia(t *testing.T) {
+	chain := []string{"example.com/app/cmd/app", "github.com/some/dep", "golang.org/x/net/html"}
+	imported := scanner.Vulnerability{ID: "GO-2026-5025", Severity: "MEDIUM", Reachability: "imported", FixedVersion: "v0.55.0", ImportPath: chain}
+
+	t.Run("dependency block", func(t *testing.T) {
+		out := renderDetailed(imported)
+		want := "  │  Fix available: v0.55.0\n  │  Imported via: example.com/app/cmd/app → github.com/some/dep → golang.org/x/net/html\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+		if strings.Contains(out, "Reached via") {
+			t.Errorf("an imported finding must not print Reached via:\n%s", out)
+		}
+	})
+
+	t.Run("no chain, no line", func(t *testing.T) {
+		v := imported
+		v.ImportPath = nil
+		if out := renderDetailed(v); strings.Contains(out, "Imported via") {
+			t.Errorf("printed Imported via without a chain:\n%s", out)
+		}
+	})
+
+	t.Run("a called finding prints no chain", func(t *testing.T) {
+		v := issue134Vuln()
+		v.ImportPath = chain
+		if out := renderDetailed(v); strings.Contains(out, "Imported via") {
+			t.Errorf("a called finding printed Imported via:\n%s", out)
+		}
+	})
+
+	t.Run("stdlib section", func(t *testing.T) {
+		v := imported
+		v.ID, v.Summary, v.FixedVersion = "GO-2026-4003", "Parser panic in encoding/asn1", "go1.26.3"
+		v.ImportPath = []string{"example.com/app/cmd/app", "encoding/asn1"}
+		out := renderAliasReport(t, aliasReport(), []scanner.Vulnerability{v})
+		want := "    Fixed in: go1.26.3\n    Imported via: example.com/app/cmd/app → encoding/asn1\n"
+		if !strings.Contains(out, want) {
+			t.Errorf("stdlib section missing %q:\n%s", want, out)
+		}
+
+		v.ImportPath = nil
+		out = renderAliasReport(t, aliasReport(), []scanner.Vulnerability{v})
+		if strings.Contains(out, "Imported via") {
+			t.Errorf("stdlib section printed Imported via without a chain:\n%s", out)
+		}
+	})
+}

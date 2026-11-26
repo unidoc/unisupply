@@ -44,6 +44,25 @@ func reachedVia(v *scanner.Vulnerability, sep string) string {
 	return strings.Join(entries, sep)
 }
 
+// maxImportedViaEntries is the most entries importedVia shows. A longer chain keeps its first entry, a cut marker and
+// its last six, the same rule as Vulnerability.CallPath. The JSON report carries the whole chain.
+const maxImportedViaEntries = 8
+
+// importedVia renders the import chain of an imported vulnerability, entries joined by sep, or "" when there is
+// nothing to show: the first entry is the project's own package, the last the vulnerable package. A chain longer than
+// maxImportedViaEntries is cut in the middle ("...").
+func importedVia(v *scanner.Vulnerability, sep string) string {
+	if v.Reachability != "imported" || len(v.ImportPath) == 0 {
+		return ""
+	}
+	chain := v.ImportPath
+	if len(chain) > maxImportedViaEntries {
+		tail := chain[len(chain)-(maxImportedViaEntries-2):]
+		chain = append([]string{chain[0], "..."}, tail...)
+	}
+	return strings.Join(chain, sep)
+}
+
 // calledSymbolsLine renders the vulnerable symbols found called for a
 // vulnerability, or "" when there are fewer than two. With one symbol the line
 // would repeat the last entry of the call path.

@@ -1086,3 +1086,64 @@ func TestWriteJSON_CalledSymbolsTotal(t *testing.T) {
 		t.Errorf("called_symbols_total must be omitted when 0: %s", got.Deps[0].Vulns[1]["called_symbols_total"])
 	}
 }
+
+// TestWriteJSON_ImportPath verifies import_path is emitted for an imported finding, on dependency and standard library
+// entries, and is absent when the chain is empty or the finding is of another tier.
+func TestWriteJSON_ImportPath(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "golang.org/x/net", Version: "v0.53.0", Direct: true})
+	chain := []string{"example.com/app/cmd/app", "golang.org/x/net/html"}
+	withChain := scanner.Vulnerability{ID: "GO-2026-5025", Severity: "MEDIUM", Reachability: "imported", ImportPath: chain}
+	noChain := scanner.Vulnerability{ID: "GO-2026-5026", Severity: "MEDIUM", Reachability: "imported"}
+	ps := &scorer.ProjectScore{
+		OverallScore: 10, OverallLevel: scorer.RiskLow,
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "golang.org/x/net", Version: "v0.53.0", Direct: true, RiskScore: 10, RiskLevel: scorer.RiskLow,
+			Vulns: []scanner.Vulnerability{withChain, noChain},
+		}},
+	}
+	stdlib := []scanner.Vulnerability{
+		{ID: "GO-2026-4003", Severity: "MEDIUM", Reachability: "imported", ImportPath: []string{"example.com/app/cmd/app", "encoding/asn1"}},
+		{ID: "GO-2026-4004", Severity: "MEDIUM", Reachability: "imported"},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26", StdlibVulns: stdlib}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+	var raw struct {
+		Deps []struct {
+			Vulns []json.RawMessage `json:"vulnerabilities"`
+		} `json:"dependencies"`
+		Stdlib []json.RawMessage `json:"stdlib_vulnerabilities"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(raw.Deps) != 1 || len(raw.Deps[0].Vulns) != 2 || len(raw.Stdlib) != 2 {
+		t.Fatalf("want 1 dep with 2 vulns and 2 stdlib vulns:\n%s", buf.String())
+	}
+	compact := func(m json.RawMessage) string {
+		var b bytes.Buffer
+		if err := json.Compact(&b, m); err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		return b.String()
+	}
+	for name, tc := range map[string]struct {
+		raw  json.RawMessage
+		want string // "" means absent
+	}{
+		"dependency with chain":    {raw.Deps[0].Vulns[0], `"import_path":["example.com/app/cmd/app","golang.org/x/net/html"]`},
+		"dependency without chain": {raw.Deps[0].Vulns[1], ""},
+		"stdlib with chain":        {raw.Stdlib[0], `"import_path":["example.com/app/cmd/app","encoding/asn1"]`},
+		"stdlib without chain":     {raw.Stdlib[1], ""},
+	} {
+		got := compact(tc.raw)
+		switch {
+		case tc.want != "" && !strings.Contains(got, tc.want):
+			t.Errorf("%s: JSON missing %s:\n%s", name, tc.want, got)
+		case tc.want == "" && strings.Contains(got, "import_path"):
+			t.Errorf("%s: JSON must not contain import_path:\n%s", name, got)
+		}
+	}
+}
