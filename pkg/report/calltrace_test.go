@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -112,5 +113,42 @@ func TestCalledSymbolsLine(t *testing.T) {
 				t.Errorf("calledSymbolsLine() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCalledSymbolsLabel(t *testing.T) {
+	syms := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("example.com/lib.Sym%02d", i)
+		}
+		return out
+	}
+	tests := []struct {
+		name  string
+		syms  []string
+		total int
+		want  string
+	}{
+		{"cut", syms(20), 153, "Vulnerable symbols called (20 of 153):"},
+		{"total equals the list", syms(5), 5, "Vulnerable symbols called:"},
+		{"no total, as in an analysis stored before the field", syms(5), 0, "Vulnerable symbols called:"},
+		{"total below the list is not a cut", syms(5), 3, "Vulnerable symbols called:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := issue134Vuln()
+			v.CalledSymbols, v.CalledSymbolsTotal = tt.syms, tt.total
+			if got := calledSymbolsLabel(&v); got != tt.want {
+				t.Errorf("calledSymbolsLabel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// The rule for printing the line at all is unchanged: fewer than two symbols print nothing.
+	one := issue134Vuln()
+	one.CalledSymbolsTotal = 153
+	if got := calledSymbolsLine(&one); got != "" {
+		t.Errorf("calledSymbolsLine() with one symbol = %q, want \"\"", got)
 	}
 }

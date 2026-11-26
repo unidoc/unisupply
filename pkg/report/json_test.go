@@ -1047,3 +1047,42 @@ func TestWriteJSON_NoStdlibVulnerabilities(t *testing.T) {
 		})
 	}
 }
+
+// TestWriteJSON_CalledSymbolsTotal verifies called_symbols_total is emitted next to a cut list and omitted when zero (a
+// finding from an analysis stored before the field existed).
+func TestWriteJSON_CalledSymbolsTotal(t *testing.T) {
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "golang.org/x/crypto", Version: "v0.48.0", Direct: true})
+
+	cut := cutSymbolsVuln()
+	plain := issue134Vuln()
+	plain.ID = "GO-2026-5099"
+	plain.CalledSymbols = []string{"a.B", "a.C"}
+	ps := &scorer.ProjectScore{
+		Dependencies: []*scorer.DependencyScore{{
+			Module: "golang.org/x/crypto", Version: "v0.48.0", Direct: true,
+			Vulns: []scanner.Vulnerability{cut, plain},
+		}},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteJSON(graph, ps, JSONOptions{GoVersion: "1.26"}, &buf); err != nil {
+		t.Fatalf("WriteJSON() failed: %v", err)
+	}
+	var got struct {
+		Deps []struct {
+			Vulns []map[string]json.RawMessage `json:"vulnerabilities"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Deps) != 1 || len(got.Deps[0].Vulns) != 2 {
+		t.Fatalf("want 1 dep with 2 vulns, got %+v", got.Deps)
+	}
+	if total := string(got.Deps[0].Vulns[0]["called_symbols_total"]); total != "153" {
+		t.Errorf("called_symbols_total = %q, want 153", total)
+	}
+	if _, ok := got.Deps[0].Vulns[1]["called_symbols_total"]; ok {
+		t.Errorf("called_symbols_total must be omitted when 0: %s", got.Deps[0].Vulns[1]["called_symbols_total"])
+	}
+}

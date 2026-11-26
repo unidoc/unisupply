@@ -127,8 +127,12 @@ func ScanVulnsWithOptions(ctx context.Context, projectDir string, opts VulnScanO
 		parseOpts.info = opts.Info
 	}
 
+	env, inherited := govulncheckEnv(os.Environ(), projectEnv.version)
+	if inherited != "" {
+		warnings = append(warnings, fmt.Sprintf("GOVERSION=%s is set in the environment and differs from the project's Go (%s); standard-library vulnerabilities are matched against %s. Unset GOVERSION to match the project's Go.", inherited, projectEnv.version, inherited))
+	}
 	run := &govulncheckRun{
-		projectDir: projectDir, env: govulncheckEnv(os.Environ(), projectEnv.version),
+		projectDir: projectDir, env: env,
 		parseOpts: parseOpts, projectEnv: projectEnv, projectErr: projectErr, scannerEnv: scannerEnv, scannerErr: scannerErr, opts: opts,
 	}
 	mode := opts.CalledPass

@@ -2,10 +2,12 @@ package report
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/unidoc/unisupply/internal/testutil"
+	"github.com/unidoc/unisupply/pkg/grade"
 	"github.com/unidoc/unisupply/pkg/scanner"
 	"github.com/unidoc/unisupply/pkg/scorer"
 )
@@ -837,7 +839,7 @@ func TestWriteText_StdlibReachedVia(t *testing.T) {
 
 	// The imported advisory is the last entry; nothing may follow its summary
 	// line except the section's closing blank line.
-	idx := strings.Index(out, "GO-2026-4002 Parser panic in encoding/asn1")
+	idx := strings.Index(out, "GO-2026-4002 (MEDIUM) [imported] Parser panic in encoding/asn1")
 	if idx < 0 {
 		t.Fatalf("imported stdlib advisory missing:\n%s", out)
 	}
@@ -847,5 +849,150 @@ func TestWriteText_StdlibReachedVia(t *testing.T) {
 	}
 	if strings.Contains(rest, "Reached via") || strings.Contains(rest, "Vulnerable symbols") {
 		t.Errorf("imported stdlib advisory must not print call evidence:\n%s", rest)
+	}
+}
+
+func cutSymbolsVuln() scanner.Vulnerability {
+	v := issue134Vuln()
+	v.CalledSymbols = make([]string, 20)
+	for i := range v.CalledSymbols {
+		v.CalledSymbols[i] = fmt.Sprintf("example.com/lib.Sym%02d", i)
+	}
+	v.CalledSymbolsTotal = 153
+	return v
+}
+
+// TestWriteText_CalledSymbolsCut verifies the dependency block and the stdlib section both say the symbols list was cut.
+func TestWriteText_CalledSymbolsCut(t *testing.T) {
+	v := cutSymbolsVuln()
+	want := "Vulnerable symbols called (20 of 153): example.com/lib.Sym00, "
+
+	if out := renderDetailed(v); !strings.Contains(out, want) {
+		t.Errorf("dependency block missing %q:\n%s", want, out)
+	}
+
+	out := renderAliasReport(t, aliasReport(), []scanner.Vulnerability{v})
+	section := out[strings.Index(out, "STDLIB VULNERABILITIES"):]
+	if !strings.Contains(section, want) {
+		t.Errorf("stdlib section missing %q:\n%s", want, section)
+	}
+}
+
+const (
+	stdlibIntroNotGraded = "These are in the Go standard library, matched against go1.26.11. " +
+		"Upgrading Go fixes them. They are listed, not graded (use --grade-stdlib to grade them)."
+	stdlibIntroGraded = "These are in the Go standard library, matched against go1.26.11. " +
+		"Upgrading Go fixes them. They are graded as the row stdlib."
+)
+
+func TestStdlibIntro(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		graded  bool
+		want    string
+	}{
+		{"not graded", "go1.26.11", false, stdlibIntroNotGraded},
+		{"graded", "go1.26.11", true, stdlibIntroGraded},
+		{"not graded, no version", "", false, "These are in the Go standard library. " +
+			"Upgrading Go fixes them. They are listed, not graded (use --grade-stdlib to grade them)."},
+		{"graded, no version", "", true, "These are in the Go standard library. " +
+			"Upgrading Go fixes them. They are graded as the row stdlib."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stdlibIntro(tt.version, tt.graded); got != tt.want {
+				t.Errorf("stdlibIntro(%q, %v) = %q, want %q", tt.version, tt.graded, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStdlibGraded(t *testing.T) {
+	if stdlibGraded(nil) || stdlibGraded(&grade.Result{}) {
+		t.Error("no grade, or no rows, is not graded")
+	}
+	if stdlibGraded(&grade.Result{Rows: []grade.RowResult{{Module: "example.com/dep"}}}) {
+		t.Error("a grade without a stdlib row is not graded")
+	}
+	if !stdlibGraded(&grade.Result{Rows: []grade.RowResult{{Module: "example.com/dep"}, {Module: "stdlib"}}}) {
+		t.Error("a stdlib row means graded")
+	}
+}
+
+func renderStdlibText(t *testing.T, version string, g *grade.Result, vulns []scanner.Vulnerability) string {
+	t.Helper()
+	graph := testutil.MakeGraph(testutil.DepSpec{Path: "example.com/vulnerable", Version: "v1.0.0", Direct: true})
+	var buf bytes.Buffer
+	opts := TextOptions{NoColor: true, Writer: &buf, StdlibVulns: vulns, StdlibGoVersion: version, Grade: g}
+	if err := WriteText(graph, aliasReport(), &opts); err != nil {
+		t.Fatalf("WriteText failed: %v", err)
+	}
+	return buf.String()
+}
+
+// TestWriteText_StdlibIntro verifies the stdlib section names the toolchain it was matched against and says whether the
+// entries are graded.
+func TestWriteText_StdlibIntro(t *testing.T) {
+	vulns := stdlibTestVulns()
+	stdlibRow := &grade.Result{Rows: []grade.RowResult{{Module: "stdlib"}}}
+
+	tests := []struct {
+		name    string
+		version string
+		grade   *grade.Result
+		want    string
+	}{
+		{"not graded", "go1.26.11", nil, stdlibIntroNotGraded},
+		{"graded", "go1.26.11", stdlibRow, stdlibIntroGraded},
+		{"no version", "", nil, "These are in the Go standard library. Upgrading Go fixes them."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := renderStdlibText(t, tt.version, tt.grade, vulns)
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output missing %q:\n%s", tt.want, out)
+			}
+			if strings.Contains(out, "These affect the Go standard library") {
+				t.Errorf("the old sentence is still printed:\n%s", out)
+			}
+			if strings.Contains(out, "()") {
+				t.Errorf("an empty version printed an empty parenthesis:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestWriteText_StdlibEntryTags verifies a stdlib entry line carries the severity, the reachability tag and the KEV
+// badge, as a dependency line does.
+func TestWriteText_StdlibEntryTags(t *testing.T) {
+	vulns := []scanner.Vulnerability{
+		{ID: "GO-2026-0001", Summary: "called one", Severity: "HIGH", Reachability: "called"},
+		{ID: "GO-2026-0002", Summary: "imported one", Severity: "MEDIUM", Reachability: "imported"},
+		{ID: "GO-2026-0003", Summary: "required one", Severity: "LOW", Reachability: "required"},
+		{ID: "GO-2026-0004", Summary: "unscored one", Severity: "", Reachability: "imported"},
+		{ID: "GO-2026-0005", Summary: "unknown one", Severity: "UNKNOWN", Reachability: "called"},
+		{ID: "GO-2026-0006", Summary: "exploited one", Severity: "CRITICAL", Reachability: "called", InKEV: true},
+		{ID: "GO-2026-0007", Summary: "exploited imported", Severity: "HIGH", Reachability: "imported", InKEV: true},
+	}
+	out := renderStdlibText(t, "go1.26.11", nil, vulns)
+	for _, want := range []string{
+		"  GO-2026-0001 (HIGH) called one\n",
+		"  GO-2026-0002 (MEDIUM) [imported] imported one\n",
+		"  GO-2026-0003 (LOW) [required] required one\n",
+		"  GO-2026-0004 (UNKNOWN) [imported] unscored one\n",
+		"  GO-2026-0005 (UNKNOWN) unknown one\n",
+		"  GO-2026-0006 (CRITICAL) [KEV] exploited one\n",
+		"  GO-2026-0007 (HIGH) [imported] [KEV] exploited imported\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "[KEV]"); got != 2 {
+		t.Errorf("want [KEV] on the two KEV-listed entries only, got %d:\n%s", got, out)
+	}
+	if strings.Contains(out, "treated as MEDIUM") {
+		t.Errorf("the stdlib section must not carry the grading note:\n%s", out)
 	}
 }

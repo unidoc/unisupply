@@ -33,6 +33,10 @@ type PDFOptions struct {
 	// StdlibVulns are the standard library vulnerabilities, already sorted by
 	// the caller. They are listed in the order given.
 	StdlibVulns []scanner.Vulnerability
+
+	// StdlibGoVersion is the Go release the standard library's advisories were matched against (the scan's Go version, not
+	// the go line of go.mod). Empty leaves it out of the section's introduction.
+	StdlibGoVersion string
 }
 
 // WritePDF generates an enterprise-grade PDF risk report using UniPDF.
@@ -87,7 +91,7 @@ func WritePDF(ctx context.Context, graph *resolver.Graph, ps *scorer.ProjectScor
 
 	if len(opts.StdlibVulns) > 0 {
 		rep.Step("standard library vulnerabilities section")
-		writeStdlibVulnSection(c, opts.StdlibVulns, helvetica, helveticaBold)
+		writeStdlibVulnSection(c, opts.StdlibVulns, opts.StdlibGoVersion, stdlibGraded(opts.Grade), helvetica, helveticaBold)
 	}
 
 	rep.Step("vulnerability ID appendix")
@@ -733,33 +737,39 @@ func addVulnBullets(p *creator.StyledParagraph, v *scanner.Vulnerability, f *gra
 		addBullet(p, "  Reached via: "+via, font)
 	}
 	if syms := calledSymbolsLine(v); syms != "" {
-		addBullet(p, "  Vulnerable symbols called: "+syms, font)
+		addBullet(p, "  "+calledSymbolsLabel(v)+" "+syms, font)
 	}
 }
 
-// writeStdlibVulnSection lists the vulnerabilities in the Go standard library
-// of the project's toolchain, in the order given. They are not part of any
-// dependency's risk score, so they get their own section rather than a
-// dependency block.
-func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, regular, bold *model.PdfFont) {
-	c.NewPage()
-	heading(c, "Standard Library Vulnerabilities", bold)
-
+// stdlibSectionParagraphs builds the section's paragraphs: the introduction, then one per vulnerability (the list can run
+// to dozens of entries, which should not be a single paragraph spanning pages). Building them apart from drawing lets a
+// test read their text without writing a PDF.
+func stdlibSectionParagraphs(c *creator.Creator, vulns []scanner.Vulnerability, version string, graded bool, regular *model.PdfFont) []*creator.StyledParagraph {
 	intro := c.NewStyledParagraph()
 	intro.SetMargins(0, 0, 5, 10)
-	ch := intro.Append("These affect the Go standard library used to build dependencies.")
+	ch := intro.Append(stdlibIntro(version, graded))
 	ch.Style.Font = regular
 	ch.Style.FontSize = 10
-	_ = c.Draw(intro)
+	paragraphs := []*creator.StyledParagraph{intro}
 
-	// One paragraph per vulnerability: the list can run to dozens of entries,
-	// which should not be a single paragraph spanning pages.
 	for i := range vulns {
 		details := c.NewStyledParagraph()
 		details.SetMargins(20, 0, 0, 6)
 		details.SetLineHeight(1.5)
 		addVulnBullets(details, &vulns[i], nil, true, regular)
-		_ = c.Draw(details)
+		paragraphs = append(paragraphs, details)
+	}
+	return paragraphs
+}
+
+// writeStdlibVulnSection lists the vulnerabilities in the Go standard library
+// of the project's toolchain, in the order given. They get their own section
+// rather than a dependency block, and are graded only with --grade-stdlib.
+func writeStdlibVulnSection(c *creator.Creator, vulns []scanner.Vulnerability, version string, graded bool, regular, bold *model.PdfFont) {
+	c.NewPage()
+	heading(c, "Standard Library Vulnerabilities", bold)
+	for _, p := range stdlibSectionParagraphs(c, vulns, version, graded, regular) {
+		_ = c.Draw(p)
 	}
 }
 

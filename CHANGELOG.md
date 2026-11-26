@@ -35,6 +35,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   given for any letter with a deciding row. The text and PDF reports show it next to "Decided by". In Go: `grade.NextStep`
   and `grade.Result.NextStep` (#181).
 
+#### A cut `called_symbols` list says so
+
+- **`called_symbols_total`** (int, on a called finding next to `called_symbols`) is the number of distinct called symbols
+  before the list was cut to its first 20. The list is partial when the total is larger. The text and PDF reports then
+  print "Vulnerable symbols called (20 of N):". A stored analysis made before this field has no total and reads as
+  complete. In Go: `scanner.Vulnerability.CalledSymbolsTotal` (#144).
+
 ### Improvements
 
 #### Grading v2.1 (rules version 3)
@@ -56,6 +63,18 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   need a newer Go" now counts only counted findings. Letters now change on day 14 and day 60 after a fix with no advisory
   change: a service that grades a stored analysis again must do it on a date, not only when an advisory changes (#181).
 
+#### The standard library section and an inherited GOVERSION
+
+- **A `GOVERSION` inherited from the environment that differs from the project's Go now gives a scan warning** naming both
+  versions. The value is kept, as before (the go command ignores `GOVERSION` in its environment, so it is usually a
+  leftover in the shell), and the standard library is matched against it. govulncheck receiving the project's Go as its
+  `GOVERSION` is now pinned by a test (#144).
+- **The standard library section of the text and PDF reports names the Go release the advisories were matched against**
+  and says whether they are graded (`--grade-stdlib`, as the row `stdlib`) or only listed. A text entry shows its severity
+  and reachability like a dependency line, `GO-2026-4002 (MEDIUM) [imported] ...`, plus `[KEV]` when the advisory is on the
+  CISA KEV list. The release is the scan's `go_version`; `report.TextOptions` and `report.PDFOptions` gain
+  `StdlibGoVersion` (#144).
+
 #### Dependencies
 
 - **The workflow parser uses `go.yaml.in/yaml/v3` `v3.0.5` instead of `gopkg.in/yaml.v3` `v3.0.1`**, whose repository is
@@ -66,6 +85,10 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Bug Fixes
 
+- **An empty `GOVERSION=` in the environment no longer sends the standard library scan to the wrong Go.** govulncheck takes
+  the last `GOVERSION` entry and, when it is empty, runs `go env` in the directory unisupply was started from; unisupply
+  counted the empty entry as set and did not add the project's Go, so the standard-library findings could belong to a
+  different Go than the project's. An empty `GOVERSION=` now counts as unset (#144).
 - **A cancelled vulnerability scan no longer takes the host process down.** When the context ended while govulncheck built
   its call graph, golang.org/x/vuln dereferenced nil in a goroutine of its own, which nothing in the scanning process can
   recover, and the process died. govulncheck now runs in a child process of the same executable, so the scan returns a
