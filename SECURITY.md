@@ -66,7 +66,7 @@ boundary we consider "ours".
   `internal/`).
 - Vulnerabilities reachable through the `unisupply` execution surface in
   **bundled dependencies** linked into the released binary — e.g.
-  `golang.org/x/vuln`, `gopkg.in/yaml.v3`, UniPDF, UniChart, and any other
+  `golang.org/x/vuln`, `go.yaml.in/yaml/v3`, UniPDF, UniChart, and any other
   module that ends up in `go.sum`.
 - Vulnerabilities in CI / release infrastructure that affect the integrity of
   released artifacts (`.github/workflows/`, `.github/allowed_signers`,

@@ -19,9 +19,9 @@ This file lists the direct dependencies of UniSupply and their licenses.
 | Module | License |
 |--------|---------|
 | github.com/spf13/pflag | BSD-3-Clause |
+| go.yaml.in/yaml/v3 | MIT and Apache-2.0 |
 | golang.org/x/term | BSD-3-Clause |
 | golang.org/x/vuln | BSD-3-Clause |
-| gopkg.in/yaml.v3 | MIT and Apache-2.0 |
 
 All other indirect dependencies are permissively licensed, including
 github.com/unidoc/unichart (MIT), github.com/unidoc/pkcs7 (MIT),
@@ -40,5 +40,7 @@ go-licenses report github.com/unidoc/unisupply/cmd/unisupply
      only yaml.v3 v3.0.1 ships a NOTICE file — preserved in repo-root NOTICE.
      Update (2026-10-28): go.yaml.in/yaml/v3 v3.0.5 also ships one (pulled in by testify v1.12,
      which github.com/unidoc/unipdf/v5 imports from non-test code) — preserved in repo-root NOTICE.
+     Update (2026-11-21): pkg/parser imports go.yaml.in/yaml/v3 instead of the archived yaml.v3 v3.0.1,
+     which is no longer compiled in (graph-only, via logrus and unichart); its NOTICE entry was removed.
      Non-shipped deps in go.mod (test-only, graph-only) are not in scope.
      CI now enforces this automatically via check-licenses.sh (issue #50). -->

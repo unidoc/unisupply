@@ -120,7 +120,7 @@ for entry in "${MOD_ENTRIES[@]}"; do
   [[ -z "$notice_file" ]] && continue
 
   # The repo NOTICE must contain a single line with both the canonical module
-  # path and version (e.g. "gopkg.in/yaml.v3 v3.0.1"). A same-line match
+  # path and version (e.g. "go.yaml.in/yaml/v3 v3.0.5"). A same-line match
   # catches both missing entries and version drift from upgrades.
   if ! grep -qF "$mod_path $mod_version" "$REPO_NOTICE"; then
     echo "UNCOVERED NOTICE: $mod_path $mod_version ships a NOTICE file not reflected in repo-root NOTICE" >&2

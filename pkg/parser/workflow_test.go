@@ -1080,6 +1080,75 @@ func TestParseWorkflow_Oversized(t *testing.T) {
 	}
 }
 
+// unhashableMergeKeyWorkflow makes gopkg.in/yaml.v3 v3.0.1 panic with "hash of
+// unhashable type []interface {}": once the `on` map has a non-string key, the
+// merge key `<<` inserts the sequence key `[a]` into a Go map.
+// go.yaml.in/yaml/v3 v3.0.5 returns that as an error instead.
+const unhashableMergeKeyWorkflow = `name: x
+on:
+  1: x
+  <<: {? [a] : b}
+`
+
+// TestParseWorkflow_UnhashableMergeKey confirms a workflow whose merge key
+// carries a sequence key is reported as a parse error, not a panic, so a yaml
+// swap or downgrade cannot bring the panic back.
+func TestParseWorkflow_UnhashableMergeKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "merge.yml")
+	if err := os.WriteFile(path, []byte(unhashableMergeKeyWorkflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("ParseWorkflow() panicked: %v", r)
+		}
+	}()
+
+	wf, err := ParseWorkflow(path)
+	if err == nil {
+		t.Fatal("ParseWorkflow() error = nil, want error")
+	}
+	if wf != nil {
+		t.Fatal("ParseWorkflow() returned non-nil Workflow on error")
+	}
+	if !contains(err.Error(), "parsing workflow") {
+		t.Errorf("error message = %q, should contain 'parsing workflow'", err.Error())
+	}
+}
+
+// TestParseAllWorkflows_SkipsUnhashableMergeKey confirms the file above is
+// skipped with a warning and the other workflows in the directory still parse.
+func TestParseAllWorkflows_SkipsUnhashableMergeKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	files := map[string]string{
+		"valid.yml": "name: Valid Workflow\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo valid\n",
+		"merge.yml": unhashableMergeKeyWorkflow,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("ParseAllWorkflows() panicked: %v", r)
+		}
+	}()
+
+	workflows, warnings, err := ParseAllWorkflows(tmpDir)
+	if err != nil {
+		t.Fatalf("ParseAllWorkflows() error: %v", err)
+	}
+	if len(workflows) != 1 || workflows[0].Name != "Valid Workflow" {
+		t.Fatalf("workflows = %v, want only %q", workflows, "Valid Workflow")
+	}
+	if len(warnings) != 1 || !contains(warnings[0], "merge.yml") {
+		t.Errorf("warnings = %q, want one warning naming merge.yml", warnings)
+	}
+}
+
 // containsSubstring checks if s contains substr as a substring.
 func containsSubstring(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {

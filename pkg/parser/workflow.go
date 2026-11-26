@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Workflow represents a parsed GitHub Actions workflow file.
