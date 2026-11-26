@@ -42,6 +42,24 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   print "Vulnerable symbols called (20 of N):". A stored analysis made before this field has no total and reads as
   complete. In Go: `scanner.Vulnerability.CalledSymbolsTotal` (#144).
 
+#### An imported finding names the import chain
+
+- **`import_path`** (list of package import paths, on an `imported` finding) is the shortest chain of imports from one of the
+  project's own packages (the first entry) to the vulnerable package (the last), for example `example.com/app/cmd/app`,
+  `github.com/some/dep`, `golang.org/x/net/html`. It is in `dependencies[].vulnerabilities[]`, `stdlib_vulnerabilities[]` and
+  the stored analysis (`--analysis-out`). It comes from the production package graph (no test files) of `scan.platform`, the
+  union of the `CGO_ENABLED=0` and `=1` listings, taken from the `go list -deps` runs that already classify build membership.
+  Equally short chains are ordered by package path, so the same tree gives the same chain, and when an advisory names several
+  packages the chain leads to the nearest. It is absent with `--direct-only`, when the package listing is unavailable (for
+  example `--offline` with a cold module cache), when the scan's platform is not one of the six listed targets (darwin, linux
+  or windows on amd64 or arm64; for example `GOOS=freebsd`), and on a `called` or `required` finding. Like `reachability` it is
+  static analysis: imports behind custom build tags and plugins are not seen. It does not change the grade, scoring or policy.
+- **The text and PDF reports** print `Imported via:` where a called finding prints `Reached via:`. A chain of more than 8
+  entries is cut to its first entry, `...` and its last six; the JSON keeps the whole chain. The PDF joins the entries with
+  ` > `.
+- **A stored analysis made by v0.9.0** has no `import_path` and grades the same. In Go: `scanner.Vulnerability.ImportPath`
+  (#155).
+
 ### Improvements
 
 #### Grading v2.1 (rules version 3)

@@ -195,6 +195,10 @@ type JSONVuln struct {
 	// with it. A file is relative to its own module's root, so read it together
 	// with the frame's module and version. Set only when Reachability is "called".
 	CallTrace []scanner.CallFrame `json:"call_trace,omitempty"`
+	// ImportPath is the shortest chain of imports from one of the project's
+	// packages (first entry) to the vulnerable package (last entry). Set only
+	// when Reachability is "imported", for the scan's platform.
+	ImportPath []string `json:"import_path,omitempty"`
 	// CalledSymbols lists the vulnerable symbols found called for this
 	// advisory (sorted, at most 20). Set only when Reachability is "called".
 	CalledSymbols []string `json:"called_symbols,omitempty"`
@@ -423,6 +427,7 @@ func toJSONVuln(v *scanner.Vulnerability) JSONVuln {
 		CallPathChecked:     v.CallPathChecked,
 		CallPath:            v.CallPath,
 		CallTrace:           v.CallTrace,
+		ImportPath:          v.ImportPath,
 		CalledSymbols:       v.CalledSymbols,
 		CalledSymbolsTotal:  v.CalledSymbolsTotal,
 		SeveritySource:      v.SeveritySource,

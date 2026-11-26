@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/unidoc/unisupply/pkg/scanner"
@@ -150,5 +151,62 @@ func TestCalledSymbolsLabel(t *testing.T) {
 	one.CalledSymbolsTotal = 153
 	if got := calledSymbolsLine(&one); got != "" {
 		t.Errorf("calledSymbolsLine() with one symbol = %q, want \"\"", got)
+	}
+}
+
+func importedVuln(chain ...string) scanner.Vulnerability {
+	return scanner.Vulnerability{ID: "GO-2026-5025", Severity: "MEDIUM", Reachability: "imported", ImportPath: chain}
+}
+
+func chainOf(n int) []string {
+	chain := make([]string, n)
+	for i := range chain {
+		chain[i] = fmt.Sprintf("example.com/p%02d", i)
+	}
+	return chain
+}
+
+func TestImportedVia(t *testing.T) {
+	called := importedVuln("a", "b", "c")
+	called.Reachability = "called"
+	required := importedVuln("a", "b", "c")
+	required.Reachability = "required"
+
+	tests := []struct {
+		name string
+		v    scanner.Vulnerability
+		sep  string
+		want string
+	}{
+		{"text separator", importedVuln("example.com/app/cmd/app", "github.com/some/dep", "golang.org/x/net/html"), callPathSepText,
+			"example.com/app/cmd/app → github.com/some/dep → golang.org/x/net/html"},
+		{"PDF separator is ASCII", importedVuln("a", "b", "c"), callPathSepPDF, "a > b > c"},
+		{"a single entry", importedVuln("a"), callPathSepText, "a"},
+		{"called finding shows none", called, callPathSepText, ""},
+		{"required finding shows none", required, callPathSepText, ""},
+		{"no chain", importedVuln(), callPathSepText, ""},
+		{"chain of exactly the cap is uncut", importedVuln(chainOf(maxImportedViaEntries)...), callPathSepPDF,
+			strings.Join(chainOf(maxImportedViaEntries), callPathSepPDF)},
+		{"a longer chain keeps the first entry, a cut marker and the last six", importedVuln(chainOf(10)...), callPathSepPDF,
+			strings.Join([]string{"example.com/p00", "...", "example.com/p04", "example.com/p05", "example.com/p06", "example.com/p07", "example.com/p08", "example.com/p09"}, callPathSepPDF)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := importedVia(&tt.v, tt.sep); got != tt.want {
+				t.Errorf("importedVia() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// the cut leaves exactly 8 parts, "..." second
+	parts := strings.Split(importedVia(&[]scanner.Vulnerability{importedVuln(chainOf(10)...)}[0], callPathSepText), callPathSepText)
+	if len(parts) != 8 || parts[1] != "..." {
+		t.Errorf("cut chain = %v, want 8 parts with ... second", parts)
+	}
+	// the finding's own chain is not changed by the cut
+	long := importedVuln(chainOf(10)...)
+	importedVia(&long, callPathSepText)
+	if len(long.ImportPath) != 10 {
+		t.Errorf("importedVia changed ImportPath: %v", long.ImportPath)
 	}
 }

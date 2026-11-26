@@ -145,6 +145,9 @@ func WriteText(graph *resolver.Graph, ps *scorer.ProjectScore, opts *TextOptions
 			if via := reachedVia(v, callPathSepText); via != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Reached via:"), via)
 			}
+			if via := importedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "    %s %s\n", c(colorDim, "Imported via:"), via)
+			}
 			if syms := calledSymbolsLine(v); syms != "" {
 				fmt.Fprintf(w, "    %s %s\n", c(colorDim, calledSymbolsLabel(v)), syms)
 			}
@@ -257,6 +260,9 @@ func writeDependencyDetail(w io.Writer, ds *scorer.DependencyScore, c func(strin
 			}
 			if via := reachedVia(v, callPathSepText); via != "" {
 				fmt.Fprintf(w, "  │  Reached via: %s\n", via)
+			}
+			if via := importedVia(v, callPathSepText); via != "" {
+				fmt.Fprintf(w, "  │  Imported via: %s\n", via)
 			}
 			if syms := calledSymbolsLine(v); syms != "" {
 				fmt.Fprintf(w, "  │  %s %s\n", calledSymbolsLabel(v), syms)

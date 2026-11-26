@@ -51,7 +51,8 @@ type Analysis struct {
 
 	// Vulns are govulncheck's findings by module path, with the standard library's under "stdlib". Reachability is "called",
 	// "imported" or "required" (graph-only); CallPath and CallTrace are set for called findings. When Scan.CalledPass is
-	// "skipped", every reached finding is "imported" and none has a call path.
+	// "skipped", every reached finding is "imported" and none has a call path. An imported finding may carry ImportPath;
+	// an analysis stored before it existed has none, so the schema version did not change.
 	Vulns        map[string][]scanner.Vulnerability `json:"vulnerabilities,omitempty"`
 	VulnWarnings []string                           `json:"vulnerability_warnings,omitempty"`
 	// VulnScan says whether the vulnerability scan ran, and why not when it did not.
@@ -309,6 +310,7 @@ func analyse(ctx context.Context, opts *Options, withIndex bool) (*Analysis, *an
 			rep.Warn("%s", w)
 		}
 		rep.Done("%d standard library advisories", len(vulns["stdlib"]))
+		fillImportPaths(vulns, graph.Packages, scanInfo.Platform)
 		an.Vulns, an.VulnWarnings = vulns, vulnWarnings
 		an.VulnScan = vulnOutcomeOf(vulnScanned, emptyVulnErr)
 		st.vulnErr = emptyVulnErr
@@ -333,6 +335,7 @@ func analyse(ctx context.Context, opts *Options, withIndex bool) (*Analysis, *an
 			rep.Warn("%s", w)
 		}
 		rep.Done("%d affected modules", len(vulns))
+		fillImportPaths(vulns, graph.Packages, scanInfo.Platform)
 		an.Vulns, an.VulnWarnings = vulns, vulnWarnings
 		an.VulnScan = vulnOutcomeOf(vulnScanned, vulnScanErr)
 		st.vulnErr = vulnScanErr
